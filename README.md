@@ -76,48 +76,6 @@ tests/                      # 47 tests, all CPU-only
 └── test_providers_and_finetune.py
 ```
 
-## Architecture overview
-
-```
-                    ┌──────────────┐
-                    │ CIF files or │
-                    │ Protenix     │
-                    │ BaseSingle-  │
-                    │ Dataset      │
-                    └──────┬───────┘
-                           │
-             ┌─────────────▼──────────────┐
-             │ CifFileProvider or         │
-             │ ProtenixComplexProvider     │
-             │   → (atom_array,           │
-             │      token_array,          │
-             │      feature_dict,         │
-             │      label_dict,           │
-             │      binder_selector)      │
-             └─────────────┬──────────────┘
-                           │
-             ┌─────────────▼──────────────┐
-             │ DesignSourceDataset        │
-             │   DesignCropper (640 tok)  │
-             │   DesignFeaturizer         │
-             │     → xpb, conditional_    │
-             │       templ, hotspot, etc  │
-             └─────────────┬──────────────┘
-                           │
-             ┌─────────────▼──────────────┐
-             │ CurriculumMultiDataset     │
-             │ + CurriculumSampler        │
-             │   (stage 1→2 ramp)         │
-             └─────────────┬──────────────┘
-                           │
-             ┌─────────────▼──────────────┐
-             │ PXDesignTrainer            │
-             │   ProtenixDesignTrain      │
-             │   PXDesignLoss (eq. 4)     │
-             │   Adam, lr=5e-4            │
-             │   EMA, DDP, AMP            │
-             └────────────────────────────┘
-```
 
 ## Data providers
 

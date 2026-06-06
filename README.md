@@ -10,13 +10,47 @@ This is the reproduction version, not the original training code. Numbers are ta
 gaps (e.g. exact featurizer behavior for hotspots, target-pair-distance binning) are
 filled in with reasonable choices that the comments call out explicitly.
 
+## Repo layout & setup
+
+Protenix and PXDesign live inside this repo as **git submodules** pinned to
+known-good commits:
+
+```
+PXDesign-train/
+├── Protenix/        # bytedance/Protenix @ c3bfc36 (v2.0.0)        — submodule
+├── PXDesign/        # bytedance/PXDesign @ f78844 + embedders patch — submodule + patch
+├── pxdesign_train/  # this package
+├── patches/
+└── ...
+```
+
+The patch in [`patches/pxdesign-embedders-protenix-2.0.patch`](patches/pxdesign-embedders-protenix-2.0.patch)
+adapts PXDesign's `InputFeatureEmbedder` to Protenix 2.0's new
+`AtomAttentionEncoder(*tensors)` signature (the released PXDesign was built
+against an older Protenix where the encoder accepted `input_feature_dict=...`).
+
+One-shot setup:
+
+```bash
+git clone --recursive https://github.com/guanlueli/PXDesign-train.git
+cd PXDesign-train
+bash scripts/setup.sh        # applies the PXDesign patch
+```
+
+If you forgot `--recursive` on clone:
+
+```bash
+git submodule update --init --recursive
+bash scripts/setup.sh
+```
+
 ## Quick start: fine-tune on your own CIF files
 
 ```bash
-cd proteo-r15/
+cd PXDesign-train/
 LAYERNORM_TYPE=torch \
-PYTHONPATH="Protenix:PXDesign:PXDesign-train" \
-python PXDesign-train/scripts/smoke_test_gpu.py \
+PYTHONPATH="Protenix:PXDesign:." \
+python scripts/smoke_test_gpu.py \
     --cif PXDesign/examples/5o45.cif \
     --binder_chain B \
     --crop_size 200 \
@@ -63,9 +97,13 @@ pxdesign_train/
     └── train.py            # train_from_components entry point
 
 scripts/
+├── setup.sh                # Clone Protenix + PXDesign at the right commits, apply patch
 ├── smoke_test_gpu.py       # One-step GPU end-to-end test with real model
 ├── train_demo.sh           # Training driver template
 └── finetune_demo.sh        # Fine-tuning driver template
+
+patches/
+└── pxdesign-embedders-protenix-2.0.patch   # Adapts PXDesign to Protenix 2.0 API
 
 tests/                      # 47 tests, all CPU-only
 ├── test_train_forward.py   # Loss + heads + noise sampler
@@ -129,10 +167,10 @@ finetune_from_components(
 ## Tests
 
 ```bash
-cd proteo-r15/
+cd PXDesign-train/
 LAYERNORM_TYPE=torch \
-PYTHONPATH="Protenix:PXDesign:PXDesign-train" \
-python -m pytest PXDesign-train/tests/ -v
+PYTHONPATH="Protenix:PXDesign:." \
+python -m pytest tests/ -v
 # 47 passed in ~5s
 ```
 

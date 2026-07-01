@@ -24,14 +24,17 @@ def build(args, device):
     from pxdesign_train.configs.configs_train import training_configs
     from pxdesign_train.runner.trainer import PXDesignTrainer
 
-    provider = CifFileProvider(cif_paths=[args.cif], binder_chain_ids=[args.binder_chain])
+    cifs = args.train_cifs.split(",") if args.train_cifs else [args.cif]
+    chains = args.train_chains.split(",") if args.train_chains else [args.binder_chain]
+    provider = CifFileProvider(cif_paths=cifs, binder_chain_ids=chains)
     src = DesignSourceDataset(
         provider, source_name="cif", crop_size=args.crop_size,
         hotspot_force_zero_prob=0.0,
         aa_mask_mode="time_dependent", aa_mask_min_prob=0.15, aa_mask_max_prob=1.0,
         seed=0,
     )
-    multi = CurriculumMultiDataset(datasets=[src], source_names=["cif"], per_item_weights=[[1.0]])
+    multi = CurriculumMultiDataset(datasets=[src], source_names=["cif"],
+                                   per_item_weights=[[1.0] * len(cifs)])
     schedule = CurriculumSchedule(stage1={"cif": 1.0}, stage2={"cif": 1.0},
                                   stage1_end_step=0, stage2_start_step=0)
     components = TrainerComponents(train_dataset=multi, schedule=schedule,
@@ -57,6 +60,31 @@ def build(args, device):
     configs.loss.align_before_mse = (device.type == "cuda")
     trainer = PXDesignTrainer(configs=configs, components=components, device=device)
     return trainer
+
+
+def make_batch_from_cif(trainer, cif, chain, crop_size):
+    """Featurize one CIF into a device batch using the trainer's own collate."""
+    from pxdesign_train.runner import DesignSourceDataset
+    from pxdesign_train.runner.cif_provider import CifFileProvider
+    from torch.utils.data import DataLoader
+    prov = CifFileProvider(cif_paths=[cif], binder_chain_ids=[chain])
+    ds = DesignSourceDataset(
+        prov, source_name="heldout", crop_size=crop_size, hotspot_force_zero_prob=0.0,
+        aa_mask_mode="time_dependent", aa_mask_min_prob=0.15, aa_mask_max_prob=1.0, seed=0)
+    dl = DataLoader(ds, batch_size=1, collate_fn=trainer.train_dl.collate_fn)
+    return trainer._to_device(next(iter(dl)))
+
+
+@torch.no_grad()
+def eval_aa(trainer, batch, k=10):
+    """Average AA cross-entropy + accuracy on a batch's masked design residues."""
+    ce, acc, frac = [], [], []
+    for _ in range(k):
+        lo = trainer.forward_loss(batch)
+        ce.append(float(lo["aa_ce"])); acc.append(float(lo["aa_acc"]))
+        frac.append(float(lo["aa_mask_frac"]))
+    n = len(ce)
+    return {"aa_ce": sum(ce) / n, "aa_acc": sum(acc) / n, "aa_mask_frac": sum(frac) / n}
 
 
 @torch.no_grad()
@@ -157,8 +185,8 @@ def evaluate(trainer, batch, k_coord=4, sample_steps=8, n_div=6):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cif", required=True)
-    ap.add_argument("--binder_chain", required=True)
+    ap.add_argument("--cif", default="")           # single-structure default; or use --train_cifs
+    ap.add_argument("--binder_chain", default="")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--crop_size", type=int, default=256)
     ap.add_argument("--max_steps", type=int, default=500)
@@ -174,6 +202,12 @@ def main():
     ap.add_argument("--cogen_steps", type=int, default=20)
     ap.add_argument("--coord_eval", action="store_true",
                     help="#4: fine-tune then report fixed-sigma coord MSE (structure-degradation check)")
+    ap.add_argument("--train_cifs", default="", help="comma-separated CIFs for multi-structure training")
+    ap.add_argument("--train_chains", default="", help="comma-separated binder chains (one per train CIF)")
+    ap.add_argument("--heldout_cif", default="")
+    ap.add_argument("--heldout_chain", default="")
+    ap.add_argument("--heldout_eval", action="store_true",
+                    help="#4 Part2: fine-tune on train_cifs, report AA recovery on a train vs held-out structure")
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)
@@ -182,6 +216,30 @@ def main():
     trainer = build(args, device)
     print(f"trainer built {time.time()-t0:.0f}s")
     trainer.load_checkpoint(args.ckpt, params_only=True)
+
+    # ---- #4 Part2: multi-structure train, AA recovery on train vs held-out ----
+    if args.heldout_eval:
+        import json as _json
+        train_cif0 = (args.train_cifs.split(",")[0] if args.train_cifs else args.cif)
+        train_chain0 = (args.train_chains.split(",")[0] if args.train_chains else args.binder_chain)
+        train_batch = make_batch_from_cif(trainer, train_cif0, train_chain0, args.crop_size)
+        held_batch = make_batch_from_cif(trainer, args.heldout_cif, args.heldout_chain, args.crop_size)
+        pre_tr, pre_ho = eval_aa(trainer, train_batch), eval_aa(trainer, held_batch)
+        if args.max_steps > 0:
+            print(f"\n=== fine-tune {args.max_steps} steps on {len(args.train_cifs.split(',')) if args.train_cifs else 1} "
+                  f"structure(s) (input_source={args.aa_input_source}) ===")
+            trainer.run(max_steps=args.max_steps)
+        post_tr, post_ho = eval_aa(trainer, train_batch), eval_aa(trainer, held_batch)
+        print("\n=== AA recovery (aa_acc / aa_ce), pre -> post fine-tune ===")
+        print(f"  TRAIN structure   : acc {pre_tr['aa_acc']:.3f}->{post_tr['aa_acc']:.3f} | "
+              f"ce {pre_tr['aa_ce']:.3f}->{post_tr['aa_ce']:.3f}")
+        print(f"  HELD-OUT structure: acc {pre_ho['aa_acc']:.3f}->{post_ho['aa_acc']:.3f} | "
+              f"ce {pre_ho['aa_ce']:.3f}->{post_ho['aa_ce']:.3f}")
+        with open(args.out, "w") as f:
+            _json.dump({"args": vars(args), "train": {"pre": pre_tr, "post": post_tr},
+                        "heldout": {"pre": pre_ho, "post": post_ho}}, f, indent=2)
+        print(f"saved -> {args.out}\nHELDOUT EVAL OK")
+        return
 
     # ---- #4: fixed-sigma coord eval (structure-degradation check), then exit ----
     if args.coord_eval:

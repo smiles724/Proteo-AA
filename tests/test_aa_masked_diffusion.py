@@ -107,6 +107,33 @@ def test_unmask_counts_sum_to_n():
     assert _unmask_counts(0, 4) == []
 
 
+# ---------- input_source switch (A: s_inputs vs B: diffusion_internal) ----------
+
+def test_config_default_input_source_is_s_inputs():
+    from pxdesign_train.configs.configs_train import training_configs
+    assert training_configs["residue_type"]["input_source"] == "s_inputs"
+
+
+def test_head_builds_and_runs_at_both_input_dims():
+    # A path reads s_inputs (449); B path reads a_token (c_token=768).
+    for c_in in (449, 768):
+        head = DesignResidueTypeHead(c_s=c_in, no_bins=20, use_time=True).eval()
+        x = torch.randn(1, 6, c_in)
+        with torch.no_grad():
+            out = head(x, aa_t=torch.tensor(0.4))
+        assert out.shape == (1, 6, 20)
+        assert torch.isfinite(out).all()
+
+
+def test_a_token_nsample_mean_reduce_contract():
+    # B collapses the diffusion N_sample axis by mean before the head:
+    # a_token [.., N_sample, N_token, c_token] -> [.., N_token, c_token].
+    a = torch.randn(8, 6, 768)  # (N_sample, N_token, c_token)
+    reduced = a.mean(dim=-3)
+    assert reduced.shape == (6, 768)
+    assert torch.allclose(reduced, a.mean(0))
+
+
 def test_iterative_unmask_fills_all_positions():
     torch.manual_seed(0)
     n_token = 12

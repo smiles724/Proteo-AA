@@ -38,7 +38,7 @@ def build(args, device):
                                    train_samples_per_epoch=args.max_steps)
 
     configs = parse_configs(training_configs, arg_str="")
-    configs.residue_type.input_source = "s_inputs"
+    configs.residue_type.input_source = args.aa_input_source
     configs.residue_type.mask_mode = "time_dependent"
     configs.residue_type.mask_min_prob = 0.15
     configs.dtype = args.dtype
@@ -64,60 +64,60 @@ def evaluate(trainer, batch, k_coord=4, sample_steps=8, n_div=6):
     rm.eval()
     feat = batch["input_feature_dict"]
 
-    # --- deterministic AA metrics (s_inputs is sigma-independent) + coord (avg) ---
-    aa = {}
-    coord = {"mse": [], "lddt": [], "distogram": []}
-    for i in range(k_coord):
+    # --- AA metrics + coord, averaged over k forwards.
+    # (s_inputs AA is deterministic; diffusion_internal AA is sigma/sample-noisy,
+    #  so averaging matters there.)
+    acc = {"aa_ce": [], "aa_acc": [], "aa_mask_frac": [], "mse": [], "lddt": [], "distogram": []}
+    for _ in range(k_coord):
         lo = trainer.forward_loss(batch)
-        if i == 0:
-            aa = {"aa_ce": float(lo["aa_ce"]), "aa_acc": float(lo["aa_acc"]),
-                  "aa_mask_frac": float(lo["aa_mask_frac"])}
-        for kk in coord:
-            coord[kk].append(float(lo[kk]))
-    coord = {kk: sum(v) / len(v) for kk, v in coord.items()}
+        for kk in acc:
+            acc[kk].append(float(lo[kk]))
+    out = {kk: sum(v) / len(v) for kk, v in acc.items()}
 
-    # --- sampler: recovery + trajectory (greedy) ---
-    dtm = feat["design_token_mask"]
-    while dtm.dim() > 1:
-        dtm = dtm.squeeze(0)
-    dtm = dtm.bool()
-    sampled, traj = sample_residue_types(rm, feat, dtm, n_steps=sample_steps, temperature=0.0)
-    ac = feat.get("aa_clean")
-    while ac is not None and ac.dim() > 1:
-        ac = ac.squeeze(0)
-    recovery = None
-    if ac is not None:
-        valid = dtm & (ac != -100).to(dtm.device)
-        if valid.any():
-            recovery = float((sampled[valid].cpu() == ac[valid].cpu()).float().mean())
+    # --- sampler (s_inputs cheap path only; internal needs a coord forward) ---
+    sampler_out = {"sampler_recovery": None, "sampler_mask_frac_traj": None,
+                   "sampler_mean_conf": None, "sampler_mean_entropy": None,
+                   "seq_unique_frac": None, "seq_mean_pos_entropy": None}
+    try:
+        dtm = feat["design_token_mask"]
+        while dtm.dim() > 1:
+            dtm = dtm.squeeze(0)
+        dtm = dtm.bool()
+        sampled, traj = sample_residue_types(rm, feat, dtm, n_steps=sample_steps, temperature=0.0)
+        ac = feat.get("aa_clean")
+        while ac is not None and ac.dim() > 1:
+            ac = ac.squeeze(0)
+        if ac is not None:
+            valid = dtm & (ac != -100).to(dtm.device)
+            if valid.any():
+                sampler_out["sampler_recovery"] = float(
+                    (sampled[valid].cpu() == ac[valid].cpu()).float().mean())
+        seqs = []
+        for _ in range(n_div):
+            s, _ = sample_residue_types(rm, feat, dtm, n_steps=sample_steps, temperature=1.0)
+            seqs.append(tuple(s[dtm].cpu().tolist()))
+        import math
+        from collections import Counter
+        uniq_frac = len(set(seqs)) / len(seqs) if seqs else 0.0
+        ent = 0.0
+        if dtm.sum().item() and seqs:
+            cols = list(zip(*seqs))
+            for col in cols:
+                c = Counter(col); tot = len(col)
+                ent += -sum((n / tot) * math.log(n / tot) for n in c.values())
+            ent /= len(cols)
+        sampler_out.update(
+            sampler_recovery=sampler_out["sampler_recovery"],
+            sampler_mask_frac_traj=[round(d["mask_frac"], 3) for d in traj],
+            sampler_mean_conf=round(sum(d["mean_conf"] for d in traj) / len(traj), 3) if traj else None,
+            sampler_mean_entropy=round(sum(d["mean_entropy"] for d in traj) / len(traj), 3) if traj else None,
+            seq_unique_frac=round(uniq_frac, 3),
+            seq_mean_pos_entropy=round(ent, 3),
+        )
+    except NotImplementedError:
+        sampler_out["sampler_note"] = "skipped (input_source=diffusion_internal needs a coord forward)"
 
-    # --- diversity: N stochastic samples over design positions ---
-    seqs = []
-    for _ in range(n_div):
-        s, _ = sample_residue_types(rm, feat, dtm, n_steps=sample_steps, temperature=1.0)
-        seqs.append(tuple(s[dtm].cpu().tolist()))
-    uniq_frac = len(set(seqs)) / len(seqs) if seqs else 0.0
-    # per-position entropy across samples
-    import math
-    npos = dtm.sum().item()
-    ent = 0.0
-    if npos and seqs:
-        cols = list(zip(*seqs))
-        for col in cols:
-            from collections import Counter
-            c = Counter(col); tot = len(col)
-            ent += -sum((n / tot) * math.log(n / tot) for n in c.values())
-        ent /= len(cols)
-
-    return {
-        **aa, **coord,
-        "sampler_recovery": recovery,
-        "sampler_mask_frac_traj": [round(d["mask_frac"], 3) for d in traj],
-        "sampler_mean_conf": round(sum(d["mean_conf"] for d in traj) / len(traj), 3) if traj else None,
-        "sampler_mean_entropy": round(sum(d["mean_entropy"] for d in traj) / len(traj), 3) if traj else None,
-        "seq_unique_frac": round(uniq_frac, 3),
-        "seq_mean_pos_entropy": round(ent, 3),
-    }
+    return {**out, **sampler_out}
 
 
 def main():
@@ -130,6 +130,8 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--dtype", default="bf16")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--aa_input_source", default="s_inputs",
+                    choices=["s_inputs", "diffusion_internal"])
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)

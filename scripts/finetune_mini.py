@@ -35,7 +35,7 @@ def build(args, device):
     schedule = CurriculumSchedule(stage1={"cif": 1.0}, stage2={"cif": 1.0},
                                   stage1_end_step=0, stage2_start_step=0)
     components = TrainerComponents(train_dataset=multi, schedule=schedule,
-                                   train_samples_per_epoch=args.max_steps)
+                                   train_samples_per_epoch=max(1, args.max_steps))
 
     configs = parse_configs(training_configs, arg_str="")
     configs.residue_type.input_source = args.aa_input_source
@@ -57,6 +57,39 @@ def build(args, device):
     configs.loss.align_before_mse = (device.type == "cuda")
     trainer = PXDesignTrainer(configs=configs, components=components, device=device)
     return trainer
+
+
+@torch.no_grad()
+def eval_coord_fixed_sigma(trainer, batch, sigmas=(1.0, 4.0, 16.0), n_seed=16):
+    """Clean coordinate quality: denoise the GT structure at FIXED sigma over
+    n_seed noise draws and report masked MSE per sigma. Removes the random-sigma
+    noise that made earlier coord comparisons meaningless, so B (gradient into
+    the trunk) vs s_inputs can be compared for structure degradation."""
+    from protenix.model.protenix import update_input_feature_dict
+    from protenix.model.utils import centre_random_augmentation
+    rm = trainer.raw_model
+    rm.eval()
+    feat = dict(batch["input_feature_dict"])
+    label = batch["label_dict"]
+    feat = rm.diffusion_module.diffusion_conditioning.relpe.generate_relp(feat)
+    feat = update_input_feature_dict(feat)
+    s_inputs, s, z = rm.get_condition_embedding(feat)
+    gt = label["coordinate"]
+    cmask = label["coordinate_mask"]
+    batch_shape = gt.shape[:-2]
+    device, dtype = gt.device, s_inputs.dtype
+    out = {}
+    for sig in sigmas:
+        x_aug = centre_random_augmentation(gt, N_sample=n_seed, mask=cmask).to(dtype)
+        sigma = torch.full((*batch_shape, n_seed), float(sig), device=device, dtype=dtype)
+        x_noisy = x_aug + torch.randn_like(x_aug) * sigma[..., None, None]
+        x_den = rm.diffusion_module(
+            x_noisy=x_noisy, t_hat_noise_level=sigma, input_feature_dict=feat,
+            s_inputs=s_inputs, s_trunk=s, z_trunk=z, pair_z=None, p_lm=None, c_l=None)
+        se = ((x_den - x_aug) ** 2).sum(-1)          # [.., n_seed, N_atom]
+        m = cmask.unsqueeze(-2)                        # [.., 1, N_atom]
+        out[float(sig)] = float((se * m).sum() / m.expand_as(se).sum().clamp_min(1))
+    return out
 
 
 @torch.no_grad()
@@ -139,6 +172,8 @@ def main():
     ap.add_argument("--cogenerate", action="store_true",
                     help="Run #3 joint sequence-structure co-generation from noise (no fine-tune)")
     ap.add_argument("--cogen_steps", type=int, default=20)
+    ap.add_argument("--coord_eval", action="store_true",
+                    help="#4: fine-tune then report fixed-sigma coord MSE (structure-degradation check)")
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)
@@ -147,6 +182,24 @@ def main():
     trainer = build(args, device)
     print(f"trainer built {time.time()-t0:.0f}s")
     trainer.load_checkpoint(args.ckpt, params_only=True)
+
+    # ---- #4: fixed-sigma coord eval (structure-degradation check), then exit ----
+    if args.coord_eval:
+        import json as _json
+        batch = trainer._to_device(next(iter(trainer.train_dl)))
+        pre = eval_coord_fixed_sigma(trainer, batch)
+        if args.max_steps > 0:
+            print(f"\n=== fine-tune {args.max_steps} steps (input_source={args.aa_input_source}, "
+                  f"grad_scale={args.trunk_grad_scale}) ===")
+            trainer.run(max_steps=args.max_steps)
+        post = eval_coord_fixed_sigma(trainer, batch)
+        print("\n=== fixed-sigma coord MSE (pre -> post fine-tune) ===")
+        for sig in sorted(pre):
+            print(f"  sigma={sig:>5}: {pre[sig]:.4f} -> {post[sig]:.4f}")
+        with open(args.out, "w") as f:
+            _json.dump({"args": vars(args), "pre": pre, "post": post}, f, indent=2)
+        print(f"saved -> {args.out}\nCOORD EVAL OK")
+        return
 
     # ---- #3: joint co-generation from noise (structure + sequence), then exit ----
     if args.cogenerate:

@@ -134,6 +134,12 @@ def test_featurizer_basic_shapes(synthetic_complex):
     assert new_feat["design_token_mask"].sum().item() == n_b
     assert new_feat["condition_token_mask"].sum().item() == n_a
     assert new_feat["design_token_mask"].shape == (n_token,)
+    assert new_feat["aa_clean"].shape == (n_token,)
+    assert new_feat["aa_loss_mask"].shape == (n_token,)
+    assert new_feat["aa_corrupted"].shape == (n_token,)
+    assert new_feat["aa_corruption_mask"].shape == (n_token,)
+    assert new_feat["aa_t"].shape == ()
+    assert new_feat["aa_mask_prob"].shape == ()
 
 
 def test_featurizer_conditional_templ(synthetic_complex):
@@ -207,3 +213,57 @@ def test_featurizer_msa_leakage_masked(synthetic_complex):
     # profile is [N_token, 32] and masked along the token axis.
     assert (new_feat["profile"][design] == 0).all()
     assert (new_feat["profile"][~design] == 1).all()
+
+
+def test_featurizer_preserves_clean_aa_targets_without_leakage(synthetic_complex):
+    from pxdesign_train.data import DesignFeaturizer, DesignSelection
+
+    aa, feat, lbl, n_a, n_b = synthetic_complex
+    selection = DesignSelection(
+        binder_chain_id="B",
+        hotspot_force_zero_prob=0.0,
+        rng=np.random.default_rng(0),
+    )
+    new_feat, _, _ = DesignFeaturizer(selection).transform(aa, feat, lbl)
+
+    design = new_feat["design_token_mask"].bool()
+    # Synthetic binder residues are GLY, index 7 in the 20-AA vocabulary.
+    assert torch.all(new_feat["aa_clean"][design] == 7)
+    assert torch.all(new_feat["aa_loss_mask"][design] == 1)
+    assert torch.all(new_feat["aa_loss_mask"][~design] == 0)
+    assert torch.all(new_feat["aa_corruption_mask"][design] == 1)
+    assert torch.all(new_feat["aa_corruption_mask"][~design] == 0)
+
+    # Model input still sees xpb for binder/design residues, not clean GLY.
+    assert torch.all(new_feat["restype"][design].argmax(dim=-1) == 32)
+
+
+def test_featurizer_partial_aa_corruption_masks_only_selected_design_tokens(synthetic_complex):
+    from pxdesign_train.data import DesignFeaturizer, DesignSelection
+
+    aa, feat, lbl, n_a, n_b = synthetic_complex
+    selection = DesignSelection(
+        binder_chain_id="B",
+        hotspot_force_zero_prob=0.0,
+        aa_mask_mode="fixed",
+        aa_mask_prob=0.5,
+        rng=np.random.default_rng(1),
+    )
+    new_feat, _, _ = DesignFeaturizer(selection).transform(aa, feat, lbl)
+
+    design = new_feat["design_token_mask"].bool()
+    corrupt = new_feat["aa_corruption_mask"].bool()
+    uncorrupt_design = design & ~corrupt
+
+    assert torch.all(corrupt <= design)
+    assert 0 < corrupt.sum().item() < n_b
+    assert torch.equal(new_feat["aa_loss_mask"].bool(), corrupt)
+    assert torch.isclose(new_feat["aa_t"], torch.tensor(0.5))
+    assert torch.isclose(new_feat["aa_mask_prob"], torch.tensor(0.5))
+
+    # Corrupted design tokens are xpb; uncorrupted design tokens may condition on
+    # their clean AA. Synthetic residues are all GLY, index 7.
+    restype_idx = new_feat["restype"].argmax(dim=-1)
+    assert torch.all(restype_idx[corrupt] == 32)
+    assert torch.all(restype_idx[uncorrupt_design] == 7)
+    assert torch.all(restype_idx[~design] == 7)

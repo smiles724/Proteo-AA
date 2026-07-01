@@ -155,3 +155,76 @@ def test_design_diffusion_distogram_head_shape():
     out = head(tokens)
     assert out.shape == (1, 12, 12, 64)
     assert torch.allclose(out, out.transpose(-2, -3), atol=1e-5)
+
+
+def test_design_residue_type_head_shape():
+    from pxdesign_train.heads import DesignResidueTypeHead
+
+    head = DesignResidueTypeHead(c_s=384, no_bins=20)
+    tokens = torch.randn(2, 12, 384)
+    out = head(tokens)
+    assert out.shape == (2, 12, 20)
+
+
+def test_masked_aa_loss_backprops_and_ignores_unmasked():
+    from pxdesign_train.loss import PXDesignLoss
+
+    batch = _fake_batch()
+    loss_mod = PXDesignLoss(align_before_mse=False, weight_aa=1.0)
+    n_token = batch["n_token"]
+    aa_logits = torch.randn(1, n_token, 20, requires_grad=True)
+    aa_clean = torch.full((1, n_token), -100, dtype=torch.long)
+    aa_loss_mask = torch.zeros(1, n_token, dtype=torch.long)
+    aa_clean[0, 0] = 7
+    aa_clean[0, 3] = 11
+    aa_loss_mask[0, 0] = 1
+    aa_loss_mask[0, 3] = 1
+
+    out = loss_mod(
+        pred_coordinate=batch["pred"],
+        gt_coordinate_aug=batch["gt_aug"],
+        sigma=batch["sigma"],
+        coordinate_mask=batch["coord_mask"],
+        rep_atom_mask=batch["rep_atom_mask"],
+        aa_logits=aa_logits,
+        aa_clean=aa_clean,
+        aa_loss_mask=aa_loss_mask,
+    )
+
+    assert torch.isfinite(out["loss"])
+    assert out["aa_ce"].item() > 0
+    assert 0.0 <= out["aa_acc"].item() <= 1.0
+    assert torch.isclose(out["aa_mask_frac"], torch.tensor(2.0 / n_token))
+    out["loss"].backward()
+    assert aa_logits.grad is not None
+    assert torch.isfinite(aa_logits.grad).all()
+
+
+def test_masked_aa_loss_handles_no_valid_mask():
+    from pxdesign_train.loss import PXDesignLoss
+
+    batch = _fake_batch()
+    loss_mod = PXDesignLoss(align_before_mse=False, weight_aa=1.0)
+    n_token = batch["n_token"]
+    aa_logits = torch.randn(1, n_token, 20, requires_grad=True)
+    aa_clean = torch.full((1, n_token), -100, dtype=torch.long)
+    aa_loss_mask = torch.zeros(1, n_token, dtype=torch.long)
+
+    out = loss_mod(
+        pred_coordinate=batch["pred"],
+        gt_coordinate_aug=batch["gt_aug"],
+        sigma=batch["sigma"],
+        coordinate_mask=batch["coord_mask"],
+        rep_atom_mask=batch["rep_atom_mask"],
+        aa_logits=aa_logits,
+        aa_clean=aa_clean,
+        aa_loss_mask=aa_loss_mask,
+    )
+
+    assert torch.isfinite(out["loss"])
+    assert out["aa_ce"].item() == 0.0
+    assert out["aa_acc"].item() == 0.0
+    assert out["aa_mask_frac"].item() == 0.0
+    out["loss"].backward()
+    assert aa_logits.grad is not None
+    assert torch.all(aa_logits.grad == 0)

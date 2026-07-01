@@ -165,6 +165,13 @@ class PXDesignTrainer:
             weight_mse=loss_cfg.weight_mse,
             weight_lddt=loss_cfg.weight_lddt,
             weight_disto=loss_cfg.weight_disto,
+            weight_aa=getattr(loss_cfg, "weight_aa", 0.0),
+            aa_ignore_index=getattr(
+                getattr(self.configs, "residue_type", object()),
+                "ignore_index",
+                -100,
+            ),
+            aa_time_weighting=bool(getattr(loss_cfg, "aa_time_weighting", False)),
             sigma_low_threshold=loss_cfg.sigma_low_threshold,
             no_bins=loss_cfg.no_bins,
             min_bin=loss_cfg.min_bin,
@@ -267,6 +274,10 @@ class PXDesignTrainer:
             coordinate_mask=batch["label_dict"]["coordinate_mask"],
             rep_atom_mask=rep_atom_mask,
             distogram_logits=out.get("distogram_logits"),
+            aa_logits=out.get("aa_logits"),
+            aa_clean=batch["input_feature_dict"].get("aa_clean"),
+            aa_loss_mask=batch["input_feature_dict"].get("aa_loss_mask"),
+            aa_t=batch["input_feature_dict"].get("aa_t"),
         )
         return loss_out
 

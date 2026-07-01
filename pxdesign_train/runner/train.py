@@ -73,8 +73,14 @@ def main() -> None:
         from protenix.config.config import parse_configs
 
         configs = parse_configs(training_configs, arg_str='')
-        afdb_ds = DesignSourceDataset(my_afdb_provider, source_name='afdb')
-        pdb_ds  = DesignSourceDataset(my_pdb_provider,  source_name='pdb')
+        # IMPORTANT: forward the residue-type masking config, otherwise
+        # DesignSourceDataset defaults to aa_mask_mode='all' (V1) and the
+        # time_dependent masked-diffusion schedule in configs is silently ignored.
+        rt = configs.residue_type
+        aa_kw = dict(aa_mask_mode=rt.mask_mode, aa_mask_prob=rt.mask_prob,
+                     aa_mask_min_prob=rt.mask_min_prob, aa_mask_max_prob=rt.mask_max_prob)
+        afdb_ds = DesignSourceDataset(my_afdb_provider, source_name='afdb', **aa_kw)
+        pdb_ds  = DesignSourceDataset(my_pdb_provider,  source_name='pdb', **aa_kw)
         multi = CurriculumMultiDataset(
             datasets=[afdb_ds, pdb_ds],
             source_names=['afdb', 'pdb'],

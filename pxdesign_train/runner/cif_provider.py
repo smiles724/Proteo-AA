@@ -23,7 +23,14 @@ Usage:
         cif_paths=["target1.cif", "target2.cif"],
         binder_chain_ids=["B", "C"],         # one per CIF
     )
-    src = DesignSourceDataset(provider, source_name="my_targets", crop_size=640)
+    # Forward the masking config so the AA head trains under the intended
+    # schedule; the default is aa_mask_mode='all' (V1).
+    rt = configs.residue_type
+    src = DesignSourceDataset(
+        provider, source_name="my_targets", crop_size=640,
+        aa_mask_mode=rt.mask_mode, aa_mask_prob=rt.mask_prob,
+        aa_mask_min_prob=rt.mask_min_prob, aa_mask_max_prob=rt.mask_max_prob,
+    )
 """
 from __future__ import annotations
 

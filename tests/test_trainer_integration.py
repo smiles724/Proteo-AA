@@ -127,6 +127,7 @@ class _FakeModel(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1))
         # A small head to produce distogram logits from a per-token learnable.
         self.dist_proj = nn.Linear(1, n_bins)
+        self.aa_proj = nn.Linear(1, 20)
         self.n_bins = n_bins
         # Match the sigma_data the real model uses.
         self.training_noise_sampler_sigma = 16.0
@@ -143,11 +144,14 @@ class _FakeModel(nn.Module):
         tok_feat = torch.zeros(*gt.shape[:-2], N_token, 1)
         logits = self.dist_proj(tok_feat)
         logits = logits.unsqueeze(-2).expand(*gt.shape[:-2], N_token, N_token, self.n_bins).contiguous()
+        aa_logits = self.aa_proj(tok_feat)
         return {
             "x_gt_aug": x_gt_aug,
             "x_denoised": x_denoised,
             "sigma": sigma,
             "distogram_logits": logits,
+            "aa_logits": aa_logits,
+            "h_res_candidate": tok_feat,
         }
 
 
@@ -219,12 +223,15 @@ def _make_trainer(monkeypatch, n_items=3):
             weight_mse = 4.0
             weight_lddt = 1.0
             weight_disto = 0.03
+            weight_aa = 0.0
             sigma_low_threshold = 4.0
             no_bins = 64
             min_bin = 2.3125
             max_bin = 21.6875
             lddt_radius = 15.0
             align_before_mse = False
+        class residue_type:
+            ignore_index = -100
 
     return PXDesignTrainer(
         configs=_Cfg(),
@@ -243,6 +250,10 @@ def test_trainer_single_step_runs(monkeypatch):
     assert "hotspot" in feat
     assert "plddt" in feat
     assert "design_token_mask" in feat
+    assert "aa_clean" in feat
+    assert "aa_loss_mask" in feat
+    assert "aa_corruption_mask" in feat
+    assert "aa_t" in feat
     assert batch["source_name"] in ("a", "b")
     # The cropped complex should be <= crop_size in tokens.
     assert feat["restype"].shape[0] <= 20
@@ -296,3 +307,17 @@ def test_trainer_grad_accum_does_not_advance_step(monkeypatch):
         assert trainer.step == 0  # no optimizer step yet
     trainer.train_step(batch)
     assert trainer.step == 1     # update on the 4th micro-batch
+
+
+def test_trainer_masked_aa_head_gets_gradients(monkeypatch):
+    trainer = _make_trainer(monkeypatch)
+    trainer.loss_fn.weight_aa = 1.0
+    batch = next(iter(trainer.train_dl))
+    pre = trainer.model.aa_proj.bias.detach().clone()
+    loss_out = trainer.train_step(batch)
+    post = trainer.model.aa_proj.bias.detach().clone()
+
+    assert "aa_ce" in loss_out and loss_out["aa_ce"].item() > 0
+    assert "aa_acc" in loss_out
+    assert loss_out["aa_mask_frac"].item() > 0
+    assert not torch.allclose(pre, post), "expected AA head to update"

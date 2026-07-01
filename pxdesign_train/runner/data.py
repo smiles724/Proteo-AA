@@ -75,6 +75,9 @@ class DesignSourceDataset(Dataset):
         crop_size: token budget for `DesignCropper`. Per the report this is 640.
         hotspot_radius / hotspot_max_frac / hotspot_force_zero_prob: forwarded
             to `DesignSelection`. See `featurizer.py` for semantics.
+        aa_mask_mode / aa_mask_prob / aa_mask_min_prob / aa_mask_max_prob:
+            forwarded to `DesignSelection` for V1 all-mask or V2 partial
+            residue identity corruption.
         seed: base seed; combined with index per call to keep the RNG
             deterministic for a given (epoch, index) without per-epoch state.
     """
@@ -85,6 +88,10 @@ class DesignSourceDataset(Dataset):
     hotspot_radius: float = 8.0
     hotspot_max_frac: float = 0.5
     hotspot_force_zero_prob: float = 0.2
+    aa_mask_mode: str = "all"
+    aa_mask_prob: float = 1.0
+    aa_mask_min_prob: float = 0.0
+    aa_mask_max_prob: float = 1.0
     seed: int = 0
     _cropper: DesignCropper = field(init=False)
 
@@ -115,6 +122,10 @@ class DesignSourceDataset(Dataset):
             hotspot_radius=self.hotspot_radius,
             hotspot_max_frac=self.hotspot_max_frac,
             hotspot_force_zero_prob=self.hotspot_force_zero_prob,
+            aa_mask_mode=self.aa_mask_mode,
+            aa_mask_prob=self.aa_mask_prob,
+            aa_mask_min_prob=self.aa_mask_min_prob,
+            aa_mask_max_prob=self.aa_mask_max_prob,
             rng=rng,
         )
         new_feat, new_label, new_aa = DesignFeaturizer(selection).transform(

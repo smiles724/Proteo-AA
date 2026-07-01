@@ -44,7 +44,11 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from pxdesign.data.constants import RES_ATOMS_DICT, STD_RESIDUES_WITH_GAP
+from pxdesign.data.constants import (
+    PRO_STD_RESIDUES_NATURAL,
+    RES_ATOMS_DICT,
+    STD_RESIDUES_WITH_GAP,
+)
 
 # Vendored copies of three small PXDesign helpers — see `_helpers.py` for why.
 from pxdesign_train.data._helpers import (
@@ -56,6 +60,7 @@ from pxdesign_train.data._helpers import (
 XPB_BACKBONE_ATOM_NAMES = ("N", "CA", "C", "O")  # 4 backbone atoms per report p. 23
 DEFAULT_HOTSPOT_RADIUS = 8.0   # Å, Cα-Cα interface cutoff
 DEFAULT_HOTSPOT_MAX_FRAC = 0.5  # at most half of contact residues get marked
+AA_IGNORE_INDEX = -100
 
 
 @dataclass
@@ -85,6 +90,10 @@ class DesignSelection:
     hotspot_radius: float = DEFAULT_HOTSPOT_RADIUS
     hotspot_max_frac: float = DEFAULT_HOTSPOT_MAX_FRAC
     hotspot_force_zero_prob: float = 0.2
+    aa_mask_mode: str = "all"
+    aa_mask_min_prob: float = 0.0
+    aa_mask_max_prob: float = 1.0
+    aa_mask_prob: float = 1.0
     rng: Optional[np.random.Generator] = None
 
     def __post_init__(self):
@@ -93,6 +102,18 @@ class DesignSelection:
             raise ValueError(
                 "DesignSelection requires exactly one of binder_chain_id or binder_atom_mask"
             )
+        valid_modes = {"all", "none", "fixed", "time_dependent"}
+        if self.aa_mask_mode not in valid_modes:
+            raise ValueError(f"aa_mask_mode must be one of {sorted(valid_modes)}")
+        for name, value in (
+            ("aa_mask_min_prob", self.aa_mask_min_prob),
+            ("aa_mask_max_prob", self.aa_mask_max_prob),
+            ("aa_mask_prob", self.aa_mask_prob),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
+        if self.aa_mask_min_prob > self.aa_mask_max_prob:
+            raise ValueError("aa_mask_min_prob cannot exceed aa_mask_max_prob")
 
     def get_rng(self) -> np.random.Generator:
         return self.rng if self.rng is not None else np.random.default_rng()
@@ -140,20 +161,40 @@ class DesignFeaturizer:
         if not binder_atom_mask.any():
             raise ValueError("DesignFeaturizer selection produced an empty binder mask")
 
-        # 1. Mark binder residues as xpb on the AtomArray. Note: this is *before*
+        # 1. Preserve clean AA labels before turning binder residues into xpb.
+        #    These labels are supervision targets only, not model inputs.
+        aa_clean = self._compute_clean_aa_labels(atom_array, feature_dict)
+        clean_restype = self._compute_restype(atom_array, feature_dict)
+
+        # 2. Mark binder residues as xpb on the AtomArray. Note: this is *before*
         #    computing restype, so the new restype one-hot reflects the design.
         atom_array = self._mark_as_xpb(atom_array, binder_atom_mask)
 
-        # 2. Widen + recompute restype using PXDesign's canonical-sequence mapper.
+        # 3. Widen + recompute restype using PXDesign's canonical-sequence mapper.
         feature_dict = dict(feature_dict)  # shallow copy
-        feature_dict["restype"] = self._compute_restype(atom_array, feature_dict)
+        xpb_restype = self._compute_restype(atom_array, feature_dict)
 
-        # 3. Token-level masks: which tokens are design tokens.
+        # 4. Token-level masks: which tokens are design tokens.
         token_is_design = self._token_level_mask(atom_array, feature_dict, binder_atom_mask)
+        aa_corruption_mask, aa_t, aa_mask_prob = self._sample_aa_corruption_mask(
+            token_is_design=token_is_design,
+            aa_clean=aa_clean,
+        )
+        feature_dict["restype"] = torch.where(
+            aa_corruption_mask[:, None],
+            xpb_restype,
+            clean_restype,
+        )
         feature_dict["design_token_mask"] = token_is_design.long()
         feature_dict["condition_token_mask"] = (~token_is_design).long()
+        feature_dict["aa_clean"] = aa_clean
+        feature_dict["aa_corrupted"] = feature_dict["restype"].argmax(dim=-1).long()
+        feature_dict["aa_corruption_mask"] = aa_corruption_mask.long()
+        feature_dict["aa_loss_mask"] = aa_corruption_mask.long()
+        feature_dict["aa_t"] = aa_t
+        feature_dict["aa_mask_prob"] = aa_mask_prob
 
-        # 4. Conditional template (binned pair distances on target residues, GT).
+        # 5. Conditional template (binned pair distances on target residues, GT).
         templ_feats = get_condition_template_feature(
             atom_array=atom_array,
             coordinate_attribute="coord",         # use GT coords at train time
@@ -162,7 +203,7 @@ class DesignFeaturizer:
         )
         feature_dict.update(templ_feats)
 
-        # 5. Hotspot mask: per-token binary, only on target residues that
+        # 6. Hotspot mask: per-token binary, only on target residues that
         #    contact the binder. Stochastic — see DesignSelection docstring.
         feature_dict["hotspot"] = self._sample_hotspot(
             atom_array=atom_array,
@@ -171,12 +212,12 @@ class DesignFeaturizer:
             token_is_design=token_is_design,
         )
 
-        # 6. pLDDT placeholder: zeros at train time (no predicted confidence).
+        # 7. pLDDT placeholder: zeros at train time (no predicted confidence).
         feature_dict["plddt"] = torch.zeros(
             size=(token_is_design.numel(),), dtype=torch.float32
         )
 
-        # 7. Mask sequence features for design tokens to prevent leakage. We
+        # 8. Mask sequence features for design tokens to prevent leakage. We
         #    only mask if the key is present — Protenix's training featurizer
         #    might or might not produce these depending on data type.
         feature_dict = self._mask_sequence_leakage(feature_dict, token_is_design)
@@ -197,6 +238,58 @@ class DesignFeaturizer:
                 )
             return mask
         return atom_array.chain_id == sel.binder_chain_id
+
+    @staticmethod
+    def _compute_clean_aa_labels(atom_array, feature_dict: dict) -> torch.Tensor:
+        """Return 20-AA labels per token before design residues become xpb."""
+        rep_mask = feature_dict["distogram_rep_atom_mask"].bool().detach().cpu().numpy()
+        centre_atoms = atom_array[rep_mask]
+        labels = []
+        for res_name in centre_atoms.res_name:
+            idx = PRO_STD_RESIDUES_NATURAL.get(str(res_name), AA_IGNORE_INDEX)
+            if idx >= 20:
+                idx = AA_IGNORE_INDEX
+            labels.append(idx)
+        return torch.tensor(labels, dtype=torch.long)
+
+    def _sample_aa_corruption_mask(
+        self,
+        token_is_design: torch.Tensor,
+        aa_clean: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample which design residue identities are masked for AA prediction."""
+        valid_design = token_is_design & (aa_clean != AA_IGNORE_INDEX)
+        mode = self.selection.aa_mask_mode
+        if mode == "all":
+            t = 1.0
+            prob = 1.0
+        elif mode == "none":
+            t = 0.0
+            prob = 0.0
+        elif mode == "fixed":
+            prob = self.selection.aa_mask_prob
+            t = prob
+        else:
+            t = float(self.selection.get_rng().uniform(0.0, 1.0))
+            lo = self.selection.aa_mask_min_prob
+            hi = self.selection.aa_mask_max_prob
+            prob = lo + (hi - lo) * t
+
+        if prob <= 0.0:
+            corruption = torch.zeros_like(valid_design)
+        elif prob >= 1.0:
+            corruption = valid_design.clone()
+        else:
+            draws = torch.from_numpy(
+                self.selection.get_rng().random(valid_design.numel())
+            ).to(dtype=torch.float32)
+            corruption = valid_design & (draws < prob)
+
+        return (
+            corruption.bool(),
+            torch.tensor(float(t), dtype=torch.float32),
+            torch.tensor(float(prob), dtype=torch.float32),
+        )
 
     @staticmethod
     def _mark_as_xpb(atom_array, binder_atom_mask: np.ndarray):
@@ -221,7 +314,7 @@ class DesignFeaturizer:
     @staticmethod
     def _compute_restype(atom_array, feature_dict: dict) -> torch.Tensor:
         """Recompute restype one-hot in the 36-channel design vocabulary."""
-        rep_mask = feature_dict["distogram_rep_atom_mask"].bool().numpy()
+        rep_mask = feature_dict["distogram_rep_atom_mask"].bool().detach().cpu().numpy()
         centre_atoms = atom_array[rep_mask]
         restype_strs = cano_seq_resname_with_mask(centre_atoms)
         # `cano_seq_resname_with_mask` returns one resname per atom; take the
@@ -242,7 +335,7 @@ class DesignFeaturizer:
         binder_atom_mask: np.ndarray,
     ) -> torch.Tensor:
         """Token is 'design' iff its representative atom belongs to a binder residue."""
-        rep_mask = feature_dict["distogram_rep_atom_mask"].bool().numpy()
+        rep_mask = feature_dict["distogram_rep_atom_mask"].bool().detach().cpu().numpy()
         token_is_design_np = binder_atom_mask[rep_mask]  # one entry per token
         return torch.from_numpy(token_is_design_np).bool()
 

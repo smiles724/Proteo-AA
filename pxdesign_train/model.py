@@ -19,7 +19,11 @@ from pxdesign.model.pxdesign import ProtenixDesign
 from protenix.model.protenix import update_input_feature_dict
 
 from pxdesign_train.generator import TrainingNoiseSampler, sample_diffusion_training
-from pxdesign_train.heads import DesignDistogramHead, DesignDiffusionDistogramHead
+from pxdesign_train.heads import (
+    DesignDiffusionDistogramHead,
+    DesignDistogramHead,
+    DesignResidueTypeHead,
+)
 
 
 class ProtenixDesignTrain(ProtenixDesign):
@@ -52,6 +56,9 @@ class ProtenixDesignTrain(ProtenixDesign):
         self.enable_diffusion_distogram_head = getattr(
             configs, "enable_diffusion_distogram_head", False
         )
+        self.enable_residue_type_head = getattr(
+            configs, "enable_residue_type_head", False
+        )
 
         if self.enable_distogram_head:
             self.design_distogram_head = DesignDistogramHead(
@@ -62,6 +69,21 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.design_diffusion_distogram = DesignDiffusionDistogramHead(
                 c_token=configs.model.design_diffusion_distogram.c_z,
                 no_bins=configs.model.design_diffusion_distogram.no_bins,
+            )
+        if self.enable_residue_type_head:
+            res_cfg = getattr(configs, "residue_type", None)
+            vocab_size = getattr(res_cfg, "vocab_size", 20) if res_cfg is not None else 20
+            # The AA head reads `s_inputs` (the real per-token conditioning
+            # embedding). PXDesign's `s_trunk`/`s` is a zero placeholder, so we
+            # size the head to c_s_inputs (449), NOT c_s (384).
+            c_in = getattr(configs, "c_s_inputs", None)
+            if c_in is None:
+                c_in = getattr(getattr(configs, "model", object()), "c_s_inputs", 449)
+            use_time = bool(getattr(res_cfg, "use_time_embedding", True)) if res_cfg is not None else True
+            self.design_residue_type_head = DesignResidueTypeHead(
+                c_s=c_in,
+                no_bins=vocab_size,
+                use_time=use_time,
             )
 
     def _train_forward(
@@ -106,13 +128,46 @@ class ProtenixDesignTrain(ProtenixDesign):
             "x_gt_aug": x_gt_aug,
             "x_denoised": x_denoised,
             "sigma": sigma,
+            # `s` (s_trunk) is a zero placeholder; the real per-token state is
+            # s_inputs. Expose that as the h_res candidate for the future
+            # side-chain interface.
+            "h_res_candidate": s_inputs,
+            "z_pair_candidate": z,
         }
 
         # 3. Distogram on conditioning pair z, when enabled.
         if self.enable_distogram_head:
             out["distogram_logits"] = self.design_distogram_head(z)
+        if self.enable_residue_type_head:
+            # Read s_inputs (NOT the zero s_trunk), conditioned on the discrete
+            # masked-diffusion time aa_t when present.
+            out["aa_logits"] = self.design_residue_type_head(
+                s_inputs, aa_t=input_feature_dict.get("aa_t")
+            )
 
         return out
+
+    def predict_aa(
+        self,
+        input_feature_dict: dict[str, Any],
+        chunk_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Lightweight AA-only forward for inference-time masked-diffusion
+        sampling: computes the conditioning embedding and the residue-type
+        logits WITHOUT running the (expensive) coordinate diffusion. Returns
+        ``aa_logits`` of shape ``[..., N_token, no_bins]``.
+        """
+        assert self.enable_residue_type_head, "residue_type head is not enabled"
+        input_feature_dict = self.diffusion_module.diffusion_conditioning.relpe.generate_relp(
+            input_feature_dict
+        )
+        input_feature_dict = update_input_feature_dict(input_feature_dict)
+        s_inputs, _s, _z = self.get_condition_embedding(
+            input_feature_dict=input_feature_dict, chunk_size=chunk_size
+        )
+        return self.design_residue_type_head(
+            s_inputs, aa_t=input_feature_dict.get("aa_t")
+        )
 
     def forward(
         self,

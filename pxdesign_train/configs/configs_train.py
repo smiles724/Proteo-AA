@@ -18,6 +18,19 @@ training_configs["load_strict"] = False  # we add heads not in the inference ckp
 # Two new model flags consumed by ProtenixDesignTrain.
 training_configs["enable_distogram_head"] = True
 training_configs["enable_diffusion_distogram_head"] = False  # head built but unused for now
+training_configs["enable_residue_type_head"] = True
+
+training_configs["residue_type"] = {
+    "vocab_size": 20,
+    "ignore_index": -100,
+    "loss_on_design_only": True,
+    "mask_mode": "time_dependent",
+    "mask_prob": 1.0,
+    "mask_min_prob": 0.0,
+    "mask_max_prob": 1.0,
+    # V3: feed the discrete masked-diffusion time aa_t into the AA head.
+    "use_time_embedding": True,
+}
 
 # EDM training noise sampler.
 training_configs["training_noise_sampler"] = {
@@ -48,6 +61,10 @@ training_configs["loss"] = {
     "weight_mse": 4.0,
     "weight_lddt": 1.0,
     "weight_disto": 0.03,
+    "weight_aa": 1.0,
+    # V3: MDLM / absorbing-diffusion time weighting (1/t) for the AA CE. When
+    # False the AA term is a plain masked-LM mean CE.
+    "aa_time_weighting": True,
     "sigma_low_threshold": 4.0,  # σ below this gates LDDT and distogram terms
     "no_bins": training_configs["no_bins"],
     "min_bin": 2.3125,

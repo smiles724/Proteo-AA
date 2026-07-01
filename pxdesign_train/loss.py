@@ -53,12 +53,20 @@ class PXDesignLoss(nn.Module):
         max_bin: float = 21.6875,
         lddt_radius: float = 15.0,
         align_before_mse: bool = True,
+        weight_aa: float = 0.0,
+        aa_ignore_index: int = -100,
+        aa_time_weighting: bool = False,
+        aa_time_eps: float = 1e-2,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.weight_mse = weight_mse
         self.weight_lddt = weight_lddt
         self.weight_disto = weight_disto
+        self.weight_aa = weight_aa
+        self.aa_ignore_index = aa_ignore_index
+        self.aa_time_weighting = aa_time_weighting
+        self.aa_time_eps = aa_time_eps
         self.sigma_low_threshold = sigma_low_threshold
         self.no_bins = no_bins
         self.min_bin = min_bin
@@ -149,6 +157,56 @@ class PXDesignLoss(nn.Module):
         denom = pair_valid.sum(dim=(-1, -2)) + self.eps
         return per_pair_ce.sum(dim=(-1, -2)) / denom  # [...]
 
+    def _aa_term(
+        self,
+        aa_logits: torch.Tensor,
+        aa_clean: torch.Tensor,
+        aa_loss_mask: torch.Tensor,
+        aa_t: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Masked cross-entropy + accuracy over design tokens.
+
+        Baseline (``aa_t is None`` or ``aa_time_weighting=False``): plain mean
+        CE over masked tokens — a masked-LM objective.
+
+        Masked-diffusion (``aa_time_weighting=True`` and ``aa_t`` given): each
+        token's CE is importance-weighted by ``1 / max(aa_t, eps)``, the MDLM /
+        absorbing-diffusion weight for a linear masking schedule (mask prob = t).
+        This turns the plain masked-LM into the discrete-diffusion ELBO surrogate:
+        low-``t`` steps (few masked, high per-token information) get up-weighted.
+        We normalise by the summed weights so the scalar stays CE-comparable.
+        """
+        if aa_clean.dim() == aa_logits.dim():
+            aa_clean = aa_clean.squeeze(-1)
+        aa_clean = aa_clean.long().to(aa_logits.device)
+        aa_loss_mask = aa_loss_mask.bool().to(aa_logits.device)
+        valid = aa_loss_mask & (aa_clean != self.aa_ignore_index)  # [..., N_token]
+        mask_frac = valid.float().mean()
+        if not valid.any():
+            zero = aa_logits.sum() * 0.0
+            return zero, zero.detach(), mask_frac.detach()
+
+        # Per-token CE (keep batch/token structure so we can time-weight).
+        logp = torch.log_softmax(aa_logits.float(), dim=-1)
+        tgt = aa_clean.clamp_min(0)  # -100 sites are excluded by `valid`
+        ce_tok = -logp.gather(-1, tgt[..., None]).squeeze(-1)  # [..., N_token]
+        vmask = valid.float()
+
+        if self.aa_time_weighting and aa_t is not None:
+            t = torch.as_tensor(aa_t, device=aa_logits.device).float()
+            w = 1.0 / t.clamp_min(self.aa_time_eps)  # per-example weight [...]
+            while w.dim() < ce_tok.dim():  # broadcast to token axis
+                w = w[..., None]
+            w = w.expand_as(ce_tok)
+            denom = (vmask * w).sum().clamp_min(self.eps)
+            ce = (ce_tok * vmask * w).sum() / denom
+        else:
+            ce = (ce_tok * vmask).sum() / vmask.sum().clamp_min(self.eps)
+
+        correct = (aa_logits.argmax(dim=-1) == aa_clean) & valid
+        acc = correct.float().sum() / vmask.sum().clamp_min(self.eps)
+        return ce, acc.detach(), mask_frac.detach()
+
     def forward(
         self,
         pred_coordinate: torch.Tensor,       # [..., N_sample, N_atom, 3]
@@ -157,6 +215,10 @@ class PXDesignLoss(nn.Module):
         coordinate_mask: torch.Tensor,       # [..., N_atom]
         rep_atom_mask: torch.Tensor,         # [N_atom]
         distogram_logits: Optional[torch.Tensor] = None,  # [..., N_token, N_token, no_bins]
+        aa_logits: Optional[torch.Tensor] = None,          # [..., N_token, 20]
+        aa_clean: Optional[torch.Tensor] = None,           # [..., N_token]
+        aa_loss_mask: Optional[torch.Tensor] = None,       # [..., N_token]
+        aa_t: Optional[torch.Tensor] = None,               # [...] masked-diffusion time
     ) -> dict[str, torch.Tensor]:
         """Compute the composite loss.
 
@@ -199,10 +261,26 @@ class PXDesignLoss(nn.Module):
             + self.weight_disto * disto
         )
 
+        if aa_logits is not None and aa_clean is not None and aa_loss_mask is not None:
+            aa_ce, aa_acc, aa_mask_frac = self._aa_term(
+                aa_logits=aa_logits,
+                aa_clean=aa_clean,
+                aa_loss_mask=aa_loss_mask,
+                aa_t=aa_t,
+            )
+            total = total + self.weight_aa * aa_ce
+        else:
+            aa_ce = total.sum() * 0.0
+            aa_acc = torch.zeros_like(aa_ce).detach()
+            aa_mask_frac = torch.zeros_like(aa_ce).detach()
+
         return {
             "loss": total.mean(),
             "mse": mse.mean().detach(),
             "lddt": lddt.mean().detach(),
             "distogram": disto.mean().detach(),
             "sigma_low_frac": sigma_low.mean().detach(),
+            "aa_ce": aa_ce.detach(),
+            "aa_acc": aa_acc,
+            "aa_mask_frac": aa_mask_frac,
         }

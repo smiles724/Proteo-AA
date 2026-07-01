@@ -136,6 +136,9 @@ def main():
                     choices=["s_inputs", "diffusion_internal"])
     ap.add_argument("--trunk_grad_scale", type=float, default=1.0)
     ap.add_argument("--internal_reduce", default="mean", choices=["mean", "low_sigma"])
+    ap.add_argument("--cogenerate", action="store_true",
+                    help="Run #3 joint sequence-structure co-generation from noise (no fine-tune)")
+    ap.add_argument("--cogen_steps", type=int, default=20)
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)
@@ -144,6 +147,34 @@ def main():
     trainer = build(args, device)
     print(f"trainer built {time.time()-t0:.0f}s")
     trainer.load_checkpoint(args.ckpt, params_only=True)
+
+    # ---- #3: joint co-generation from noise (structure + sequence), then exit ----
+    if args.cogenerate:
+        from pxdesign_train.cogenerate import cogenerate
+        batch = trainer._to_device(next(iter(trainer.train_dl)))
+        feat = batch["input_feature_dict"]
+        print(f"\n=== co-generate ({args.cogen_steps} steps, input_source={args.aa_input_source}) ===")
+        res = cogenerate(trainer.raw_model, feat, N_step=args.cogen_steps)
+        seq = res["sequence"]
+        dtm = feat["design_token_mask"].bool()
+        while dtm.dim() > 1:
+            dtm = dtm.squeeze(0)
+        gen = seq[dtm].cpu().tolist()
+        print(f"coord shape: {tuple(res['coordinate'].shape)}")
+        print(f"generated design seq (aa20 idx, n={len(gen)}): {gen}")
+        print(f"distinct residues used: {len(set(gen))}")
+        ac = feat.get("aa_clean")
+        while ac is not None and ac.dim() > 1:
+            ac = ac.squeeze(0)
+        if ac is not None:
+            valid = dtm & (ac != -100).to(dtm.device)
+            if valid.any():
+                rec = (seq[valid].cpu() == ac[valid].cpu()).float().mean()
+                print(f"recovery vs GT: {float(rec):.3f}")
+        print(f"trajectory (sigma/mask_frac/mean_conf): "
+              f"{[(round(t['sigma'],1), round(t['mask_frac'],2), round(t['mean_conf'],2)) for t in res['trajectory']]}")
+        print("COGENERATE OK")
+        return
 
     # Fixed eval batch (identical masking pre/post), moved to the model device.
     batch = trainer._to_device(next(iter(trainer.train_dl)))

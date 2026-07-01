@@ -169,9 +169,10 @@ class ProtenixDesignTrain(ProtenixDesign):
             "x_gt_aug": x_gt_aug,
             "x_denoised": x_denoised,
             "sigma": sigma,
-            # `s` (s_trunk) is a zero placeholder; the real per-token state is
-            # s_inputs. Expose that as the h_res candidate for the future
-            # side-chain interface.
+            # h_res candidate for the future side-chain / h_res interface.
+            # Overwritten below with the actual representation the AA head reads
+            # (structure-aware a_token under diffusion_internal); s_inputs is only
+            # the fallback when the residue-type head is disabled.
             "h_res_candidate": s_inputs,
             "z_pair_candidate": z,
         }
@@ -197,6 +198,10 @@ class ProtenixDesignTrain(ProtenixDesign):
                     if g != 1.0:
                         token_repr = g * token_repr + (1.0 - g) * token_repr.detach()
                     out["a_token_shape"] = torch.tensor(list(a.shape))
+            # The representation the AA head reads IS the h_res candidate:
+            # structure-aware a_token for diffusion_internal, s_inputs for the
+            # baseline. This is what a future h_res module should consume.
+            out["h_res_candidate"] = token_repr
             out["aa_logits"] = self.design_residue_type_head(token_repr, aa_t=aa_t)
 
         return out

@@ -151,6 +151,9 @@ def main():
     # ---- #3: joint co-generation from noise (structure + sequence), then exit ----
     if args.cogenerate:
         from pxdesign_train.cogenerate import cogenerate
+        if args.max_steps > 0:
+            print(f"\n=== fine-tune {args.max_steps} steps (lr={args.lr}) before co-generation ===")
+            trainer.run(max_steps=args.max_steps)
         batch = trainer._to_device(next(iter(trainer.train_dl)))
         feat = batch["input_feature_dict"]
         print(f"\n=== co-generate ({args.cogen_steps} steps, input_source={args.aa_input_source}) ===")

@@ -1,4 +1,4 @@
-"""V3 residue-type masked-diffusion: time-conditioned head, MDLM-weighted loss,
+"""Residue-type masked-diffusion: time-conditioned head, MDLM-weighted loss,
 iterative-unmask sampler, and the 20->design-restype vocab map.
 
 All CPU-only; the sampler is tested with a stub logits_fn so it needs no model.
@@ -24,7 +24,7 @@ def test_time_embedding_shape_and_finite():
 
 
 def test_head_without_time_matches_v1_path():
-    """aa_t=None must be identical to running the plain proj MLP (V1)."""
+    """aa_t=None must be identical to running the plain proj MLP."""
     head = DesignResidueTypeHead(c_s=449, no_bins=20, use_time=True).eval()
     x = torch.randn(2, 7, 449)
     with torch.no_grad():
@@ -107,10 +107,10 @@ def test_unmask_counts_sum_to_n():
     assert _unmask_counts(0, 4) == []
 
 
-# ---------- input_source switch (A: s_inputs vs B: diffusion_internal) ----------
+# ---------- input_source switch (s_inputs vs diffusion_internal) ----------
 
 def test_config_default_input_source_is_diffusion_internal():
-    # Decision (author-confirmed): B (structure-aware a_token) is the default;
+    # The structure-aware a_token (diffusion_internal) is the default;
     # s_inputs is a baseline/ablation only.
     from pxdesign_train.configs.configs_train import training_configs
     assert training_configs["residue_type"]["input_source"] == "diffusion_internal"

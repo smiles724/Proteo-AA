@@ -66,7 +66,7 @@ def main():
     parser.add_argument("--sample_steps", type=int, default=8)
     parser.add_argument("--aa_input_source", default="s_inputs",
                         choices=["s_inputs", "diffusion_internal"],
-                        help="Representation the AA head reads (spike)")
+                        help="Representation the AA head reads")
     parser.add_argument("--grad_probe", action="store_true",
                         help="One forward+backward, report a_token capture / shapes / grads")
     args = parser.parse_args()
@@ -142,7 +142,7 @@ def main():
     print(f"Model init: {time.time() - t1:.1f}s "
           f"({sum(p.numel() for p in trainer.model.parameters())/1e6:.1f}M params)")
 
-    # ---- grad probe (spike): one forward+backward, inspect capture/shapes/grads ----
+    # ---- grad probe: one forward+backward, inspect capture/shapes/grads ----
     if args.grad_probe:
         print(f"\n{'-'*60}\nGrad probe (input_source={args.aa_input_source})...")
         import math as _math

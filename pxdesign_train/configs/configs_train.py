@@ -28,20 +28,20 @@ training_configs["residue_type"] = {
     "mask_prob": 1.0,
     "mask_min_prob": 0.0,
     "mask_max_prob": 1.0,
-    # V3: feed the discrete masked-diffusion time aa_t into the AA head.
+    # Feed the discrete masked-diffusion time aa_t into the AA head.
     "use_time_embedding": True,
     # Representation the AA head reads. DEFAULT = "diffusion_internal": the
     # a_token AFTER DiffusionModule's full token self-attention (layernorm_a) —
     # it has cross-token context AND is conditioned on the binder's own noisy
     # backbone (r_noisy) + target, which is required for structure-aware residue
-    # prediction (author-recommended). "s_inputs" is kept as a structure-blind,
+    # prediction. "s_inputs" is kept as a structure-blind,
     # cross-token-free baseline/ablation only.
     "input_source": "diffusion_internal",
     # diffusion_internal controls:
     #   trunk_grad_scale: AA-loss gradient into the coord trunk. 1.0 = full
-    #     co-design coupling (backbone becomes sequence-aware, per SideCraft's
-    #     no-detach h_res intent); lower it only if the clean-eval shows structure
-    #     degradation. 0.0 = stop-grad (protect structure, no co-design coupling).
+    #     co-design coupling (backbone becomes sequence-aware); lower it only
+    #     if the clean-eval shows structure degradation. 0.0 = stop-grad (protect
+    #     structure, no co-design coupling).
     "trunk_grad_scale": 1.0,
     "internal_reduce": "mean",   # "mean" | "low_sigma" (pick least-noisy sample)
 }
@@ -76,7 +76,7 @@ training_configs["loss"] = {
     "weight_lddt": 1.0,
     "weight_disto": 0.03,
     "weight_aa": 1.0,
-    # V3: MDLM / absorbing-diffusion time weighting (1/t) for the AA CE. When
+    # MDLM / absorbing-diffusion time weighting (1/t) for the AA CE. When
     # False the AA term is a plain masked-LM mean CE.
     "aa_time_weighting": True,
     "sigma_low_threshold": 4.0,  # σ below this gates LDDT and distogram terms

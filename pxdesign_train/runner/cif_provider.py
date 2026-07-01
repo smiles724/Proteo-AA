@@ -24,7 +24,7 @@ Usage:
         binder_chain_ids=["B", "C"],         # one per CIF
     )
     # Forward the masking config so the AA head trains under the intended
-    # schedule; the default is aa_mask_mode='all' (V1).
+    # schedule; the default is aa_mask_mode='all'.
     rt = configs.residue_type
     src = DesignSourceDataset(
         provider, source_name="my_targets", crop_size=640,

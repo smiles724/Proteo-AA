@@ -78,7 +78,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             # input_source selects which per-token representation the AA head reads:
             #   "s_inputs"          — outer conditioning embedding (449), structure-blind, sigma-free (default)
             #   "diffusion_internal"— a_token captured from DiffusionModule.layernorm_a
-            #                         (c_token), structure- and sigma-aware (spike)
+            #                         (c_token), structure- and sigma-aware
             self.aa_input_source = (
                 getattr(res_cfg, "input_source", "s_inputs") if res_cfg is not None else "s_inputs"
             )
@@ -106,7 +106,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.design_residue_type_head = DesignResidueTypeHead(
                 c_s=c_in, no_bins=vocab_size, use_time=use_time,
             )
-            # Spike: capture the internal per-token representation via a forward
+            # Capture the internal per-token representation via a forward
             # hook — NO edit to the Protenix/PXDesign submodule source.
             self._a_token_cache = None
             if self.aa_input_source == "diffusion_internal":

@@ -198,16 +198,16 @@ def main():
     ap.add_argument("--trunk_grad_scale", type=float, default=1.0)
     ap.add_argument("--internal_reduce", default="mean", choices=["mean", "low_sigma"])
     ap.add_argument("--cogenerate", action="store_true",
-                    help="Run #3 joint sequence-structure co-generation from noise (no fine-tune)")
+                    help="Run joint sequence-structure co-generation from noise (no fine-tune)")
     ap.add_argument("--cogen_steps", type=int, default=20)
     ap.add_argument("--coord_eval", action="store_true",
-                    help="#4: fine-tune then report fixed-sigma coord MSE (structure-degradation check)")
+                    help="Fine-tune then report fixed-sigma coord MSE (structure-degradation check)")
     ap.add_argument("--train_cifs", default="", help="comma-separated CIFs for multi-structure training")
     ap.add_argument("--train_chains", default="", help="comma-separated binder chains (one per train CIF)")
     ap.add_argument("--heldout_cif", default="")
     ap.add_argument("--heldout_chain", default="")
     ap.add_argument("--heldout_eval", action="store_true",
-                    help="#4 Part2: fine-tune on train_cifs, report AA recovery on a train vs held-out structure")
+                    help="Fine-tune on train_cifs, report AA recovery on a train vs held-out structure")
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)
@@ -217,7 +217,7 @@ def main():
     print(f"trainer built {time.time()-t0:.0f}s")
     trainer.load_checkpoint(args.ckpt, params_only=True)
 
-    # ---- #4 Part2: multi-structure train, AA recovery on train vs held-out ----
+    # ---- multi-structure train, AA recovery on train vs held-out ----
     if args.heldout_eval:
         import json as _json
         train_cif0 = (args.train_cifs.split(",")[0] if args.train_cifs else args.cif)
@@ -241,7 +241,7 @@ def main():
         print(f"saved -> {args.out}\nHELDOUT EVAL OK")
         return
 
-    # ---- #4: fixed-sigma coord eval (structure-degradation check), then exit ----
+    # ---- fixed-sigma coord eval (structure-degradation check), then exit ----
     if args.coord_eval:
         import json as _json
         batch = trainer._to_device(next(iter(trainer.train_dl)))
@@ -259,7 +259,7 @@ def main():
         print(f"saved -> {args.out}\nCOORD EVAL OK")
         return
 
-    # ---- #3: joint co-generation from noise (structure + sequence), then exit ----
+    # ---- joint co-generation from noise (structure + sequence), then exit ----
     if args.cogenerate:
         from pxdesign_train.cogenerate import cogenerate
         if args.max_steps > 0:

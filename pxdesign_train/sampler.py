@@ -1,5 +1,5 @@
 """
-V3: inference-time iterative unmasking sampler for the residue-type
+Inference-time iterative unmasking sampler for the residue-type
 masked-diffusion head.
 
 The coordinate side generates structure by running the reverse EDM loop

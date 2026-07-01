@@ -108,16 +108,16 @@ class DesignResidueTypeHead(nn.Module):
     """Residue-type logits from a per-token representation, with optional
     masked-diffusion time conditioning.
 
-    V1 (baseline) treats PXDesign's xpb design tokens as masked residue
+    The baseline treats PXDesign's xpb design tokens as masked residue
     identities and predicts the clean 20-AA type from a per-token
     representation (`s_inputs` in the current wiring; PXDesign's `s_trunk`
     is a zero placeholder and must not be used).
 
-    V3 (masked diffusion) additionally conditions on the discrete diffusion
+    With masked diffusion it additionally conditions on the discrete diffusion
     time `aa_t in [0, 1]`: a sinusoidal embedding of `aa_t` is projected and
     added to every token feature before the MLP, so the denoiser knows the
     current mask level (analogous to the coordinate denoiser receiving sigma).
-    Passing `aa_t=None` recovers the exact V1 behaviour.
+    Passing `aa_t=None` recovers the exact plain-head behaviour.
 
     `c_s` is the input feature dim (name kept for backward compatibility; in
     the current wiring it equals `c_s_inputs`, e.g. 449).

@@ -1,5 +1,5 @@
 """
-#3 Joint sequence-structure co-generation (Option B).
+Joint sequence-structure co-generation.
 
 Merges PXDesign-d (structure) and the ProteinMPNN stage (sequence) into ONE
 reverse process: at every denoising step we run the DiffusionModule once (which

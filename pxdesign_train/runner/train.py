@@ -74,7 +74,7 @@ def main() -> None:
 
         configs = parse_configs(training_configs, arg_str='')
         # IMPORTANT: forward the residue-type masking config, otherwise
-        # DesignSourceDataset defaults to aa_mask_mode='all' (V1) and the
+        # DesignSourceDataset defaults to aa_mask_mode='all' and the
         # time_dependent masked-diffusion schedule in configs is silently ignored.
         rt = configs.residue_type
         aa_kw = dict(aa_mask_mode=rt.mask_mode, aa_mask_prob=rt.mask_prob,

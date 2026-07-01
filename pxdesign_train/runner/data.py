@@ -76,7 +76,7 @@ class DesignSourceDataset(Dataset):
         hotspot_radius / hotspot_max_frac / hotspot_force_zero_prob: forwarded
             to `DesignSelection`. See `featurizer.py` for semantics.
         aa_mask_mode / aa_mask_prob / aa_mask_min_prob / aa_mask_max_prob:
-            forwarded to `DesignSelection` for V1 all-mask or V2 partial
+            forwarded to `DesignSelection` for all-mask or partial
             residue identity corruption.
         seed: base seed; combined with index per call to keep the RNG
             deterministic for a given (epoch, index) without per-epoch state.

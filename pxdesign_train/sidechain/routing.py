@@ -1,0 +1,36 @@
+"""Per-residue side-chain loss routing.
+
+When the predicted residue type matches GT, atom-level coordinate supervision is
+valid -> use the local-frame coordinate loss on those residues. When it does not
+match, the atom sets differ and coordinate MSE is undefined -> use physical loss
+only. (SideCraft spec §4; group-chat loss router.)
+
+The two loss callables receive the per-residue boolean mask selecting the
+residues they should supervise, so the caller controls exactly how each side is
+computed.
+"""
+from typing import Callable
+
+import torch
+
+
+def route_sidechain_loss(
+    pred_type_logits: torch.Tensor,   # [L, C] (or [..., L, C])
+    gt_type: torch.Tensor,            # [L] long (or [..., L])
+    coord_loss_fn: Callable[[torch.Tensor], torch.Tensor],
+    phys_loss_fn: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    """Split residues by type-match and sum coord (matched) + physical (mismatched).
+
+    Args:
+        pred_type_logits: residue-type logits; argmax gives predicted type.
+        gt_type: ground-truth residue-type indices.
+        coord_loss_fn: called with the boolean match mask -> scalar.
+        phys_loss_fn:  called with the boolean mismatch mask -> scalar.
+    Returns:
+        coord_term + phys_term (scalar).
+    """
+    match = pred_type_logits.argmax(dim=-1) == gt_type   # [..., L] bool
+    coord_term = coord_loss_fn(match)
+    phys_term = phys_loss_fn(~match)
+    return coord_term + phys_term

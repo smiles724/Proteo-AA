@@ -44,3 +44,20 @@ def sidechain_mask(restypes: Sequence[str]) -> torch.Tensor:
         k = len(sidechain_atoms(r))
         m[i, :k] = True
     return m
+
+
+# --- atom-name vocabulary (for the side-chain atom-name embedding in S_phi) ---
+# id 0 is reserved for padding / non-existent atoms.
+_ALL_SC_NAMES = sorted({a for r in STD_AA_3 for a in sidechain_atoms(r)})
+ATOM_NAME_TO_ID = {name: i + 1 for i, name in enumerate(_ALL_SC_NAMES)}
+ATOM_VOCAB_SIZE = len(ATOM_NAME_TO_ID) + 1  # +1 for the padding id 0
+
+
+def sidechain_atom_name_ids(restypes: Sequence[str]) -> torch.Tensor:
+    """Atom-name embedding ids [L, MAX_SC]; padded slots are 0."""
+    L = len(restypes)
+    ids = torch.zeros(L, MAX_SC, dtype=torch.long)
+    for i, r in enumerate(restypes):
+        for j, name in enumerate(sidechain_atoms(r)):
+            ids[i, j] = ATOM_NAME_TO_ID[name]
+    return ids

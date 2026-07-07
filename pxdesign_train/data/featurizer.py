@@ -94,6 +94,7 @@ class DesignSelection:
     aa_mask_min_prob: float = 0.0
     aa_mask_max_prob: float = 1.0
     aa_mask_prob: float = 1.0
+    compute_sidechain: bool = False
     rng: Optional[np.random.Generator] = None
 
     def __post_init__(self):
@@ -165,6 +166,15 @@ class DesignFeaturizer:
         #    These labels are supervision targets only, not model inputs.
         aa_clean = self._compute_clean_aa_labels(atom_array, feature_dict)
         clean_restype = self._compute_restype(atom_array, feature_dict)
+
+        # 1b. Side-chain targets (Stage II-A): computed from the ORIGINAL atom
+        #     array (real res_name + GT side-chain coords), BEFORE xpb marking.
+        #     GT side chains are the label; the model input is Gaussian noise.
+        if self.selection.compute_sidechain:
+            feature_dict = dict(feature_dict)
+            feature_dict.update(
+                self._compute_sidechain_targets(atom_array, feature_dict, binder_atom_mask)
+            )
 
         # 2. Mark binder residues as xpb on the AtomArray. Note: this is *before*
         #    computing restype, so the new restype one-hot reflects the design.
@@ -327,6 +337,69 @@ class DesignFeaturizer:
                 f"Expected {rep_count} rep-atom restypes, got {len(restype_strs)}"
             )
         return restype_onehot_encoded(restype_strs)  # [N_token, 36]
+
+    def _compute_sidechain_targets(
+        self, atom_array, feature_dict: dict, binder_atom_mask: np.ndarray
+    ) -> dict:
+        """GT side-chain targets in residue-local frames, for design tokens.
+
+        Returns per-token tensors [N_token, MAX_SC, *]: `sc_gt_local` (GT side
+        chain in the residue's local frame), `sc_atom_mask` (valid/resolved
+        atoms), `sc_atom_name_ids` (atom-name embedding ids). Non-binder tokens
+        and GLY are all-zero/all-False. CCD-free: uses the AtomArray's own coords
+        + atom names (called BEFORE xpb marking, so res_name is real).
+        """
+        from collections import defaultdict
+
+        from pxdesign_train.sidechain.frames import build_frame, to_local
+        from pxdesign_train.sidechain.instantiate import (
+            ATOM_NAME_TO_ID,
+            MAX_SC,
+            sidechain_atoms,
+        )
+
+        rep_mask = feature_dict["distogram_rep_atom_mask"].bool().detach().cpu().numpy()
+        rep_idx = np.nonzero(rep_mask)[0]
+        n_token = len(rep_idx)
+        coord = np.asarray(atom_array.coord, dtype=np.float32)
+        atom_name = np.asarray(atom_array.atom_name)
+        res_name = np.asarray(atom_array.res_name)
+        chain_id = np.asarray(atom_array.chain_id)
+        res_id = np.asarray(atom_array.res_id)
+        binder = np.asarray(binder_atom_mask, dtype=bool)
+
+        res_atoms: dict = defaultdict(dict)
+        for idx in range(len(atom_array)):
+            res_atoms[(chain_id[idx], res_id[idx])][str(atom_name[idx])] = idx
+
+        sc_gt_local = np.zeros((n_token, MAX_SC, 3), dtype=np.float32)
+        sc_mask = np.zeros((n_token, MAX_SC), dtype=bool)
+        sc_ids = np.zeros((n_token, MAX_SC), dtype=np.int64)
+
+        for ti, ai in enumerate(rep_idx):
+            if not binder[ai]:
+                continue
+            atoms = res_atoms[(chain_id[ai], res_id[ai])]
+            if not all(a in atoms for a in ("N", "CA", "C")):
+                continue
+            n = torch.from_numpy(coord[atoms["N"]])[None]
+            ca = torch.from_numpy(coord[atoms["CA"]])[None]
+            c = torch.from_numpy(coord[atoms["C"]])[None]
+            R, t = build_frame(n, ca, c)
+            for j, nm in enumerate(sidechain_atoms(str(res_name[ai]))):
+                if j >= MAX_SC:
+                    break
+                sc_ids[ti, j] = ATOM_NAME_TO_ID[nm]
+                if nm in atoms:
+                    g = torch.from_numpy(coord[atoms[nm]])[None, None]  # [1,1,3]
+                    sc_gt_local[ti, j] = to_local(g, R, t)[0, 0].numpy()
+                    sc_mask[ti, j] = True
+
+        return {
+            "sc_gt_local": torch.from_numpy(sc_gt_local),
+            "sc_atom_mask": torch.from_numpy(sc_mask),
+            "sc_atom_name_ids": torch.from_numpy(sc_ids),
+        }
 
     @staticmethod
     def _token_level_mask(

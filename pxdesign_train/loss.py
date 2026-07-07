@@ -230,6 +230,11 @@ class PXDesignLoss(nn.Module):
         sc_atom_mask: Optional[torch.Tensor] = None,       # [..., L, A] bool
         sc_type_match: Optional[torch.Tensor] = None,      # [..., L] bool (pred==gt type)
         sc_phys: Optional[torch.Tensor] = None,            # precomputed physical loss scalar
+        post_pred_coordinate: Optional[torch.Tensor] = None,   # [..., N_sample, N_atom, 3]
+        post_gt_coordinate_aug: Optional[torch.Tensor] = None, # [..., N_sample, N_atom, 3]
+        post_aa_logits: Optional[torch.Tensor] = None,         # [..., N_token, 20]
+        weight_bb_post: float = 1.0,
+        weight_aa_post: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         """Compute the composite loss.
 
@@ -300,6 +305,20 @@ class PXDesignLoss(nn.Module):
             sc_local = total.sum() * 0.0
             sc_phys_val = total.sum() * 0.0
 
+        # --- Post-refinement terms (Stage II-B cycle closure) ---
+        # Side-chain-informed backbone refinement: reuse the coord / AA loss on
+        # the refined (post) outputs (Overleaf L_bb^post, L_aa^post).
+        if post_pred_coordinate is not None and post_gt_coordinate_aug is not None:
+            bb_post = self._mse_term(post_pred_coordinate, post_gt_coordinate_aug, coordinate_mask)
+            total = total + weight_bb_post * bb_post
+        else:
+            bb_post = total.sum() * 0.0
+        if post_aa_logits is not None and aa_clean is not None and aa_loss_mask is not None:
+            aa_post_ce, _, _ = self._aa_term(post_aa_logits, aa_clean, aa_loss_mask, aa_t)
+            total = total + weight_aa_post * aa_post_ce
+        else:
+            aa_post_ce = total.sum() * 0.0
+
         return {
             "loss": total.mean(),
             "mse": mse.mean().detach(),
@@ -311,4 +330,6 @@ class PXDesignLoss(nn.Module):
             "aa_mask_frac": aa_mask_frac,
             "sc_local": sc_local.detach(),
             "sc_phys": sc_phys_val.detach(),
+            "bb_post": bb_post.detach(),
+            "aa_post": aa_post_ce.detach(),
         }

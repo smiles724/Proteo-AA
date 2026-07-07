@@ -31,7 +31,7 @@ def build(args, device):
         provider, source_name="cif", crop_size=args.crop_size,
         hotspot_force_zero_prob=0.0,
         aa_mask_mode="time_dependent", aa_mask_min_prob=0.15, aa_mask_max_prob=1.0,
-        compute_sidechain=getattr(args, "sidechain_warmup", False),
+        compute_sidechain=getattr(args, "sidechain_warmup", False) or getattr(args, "coevolution", False),
         seed=0,
     )
     multi = CurriculumMultiDataset(datasets=[src], source_names=["cif"],
@@ -59,8 +59,10 @@ def build(args, device):
     configs.training.num_workers = 0
     configs.load_strict = False
     configs.loss.align_before_mse = (device.type == "cuda")
-    if getattr(args, "sidechain_warmup", False):
+    if getattr(args, "sidechain_warmup", False) or getattr(args, "coevolution", False):
         configs.enable_sidechain = True
+    if getattr(args, "coevolution", False):
+        configs.enable_coevolution = True
     trainer = PXDesignTrainer(configs=configs, components=components, device=device)
     return trainer
 
@@ -87,6 +89,18 @@ def eval_sc(trainer, batch, k=8):
         lo = trainer.forward_loss(batch)
         vals.append(float(lo.get("sc_local", 0.0)))
     return sum(vals) / max(1, len(vals))
+
+
+@torch.no_grad()
+def eval_cycle(trainer, batch, k=6):
+    """Average sc_local + post-refinement losses (cycle closure)."""
+    keys = ["sc_local", "bb_post", "aa_post"]
+    acc = {kk: [] for kk in keys}
+    for _ in range(k):
+        lo = trainer.forward_loss(batch)
+        for kk in keys:
+            acc[kk].append(float(lo.get(kk, 0.0)))
+    return {kk: sum(v) / max(1, len(v)) for kk, v in acc.items()}
 
 
 @torch.no_grad()
@@ -224,6 +238,8 @@ def main():
                     help="Fine-tune on train_cifs, report AA recovery on a train vs held-out structure")
     ap.add_argument("--sidechain_warmup", action="store_true",
                     help="Stage II-A: enable S_phi, memorize side chains, report sc_local pre->post")
+    ap.add_argument("--coevolution", action="store_true",
+                    help="Stage II-B: close the cycle (h_res'->B_theta refine), report sc_local/bb_post/aa_post")
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)
@@ -294,6 +310,28 @@ def main():
             _json.dump({"args": vars(args), "sc_local_pre": pre, "sc_local_post": post,
                         "sc_fields_present": has_sc, "n_sc_atoms": n_sc}, f, indent=2)
         print(f"saved -> {args.out}\nSIDECHAIN WARMUP OK")
+        return
+
+    # ---- side-chain cycle closure (Stage II-B co-evolution, integration test) ----
+    if args.coevolution:
+        import json as _json
+        cif0 = (args.train_cifs.split(",")[0] if args.train_cifs else args.cif)
+        chain0 = (args.train_chains.split(",")[0] if args.train_chains else args.binder_chain)
+        batch = make_batch_from_cif(trainer, cif0, chain0, args.crop_size, compute_sidechain=True)
+        pre = eval_cycle(trainer, batch)
+        cycle_closed = (pre["bb_post"] > 0.0) or (pre["aa_post"] > 0.0)
+        print(f"cycle closed (post outputs present): {cycle_closed}")
+        if args.max_steps > 0:
+            print(f"\n=== cycle Stage II-B {args.max_steps} steps ===")
+            trainer.run(max_steps=args.max_steps)
+        post = eval_cycle(trainer, batch)
+        print("\n=== pre -> post ===")
+        for kk in ["sc_local", "bb_post", "aa_post"]:
+            print(f"  {kk}: {pre[kk]:.4f} -> {post[kk]:.4f}")
+        with open(args.out, "w") as f:
+            _json.dump({"args": vars(args), "pre": pre, "post": post,
+                        "cycle_closed": cycle_closed}, f, indent=2)
+        print(f"saved -> {args.out}\nCOEVOLUTION OK")
         return
 
     # ---- joint co-generation from noise (structure + sequence), then exit ----

@@ -28,6 +28,7 @@ from pxdesign_train.heads import (
 from pxdesign_train.sidechain.module import SideChainModule
 from pxdesign_train.sidechain.feedback import HResFeedback
 from pxdesign_train.sidechain.init import gaussian_init_local
+from pxdesign_train.sidechain.coevolution import HResInjector
 
 
 class ProtenixDesignTrain(ProtenixDesign):
@@ -137,6 +138,18 @@ class ProtenixDesignTrain(ProtenixDesign):
                 trunk_grad_scale=sc_grad_scale,
             )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
+
+            # ---- Cycle closure (Stage II-B co-evolution) ----
+            # Reuse B_theta for a side-chain-informed refinement pass by injecting
+            # h_res' into the (currently-zero) token trunk s_trunk (dim c_s).
+            self.enable_coevolution = getattr(configs, "enable_coevolution", False)
+            if self.enable_coevolution:
+                c_trunk = int(getattr(configs, "c_s", 384))
+                self.hres_injector = HResInjector(c_hres=self.sc_c_res, c_trunk=c_trunk)
+                self.w_bb_post = float(getattr(sc_cfg, "weight_bb_post", 1.0)) if sc_cfg is not None else 1.0
+                self.w_aa_post = float(getattr(sc_cfg, "weight_aa_post", 1.0)) if sc_cfg is not None else 1.0
+        else:
+            self.enable_coevolution = False
 
     def _reduce_a_token(self, a: torch.Tensor, sigma: Optional[torch.Tensor]) -> torch.Tensor:
         """Collapse a_token's N_sample axis (dim -3).
@@ -264,6 +277,37 @@ class ProtenixDesignTrain(ProtenixDesign):
             out["sc_pred_local"] = y0_local
             out["sc_atom_mask"] = sc_mask
             out["h_res_prime"] = h_res_prime
+
+        # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
+        #    using the side-chain-informed h_res'. h_res' is injected into the
+        #    (zero) token trunk s_trunk, then the backbone denoise is re-run.
+        if getattr(self, "enable_coevolution", False) and "h_res_prime" in out:
+            h_res_prime = out["h_res_prime"]
+            s_trunk_refine = s + self.hres_injector(h_res_prime).to(s.dtype)
+            x_gt_aug_post, x_denoised_post, sigma_post = sample_diffusion_training(
+                noise_sampler=self.training_noise_sampler,
+                denoise_net=self.diffusion_module,
+                label_dict=label_dict,
+                input_feature_dict=input_feature_dict,
+                s_inputs=s_inputs,
+                s_trunk=s_trunk_refine,
+                z_trunk=z,
+                N_sample=N_sample,
+            )
+            out["post_pred_coordinate"] = x_denoised_post
+            out["post_gt_coordinate_aug"] = x_gt_aug_post
+            out["post_sigma"] = sigma_post
+            # Refined AA logits from the side-chain-aware refinement pass.
+            if self.enable_residue_type_head:
+                a_post = self._a_token_cache
+                if a_post is not None:
+                    tok_post = self._reduce_a_token(a_post, sigma_post).to(s_inputs.dtype)
+                    g = self.aa_trunk_grad_scale
+                    if g != 1.0:
+                        tok_post = g * tok_post + (1.0 - g) * tok_post.detach()
+                    out["post_aa_logits"] = self.design_residue_type_head(
+                        tok_post, aa_t=input_feature_dict.get("aa_t")
+                    )
 
         return out
 

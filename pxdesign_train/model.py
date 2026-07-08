@@ -133,6 +133,9 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_c_res = c_in
             self.sc_init_sigma = float(getattr(sc_cfg, "init_sigma", 1.0)) if sc_cfg is not None else 1.0
             self.sc_detach_feedback = bool(getattr(sc_cfg, "detach_feedback", False)) if sc_cfg is not None else False
+            # Stage III routing: supervise coord loss only where predicted type
+            # matches GT; mismatched residues fall back to physical loss.
+            self.sc_route_by_type = bool(getattr(sc_cfg, "route_by_type", False)) if sc_cfg is not None else False
             sc_grad_scale = float(getattr(sc_cfg, "trunk_grad_scale", 1.0)) if sc_cfg is not None else 1.0
             c_atom = int(getattr(sc_cfg, "c_atom", 128)) if sc_cfg is not None else 128
             self.sidechain_module = SideChainModule(
@@ -309,6 +312,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                     valid_mask=m.reshape(B_, L_ * A_),
                 )
                 out["sc_phys_val"] = phys["total"]
+
+            # Stage III type routing: coord loss only where predicted AA == GT.
+            if self.sc_route_by_type:
+                aa_clean = input_feature_dict.get("aa_clean")
+                if aa_clean is not None:
+                    pred = aa_logits.argmax(dim=-1)
+                    if pred.dim() > 1:
+                        pred = pred[0]
+                    out["sc_type_match"] = (pred == aa_clean.to(pred.device))
 
         # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
         #    using the side-chain-informed h_res'. h_res' is injected into the

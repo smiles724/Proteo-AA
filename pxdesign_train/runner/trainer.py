@@ -281,6 +281,7 @@ class PXDesignTrainer:
             sc_pred_local=out.get("sc_pred_local"),
             sc_gt_local=batch["input_feature_dict"].get("sc_gt_local"),
             sc_atom_mask=out.get("sc_atom_mask"),
+            sc_type_match=out.get("sc_type_match"),
             sc_phys=out.get("sc_phys_val"),
             post_pred_coordinate=out.get("post_pred_coordinate"),
             post_gt_coordinate_aug=out.get("post_gt_coordinate_aug"),

@@ -19,6 +19,11 @@ import torch
 from pxdesign_train.sampler import build_aa20_to_restype36, _unmask_counts
 
 
+# 20-AA index -> 3-letter (matches PRO_STD order used elsewhere).
+_AA3 = ["ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+        "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL"]
+
+
 @torch.no_grad()
 def cogenerate(
     model,
@@ -26,6 +31,8 @@ def cogenerate(
     N_step: int = 20,
     temperature: float = 0.0,
     chunk_size: Optional[int] = None,
+    sidechain_cycle: bool = False,
+    sc_start_frac: float = 0.5,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -88,13 +95,32 @@ def cogenerate(
     counts = counts + [0] * (max(0, len(noise_schedule) - 1 - len(counts)))
     trajectory = []
 
+    # --- inference-side cycle setup (Overleaf iterative co-evolution) ---
+    sc_enabled = (sidechain_cycle and getattr(model, "enable_sidechain", False)
+                  and getattr(model, "enable_coevolution", False))
+    bb_atom_idx = {}
+    if sc_enabled:
+        a2t = feat["atom_to_token_idx"]
+        while a2t.dim() > 1:
+            a2t = a2t.squeeze(0)
+        for tok in positions.tolist():
+            aot = (a2t == tok).nonzero(as_tuple=False).squeeze(-1)
+            if aot.numel() >= 3:
+                bb_atom_idx[tok] = aot[:3]  # N, CA, C (backbone-first ordering)
+    h_res_prime_inject = None  # persistent side-chain-aware h_res across steps
+
     for step, (sig_t, sig_next) in enumerate(zip(noise_schedule[:-1], noise_schedule[1:])):
         feat["restype"] = restype.unsqueeze(0) if input_feature_dict["restype"].dim() == 3 else restype
         sigma = sig_t.reshape(1).to(dtype)
 
+        # Persist side-chain-informed h_res' into the trunk for this step.
+        s_trunk_step = s_trunk
+        if sc_enabled and h_res_prime_inject is not None:
+            s_trunk_step = s_trunk + model.hres_injector(h_res_prime_inject).to(s_trunk.dtype)
+
         x_denoised = model.diffusion_module(
             x_noisy=x, t_hat_noise_level=sigma, input_feature_dict=feat,
-            s_inputs=s_inputs, s_trunk=s_trunk, z_trunk=z_trunk,
+            s_inputs=s_inputs, s_trunk=s_trunk_step, z_trunk=z_trunk,
             pair_z=None, p_lm=None, c_l=None,
         )
         # EDM Euler reverse step on coordinates.
@@ -126,11 +152,45 @@ def cogenerate(
             for j in reveal.tolist():
                 restype[j] = one_hot(int(aa20_to_36[sampled[j]]))
 
+        # --- side-chain step (late sigma): decode side chains for committed
+        #     residues, pool -> h_res', persist for the next backbone step. ---
+        if sc_enabled and float(sig_t) <= sc_start_frac * float(noise_schedule[0]):
+            committed = [int(j) for j in positions.tolist()
+                         if (not bool(still[j])) and (j in bb_atom_idx) and int(sampled[j]) >= 0]
+            if committed:
+                from pxdesign_train.sidechain.frames import build_frame
+                from pxdesign_train.sidechain.instantiate import (
+                    sidechain_atom_name_ids, sidechain_mask,
+                )
+                from pxdesign_train.sidechain.init import gaussian_init_local
+
+                restypes3 = [_AA3[int(sampled[j])] for j in committed]
+                ids = sidechain_atom_name_ids(restypes3).to(device)
+                m = sidechain_mask(restypes3).to(device)
+                xc = x.squeeze(0)
+                Ns = torch.stack([xc[bb_atom_idx[j][0]] for j in committed]).float()
+                CAs = torch.stack([xc[bb_atom_idx[j][1]] for j in committed]).float()
+                Cs = torch.stack([xc[bb_atom_idx[j][2]] for j in committed]).float()
+                R, t = build_frame(Ns, CAs, Cs)
+                noisy = gaussian_init_local(m.cpu(), sigma=model.sc_init_sigma).to(device).to(dtype)
+                a_full = a_red.squeeze(0) if a_red.dim() == 3 else a_red   # [N_token, c]
+                h_c = a_full[committed]
+                l_c = logits[committed]
+                _, atom_feats = model.sidechain_module(
+                    h_c[None], l_c[None], ids[None], m[None], noisy[None],
+                    torch.ones(1, device=device), ca_coords=t[None].float(),
+                )
+                h_prime = model.sidechain_feedback(atom_feats, m[None], h_c[None]).squeeze(0)
+                full = a_full.clone()
+                full[committed] = h_prime.to(full.dtype)
+                h_res_prime_inject = full.unsqueeze(0) if s_trunk.dim() == 3 else full
+
         trajectory.append({
             "step": step,
             "sigma": float(sig_t),
             "mask_frac": float(still[positions].float().mean()) if positions.numel() else 0.0,
             "mean_conf": float(conf[positions].mean()) if positions.numel() else 0.0,
+            "sc_committed": len(committed) if sc_enabled and float(sig_t) <= sc_start_frac * float(noise_schedule[0]) else 0,
         })
 
     return {"coordinate": x.squeeze(0), "sequence": sampled, "trajectory": trajectory}

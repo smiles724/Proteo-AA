@@ -55,13 +55,15 @@ injection because Protenix's `s_trunk` is sample-shared); multi-structure / gene
 ```bash
 git clone --recursive <this-repo-url>          # pulls Protenix + PXDesign submodules
 pip install -e .                               # this package (torch, numpy)
-pip install -r Protenix/requirements.txt       # + PXDesign/requirements.txt
-# apply the PXDesign↔Protenix embedders patch — see PXDESIGN_TRAIN_README.md
+pip install -r Protenix/requirements.txt       # Protenix deps
+pip install -r PXDesign/requirements.txt       # PXDesign deps
+bash scripts/setup.sh                          # applies the PXDesign↔Protenix embedders patch (required)
 ```
 
-> [`PXDESIGN_TRAIN_README.md`](PXDESIGN_TRAIN_README.md) is the **upstream
-> `guanlueli/PXDesign-train` reproduction note** (its clone URLs point upstream), kept
-> for the submodule/patch/CCD-cache setup details.
+The `scripts/setup.sh` patch step is **required** — without it the PXDesign↔Protenix-2.0
+embedder shapes mismatch. [`PXDESIGN_TRAIN_README.md`](PXDESIGN_TRAIN_README.md) is the
+**upstream `guanlueli/PXDesign-train` reproduction note** (its clone URLs point upstream),
+kept for the manual patch, CCD-cache, and server details.
 
 ## Usage
 
@@ -77,7 +79,7 @@ python scripts/finetune_mini.py --sidechain_warmup \
 python scripts/finetune_mini.py --coevolution \
   --cif PXDesign/examples/5o45.cif --binder_chain B --ckpt <pxdesign_v0.1.0.pt>
 
-# Joint co-generation (backbone + sequence + full-atom side chains) from noise
+# Joint co-generation (backbone + sequence + S_φ side-chain coordinates) from noise
 python scripts/finetune_mini.py --cogenerate --sc_cycle \
   --cif PXDesign/examples/5o45.cif --binder_chain B --ckpt <pxdesign_v0.1.0.pt>
 ```

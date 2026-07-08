@@ -348,6 +348,16 @@ class ProtenixDesignTrain(ProtenixDesign):
                 from pxdesign_train.sidechain.instantiate import instantiate_from_type_indices
                 ptype = out["aa_logits_reduced"].argmax(dim=-1)   # [L] or [B, L]
                 if ptype.dim() > 1:
+                    # Batch>1 not yet supported here: predicted-type instantiation +
+                    # routing use item 0. Fine for the current batch_size=1 trainer;
+                    # warn so it isn't a silent bug if macro-batch grows (see
+                    # docs/method_status.md).
+                    if ptype.shape[0] > 1 and not getattr(self, "_warned_predmask_batch", False):
+                        logging.getLogger(__name__).warning(
+                            "predicted_mask: batch>1 detected; per-item atom-set "
+                            "instantiation/routing not implemented — using item 0."
+                        )
+                        self._warned_predmask_batch = True
                     ptype = ptype[0]
                 pids, pmask = instantiate_from_type_indices(ptype)
                 sc_ids = pids.to(sc_ids.device)
@@ -476,6 +486,11 @@ class ProtenixDesignTrain(ProtenixDesign):
                     y_gt = input_feature_dict.get("sc_gt_local")
                     if y_gt is not None:
                         y_gt = y_gt.to(y_l.device).float()
+                        # Tile GT local target over the sigma axis like frames/bb
+                        # (not just batch=1 broadcast) so it stays row-aligned with
+                        # the [B*N_sample] predictions when macro-batch grows.
+                        if use_per_sigma:
+                            y_gt = _tile_per_sigma(y_gt, trailing_ndim=3)
                         pseudo = to_global(y_gt, fR.detach(), ft.detach())   # [B,L,A,3]
                         mm = m.to(y_g.dtype)
                         se = ((y_g - pseudo) ** 2).sum(-1) * mm

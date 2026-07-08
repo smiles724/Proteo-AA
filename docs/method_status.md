@@ -21,6 +21,13 @@ binder side chains are excluded from `L_bb` and scrubbed (→ Cα) from the diff
 input; `post_aa` is supervised only under predicted-mask (so GT atom composition can't
 leak identity into the AA head).
 
+**Known future-batch limitation.** The trainer runs `batch_size=1` (macro-batching is
+done over the `N_sample` diffusion axis). Two side-chain paths currently assume that:
+the predicted-mask branch instantiates the atom set / routing from item 0 (warns if
+`batch>1`), and the predicted-frame pseudo-target is tiled over the σ axis but not over
+a `batch>1` axis. Both are fine at `batch_size=1`; revisit before enabling true
+macro-batch training.
+
 **Validated so far.** `--sidechain_warmup` and `--coevolution` run end-to-end on a
 single-structure GPU smoke: `sc_local` drops, losses finite, no shape/leakage issues.
 **Not yet:** multi-structure / held-out / design-quality benchmarks (need real-data

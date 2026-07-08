@@ -31,7 +31,7 @@ def build(args, device):
         provider, source_name="cif", crop_size=args.crop_size,
         hotspot_force_zero_prob=0.0,
         aa_mask_mode="time_dependent", aa_mask_min_prob=0.15, aa_mask_max_prob=1.0,
-        compute_sidechain=getattr(args, "sidechain_warmup", False) or getattr(args, "coevolution", False),
+        compute_sidechain=getattr(args, "sidechain_warmup", False) or getattr(args, "coevolution", False) or getattr(args, "sc_cycle", False),
         seed=0,
     )
     multi = CurriculumMultiDataset(datasets=[src], source_names=["cif"],
@@ -61,8 +61,10 @@ def build(args, device):
     configs.loss.align_before_mse = (device.type == "cuda")
     if getattr(args, "sidechain_warmup", False) or getattr(args, "coevolution", False):
         configs.enable_sidechain = True
-    if getattr(args, "coevolution", False):
+    if getattr(args, "coevolution", False) or getattr(args, "sc_cycle", False):
         configs.enable_coevolution = True
+    if getattr(args, "sc_cycle", False):
+        configs.enable_sidechain = True
     trainer = PXDesignTrainer(configs=configs, components=components, device=device)
     return trainer
 
@@ -238,6 +240,8 @@ def main():
                     help="Fine-tune on train_cifs, report AA recovery on a train vs held-out structure")
     ap.add_argument("--sidechain_warmup", action="store_true",
                     help="Stage II-A: enable S_phi, memorize side chains, report sc_local pre->post")
+    ap.add_argument("--sc_cycle", action="store_true",
+                    help="inference-side cycle: run side-chain step in cogenerate")
     ap.add_argument("--coevolution", action="store_true",
                     help="Stage II-B: close the cycle (h_res'->B_theta refine), report sc_local/bb_post/aa_post")
     ap.add_argument("--out", default="mini_experiment.json")
@@ -343,7 +347,7 @@ def main():
         batch = trainer._to_device(next(iter(trainer.train_dl)))
         feat = batch["input_feature_dict"]
         print(f"\n=== co-generate ({args.cogen_steps} steps, input_source={args.aa_input_source}) ===")
-        res = cogenerate(trainer.raw_model, feat, N_step=args.cogen_steps)
+        res = cogenerate(trainer.raw_model, feat, N_step=args.cogen_steps, sidechain_cycle=getattr(args, "sc_cycle", False))
         seq = res["sequence"]
         dtm = feat["design_token_mask"].bool()
         while dtm.dim() > 1:

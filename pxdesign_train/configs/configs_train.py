@@ -43,10 +43,12 @@ training_configs["residue_type"] = {
     #     if the clean-eval shows structure degradation. 0.0 = stop-grad (protect
     #     structure, no co-design coupling).
     "trunk_grad_scale": 1.0,
-    # `internal_reduce` now ONLY controls the single reduced representation that
-    # h_res / S_phi consume ("mean" | "low_sigma"). The AA LOSS is computed
-    # per-sample (per-sigma) and averaged — it does NOT reduce first, so this
-    # knob no longer affects the AA training target (it is an h_res/ablation knob).
+    # `internal_reduce` controls the single reduced representation used by the
+    # h_res_candidate / warmup / cycle-reduction path ("mean" | "low_sigma").
+    # The AA LOSS is computed per-sample (per-sigma) and averaged — it does NOT
+    # reduce first, so this knob no longer affects the AA training target.
+    # When sidechain.per_sigma=True, S_phi also consumes the per-sigma h_res/logits
+    # path rather than this reduced h_res_candidate.
     "internal_reduce": "mean",
 }
 
@@ -93,6 +95,8 @@ training_configs["loss"] = {
     # PXDesignLoss defaults and were NOT plumbed from config; now透传 (M5).
     "weight_sc_local": 1.0,
     "weight_sc_phys": 0.1,
+    # Predicted-frame stop-grad pseudo-target aux (paper Stage II-B).
+    "weight_sc_global": 0.5,
     # Post-refinement (Stage II-B cycle closure) term weights.
     "weight_bb_post": 1.0,
     "weight_aa_post": 1.0,
@@ -111,6 +115,12 @@ training_configs["sidechain"] = {
     # This is the intended joint-training main line. Stage II-A warmup may set
     # this False to use the single reduced-h_res baseline (labeled as warmup).
     "per_sigma": True,
+    # Paper Stage II-B: S_phi conditions on the PREDICTED backbone. When True
+    # (and per_sigma), side-chain frames F_hat are built from x_denoised (x_hat_0)
+    # rather than the GT backbone, and a stop-grad global pseudo-target aux loss
+    # is added. Warmup (Stage II-A) uses GT frames -> set False.
+    "predicted_frame": True,
+    "weight_sc_global": 0.5,   # weight of the predicted-frame pseudo-target aux loss
     # M1: exclude binder side-chain atoms from the backbone (L_bb) target so
     # B_theta is backbone-only and S_phi is the sole side-chain generator.
     "backbone_only_binder": True,

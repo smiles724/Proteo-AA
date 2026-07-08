@@ -183,6 +183,7 @@ class PXDesignTrainer:
             # PXDesignLoss defaults regardless of config).
             weight_sc_local=float(getattr(loss_cfg, "weight_sc_local", 1.0)),
             weight_sc_phys=float(getattr(loss_cfg, "weight_sc_phys", 0.1)),
+            weight_sc_global=float(getattr(loss_cfg, "weight_sc_global", 0.5)),
         )
         # Post-refinement weights are passed per-call in forward_loss.
         self._weight_bb_post = float(getattr(loss_cfg, "weight_bb_post", 1.0))
@@ -290,6 +291,7 @@ class PXDesignTrainer:
             sc_atom_mask=out.get("sc_atom_mask"),
             sc_type_match=out.get("sc_type_match"),
             sc_phys=out.get("sc_phys_val"),
+            sc_global=out.get("sc_global_aux"),
             post_pred_coordinate=out.get("post_pred_coordinate"),
             post_gt_coordinate_aug=out.get("post_gt_coordinate_aug"),
             post_aa_logits=out.get("post_aa_logits"),

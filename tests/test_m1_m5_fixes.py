@@ -191,6 +191,28 @@ def test_aa_loss_per_sample_equals_mean_of_per_sample_ce():
     assert (logits.grad.abs().sum(dim=(0, 2, 3)) > 0).all()
 
 
+def test_aa_loss_per_sample_batch_two_matches_reference():
+    """Batched [B, S, L, 20] logits broadcast [B, L] labels over S."""
+    import torch.nn.functional as F
+    from pxdesign_train.loss import PXDesignLoss
+
+    torch.manual_seed(4)
+    B, S, L = 2, 3, 5
+    logits = torch.randn(B, S, L, 20, requires_grad=True)
+    aa_clean = torch.randint(0, 20, (B, L))
+    aa_mask = torch.ones(B, L)
+
+    ce, _, _ = PXDesignLoss(align_before_mse=False)._aa_term(
+        logits, aa_clean, aa_mask, aa_t=None
+    )
+    ref = torch.stack(
+        [F.cross_entropy(logits[b, s], aa_clean[b]) for b in range(B) for s in range(S)]
+    ).mean()
+    assert torch.allclose(ce, ref, atol=1e-5)
+    ce.backward()
+    assert torch.isfinite(logits.grad).all()
+
+
 def test_aa_head_broadcasts_over_sample_axis():
     """The model now calls the AA head on [B, N_sample, L, c] (per-sigma). The
     head must broadcast over the sample axis and over per-item aa_t."""
@@ -353,6 +375,29 @@ def test_loss_scale_invariant_to_n_sample():
         assert torch.allclose(scl_s, scl1, atol=1e-5), f"sc_local scaled with N_sample={S}"
 
 
+def test_sidechain_loss_tiles_batch_targets_to_per_sigma_predictions():
+    """Loss accepts sc_pred [B*S,L,A,3] with GT/routing masks still [B,L,...]."""
+    from pxdesign_train.loss import PXDesignLoss
+    from pxdesign_train.sidechain.instantiate import MAX_SC
+
+    torch.manual_seed(5)
+    B, S, L, A, N = 2, 3, 4, MAX_SC, 12
+    loss_fn = PXDesignLoss(align_before_mse=False)
+    out = loss_fn(
+        pred_coordinate=torch.zeros(1, N, 3),
+        gt_coordinate_aug=torch.zeros(1, N, 3),
+        sigma=torch.ones(1),
+        coordinate_mask=torch.ones(N),
+        rep_atom_mask=torch.zeros(N, dtype=torch.bool),
+        sc_pred_local=torch.randn(B * S, L, A, 3, requires_grad=True),
+        sc_gt_local=torch.randn(B, L, A, 3),
+        sc_atom_mask=torch.ones(B * S, L, A, dtype=torch.bool),
+        sc_type_match=torch.ones(B, L, dtype=torch.bool),
+    )
+    assert torch.isfinite(out["loss"])
+    assert torch.isfinite(out["sc_local"])
+
+
 def test_h_res_sigma_row_alignment():
     """h_res_sigma / aa_logits_sigma / sigma must stay row-aligned after flatten."""
     S, L, C = 3, 2, 8
@@ -363,6 +408,58 @@ def test_h_res_sigma_row_alignment():
     assert flat_h.shape == (S, L, C) and flat_sig.shape == (S,)
     for i in range(S):
         assert torch.equal(flat_h[i], h[i]) and flat_sig[i] == sig[i]
+
+
+# ---------- Stage III: instantiate side-chain atom set from PREDICTED type ----------
+
+def test_instantiate_from_type_indices():
+    from pxdesign_train.sidechain.instantiate import (
+        instantiate_from_type_indices, sidechain_mask, MAX_SC,
+    )
+
+    # STD_AA_3 order: ALA=0 (CB only), GLY=7 (no side chain).
+    ids, mask = instantiate_from_type_indices(torch.tensor([0, 7]))
+    assert ids.shape == (2, MAX_SC) and mask.shape == (2, MAX_SC)
+    assert int(mask[0].sum()) == 1        # ALA -> CB
+    assert int(mask[1].sum()) == 0        # GLY -> empty
+    # matches the string-based instantiation
+    assert torch.equal(mask, sidechain_mask(["ALA", "GLY"]))
+
+
+# ---------- predicted-backbone frames + stop-grad pseudo-target (paper II-B) ----------
+
+def test_frames_from_backbone_index_matches_direct_build():
+    from pxdesign_train.sidechain.frames import frames_from_backbone_index, build_frame
+
+    torch.manual_seed(0)
+    N_atom = 12
+    coords = torch.randn(2, N_atom, 3)                 # [B, N_atom, 3]
+    bb_idx = torch.tensor([[0, 1, 2], [4, 5, 6], [-1, -1, -1]])  # 3 tokens; last invalid
+    R, t, valid = frames_from_backbone_index(coords, bb_idx)
+    assert R.shape == (2, 3, 3, 3) and t.shape == (2, 3, 3)
+    assert valid.tolist() == [True, True, False]
+    R0, t0 = build_frame(coords[:, 0], coords[:, 1], coords[:, 2])
+    assert torch.allclose(R[:, 0], R0) and torch.allclose(t[:, 0], t0)
+
+
+def test_predicted_frame_pseudo_target_stopgrad():
+    """Global pseudo-target: attaching y^GT to the predicted frame with the frame
+    stop-gradded gives zero loss at y_pred==y^GT, and the target side gets NO grad."""
+    from pxdesign_train.sidechain.frames import to_global
+
+    torch.manual_seed(0)
+    L, A = 2, 3
+    R = torch.randn(L, 3, 3, requires_grad=True)
+    t = torch.randn(L, 3, requires_grad=True)
+    y_gt = torch.randn(L, A, 3)
+    y_pred = y_gt.clone().requires_grad_(True)          # prediction == target
+    y_g = to_global(y_pred, R, t)
+    pseudo = to_global(y_gt, R.detach(), t.detach())    # stop-grad target frame
+    loss = ((y_g - pseudo) ** 2).sum()
+    assert torch.allclose(loss, torch.zeros(()), atol=1e-5)
+    loss.backward()
+    assert R.grad is not None                            # backbone still learns via pred side
+    assert torch.allclose(y_pred.grad, torch.zeros_like(y_pred.grad), atol=1e-5)
 
 
 # ---------------- M3: side-chain global assembly math ----------------

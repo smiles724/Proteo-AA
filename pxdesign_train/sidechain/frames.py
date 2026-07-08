@@ -44,3 +44,22 @@ def to_local(x_global: torch.Tensor, R: torch.Tensor, t: torch.Tensor) -> torch.
 def to_global(x_local: torch.Tensor, R: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """Local -> global. x_local: [..., A, 3], R: [..., 3, 3], t: [..., 3]."""
     return torch.einsum("...ij,...aj->...ai", R, x_local) + t[..., None, :]
+
+
+def frames_from_backbone_index(coords: torch.Tensor, bb_idx: torch.Tensor):
+    """Build per-residue frames from PREDICTED backbone coords by gathering each
+    token's N/CA/C atoms (paper Stage II-B: F_hat = Frame(x_hat_N, x_hat_CA, x_hat_C)).
+
+    Args:
+        coords: [..., N_atom, 3] predicted (or any) global coordinates.
+        bb_idx: [L, 3] long — atom indices of (N, CA, C) per token; -1 = invalid.
+    Returns:
+        R: [..., L, 3, 3], t: [..., L, 3], valid: [L] bool (False where bb_idx<0).
+    """
+    valid = (bb_idx >= 0).all(dim=-1)                    # [L]
+    safe = bb_idx.clamp_min(0)                           # gather needs non-neg
+    n = coords[..., safe[:, 0], :]                       # [..., L, 3]
+    ca = coords[..., safe[:, 1], :]
+    c = coords[..., safe[:, 2], :]
+    R, t = build_frame(n, ca, c)                         # [..., L, 3, 3], [..., L, 3]
+    return R, t, valid

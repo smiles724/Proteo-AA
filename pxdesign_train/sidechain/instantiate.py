@@ -61,3 +61,19 @@ def sidechain_atom_name_ids(restypes: Sequence[str]) -> torch.Tensor:
         for j, name in enumerate(sidechain_atoms(r)):
             ids[i, j] = ATOM_NAME_TO_ID[name]
     return ids
+
+
+def instantiate_from_type_indices(type_idx: torch.Tensor):
+    """Stage III predicted-mask: instantiate the side-chain atom set from a
+    per-token amino-acid INDEX (0..19, in the `STD_AA_3` / logit order used by the
+    AA head and `cogenerate._AA3`), rather than the GT residue type.
+
+    Args:
+        type_idx: [L] long, values in [0, 19] (out-of-range -> empty side chain).
+    Returns:
+        (ids [L, MAX_SC] long, mask [L, MAX_SC] bool) — same layout as the GT
+        instantiation, so downstream S_phi / loss code is unchanged.
+    """
+    idx = type_idx.detach().cpu().tolist()
+    restypes = [STD_AA_3[i] if 0 <= i < len(STD_AA_3) else "GLY" for i in idx]
+    return sidechain_atom_name_ids(restypes), sidechain_mask(restypes)

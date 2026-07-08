@@ -147,6 +147,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             # (flattened [B*N_sample, L, C]) rather than a reduced h_res. Warmup
             # can turn this off for the single-baseline path.
             self.sc_per_sigma = bool(getattr(sc_cfg, "per_sigma", True)) if sc_cfg is not None else True
+            # Paper Stage II-B: build side-chain frames from the PREDICTED backbone
+            # (x_denoised) + a stop-grad global pseudo-target aux loss. Warmup uses
+            # GT frames (predicted_frame=False).
+            self.sc_predicted_frame = bool(getattr(sc_cfg, "predicted_frame", True)) if sc_cfg is not None else True
+            self.sc_weight_global = float(getattr(sc_cfg, "weight_sc_global", 0.5)) if sc_cfg is not None else 0.5
             sc_grad_scale = float(getattr(sc_cfg, "trunk_grad_scale", 1.0)) if sc_cfg is not None else 1.0
             c_atom = int(getattr(sc_cfg, "c_atom", 128)) if sc_cfg is not None else 128
             self.sidechain_module = SideChainModule(
@@ -293,11 +298,36 @@ class ProtenixDesignTrain(ProtenixDesign):
             if use_per_sigma:
                 hs = out["h_res_sigma"]             # [.., N_sample, L, C]
                 al = out["aa_logits"]               # [.., N_sample, L, 20] (per-sigma)
+                sample_shape = hs.shape[:-3]
+                n_sample = hs.shape[-3]
                 L_, C_ = hs.shape[-2], hs.shape[-1]
                 h_res = hs.reshape(-1, L_, C_)       # [B*N_sample, L, C]
                 aa_logits = al.reshape(-1, L_, al.shape[-1])
                 sigma_flat = out["sigma"].reshape(-1)  # [B*N_sample], row-aligned
                 squeeze = False
+
+                def _tile_per_sigma(x: torch.Tensor, trailing_ndim: int) -> torch.Tensor:
+                    """Tile per-item side-chain tensors over the sigma axis.
+
+                    h_res/aa_logits are flattened in row-major order from
+                    [..., N_sample, L, C] to [prod(...)*N_sample, L, C]. This helper
+                    applies the same layout to tensors that only carry the per-item
+                    leading dims, e.g. [B, L, A] -> [B*N_sample, L, A].
+                    """
+                    trail = x.shape[-trailing_ndim:]
+                    flat_B = h_res.shape[0]
+                    if x.dim() >= trailing_ndim + 1 and x.shape[:-trailing_ndim] == (flat_B,):
+                        return x
+                    if x.dim() == trailing_ndim:
+                        base = x.reshape(*((1,) * len(sample_shape)), *trail)
+                    else:
+                        base = x
+                    if base.shape[:-trailing_ndim] != sample_shape:
+                        base = base.expand(*sample_shape, *trail)
+                    expanded = base.unsqueeze(len(sample_shape)).expand(
+                        *sample_shape, n_sample, *trail
+                    )
+                    return expanded.reshape(flat_B, *trail)
             else:
                 h_res = out["h_res_candidate"]      # [N_token, c_res] or [B, N_token, c_res]
                 # S_phi conditions on the REDUCED AA distribution (warmup baseline).
@@ -308,15 +338,34 @@ class ProtenixDesignTrain(ProtenixDesign):
                     aa_logits = aa_logits.unsqueeze(0)
             sc_ids = input_feature_dict["sc_atom_name_ids"]
             sc_mask = input_feature_dict["sc_atom_mask"]
-            if sc_ids.dim() == 2:                   # add batch dim
-                sc_ids = sc_ids.unsqueeze(0)
-                sc_mask = sc_mask.unsqueeze(0)
-            B = h_res.shape[0]
-            if sc_ids.shape[0] != B:
-                sc_ids = sc_ids.expand(B, -1, -1)
-                sc_mask = sc_mask.expand(B, -1, -1)
+            # Stage III predicted-mask branch: instantiate the side-chain atom set
+            # from the PREDICTED residue type (argmax of the reduced logits) instead
+            # of the GT type. This is what makes post_aa safe to supervise (M2): the
+            # atom composition no longer carries GT identity. Matched residues still
+            # align with sc_gt_local (same atoms/order); mismatched ones are routed
+            # to physical-only via sc_type_match below.
+            if getattr(self, "sc_predicted_mask", False):
+                from pxdesign_train.sidechain.instantiate import instantiate_from_type_indices
+                ptype = out["aa_logits_reduced"].argmax(dim=-1)   # [L] or [B, L]
+                if ptype.dim() > 1:
+                    ptype = ptype[0]
+                pids, pmask = instantiate_from_type_indices(ptype)
+                sc_ids = pids.to(sc_ids.device)
+                sc_mask = pmask.to(sc_mask.device)
+            if use_per_sigma:
+                sc_ids = _tile_per_sigma(sc_ids, trailing_ndim=2)
+                sc_mask = _tile_per_sigma(sc_mask, trailing_ndim=2)
+            else:
+                if sc_ids.dim() == 2:                   # add batch dim
+                    sc_ids = sc_ids.unsqueeze(0)
+                    sc_mask = sc_mask.unsqueeze(0)
+                B = h_res.shape[0]
+                if sc_ids.shape[0] != B:
+                    sc_ids = sc_ids.expand(B, -1, -1)
+                    sc_mask = sc_mask.expand(B, -1, -1)
             sc_ids = sc_ids.to(h_res.device).long()
             sc_mask = sc_mask.to(h_res.device).bool()
+            B = h_res.shape[0]
             noisy = gaussian_init_local(
                 sc_mask.detach().cpu(), sigma=self.sc_init_sigma
             ).to(h_res.device).to(h_res.dtype)
@@ -327,13 +376,32 @@ class ProtenixDesignTrain(ProtenixDesign):
                 t = 0.25 * sigma_flat.to(h_res.device).clamp_min(1e-4).log()
             else:
                 t = torch.ones(B, device=h_res.device)
+            # Paper Stage II-B: PREDICTED-backbone frames F_hat from x_denoised
+            # (x_hat_0). Falls back to GT frames when disabled / unavailable
+            # (Stage II-A warmup). R_hat/t_hat are [B*N_sample, L, 3, 3]/[.., L, 3].
+            R_hat = t_hat = bb_pred = None
+            if getattr(self, "sc_predicted_frame", False) and use_per_sigma:
+                bb_idx = input_feature_dict.get("sc_bb_atom_idx")
+                xden = out.get("x_denoised")
+                if bb_idx is not None and xden is not None:
+                    from pxdesign_train.sidechain.frames import frames_from_backbone_index
+                    bb_idx = bb_idx.to(h_res.device).long()
+                    xden_flat = xden.reshape(-1, xden.shape[-2], xden.shape[-1]).to(h_res.device).float()
+                    R_hat, t_hat, _fvalid = frames_from_backbone_index(xden_flat, bb_idx)
+                    bb_pred = xden_flat[:, bb_idx.clamp_min(0), :]   # [B*N_sample, L, 3, 3] (N,CA,C)
+
             ca = input_feature_dict.get("sc_frame_t")
-            if ca is not None:
+            if t_hat is not None:
+                ca = t_hat                                          # predicted CA
+            elif ca is not None:
                 ca = ca.to(h_res.device).float()
-                if ca.dim() == 2:
-                    ca = ca.unsqueeze(0)
-                if ca.shape[0] != B:
-                    ca = ca.expand(B, -1, -1)
+                if use_per_sigma:
+                    ca = _tile_per_sigma(ca, trailing_ndim=2)
+                else:
+                    if ca.dim() == 2:
+                        ca = ca.unsqueeze(0)
+                    if ca.shape[0] != B:
+                        ca = ca.expand(B, -1, -1)
             y0_local, atom_feats = self.sidechain_module(
                 h_res, aa_logits, sc_ids, sc_mask, noisy, t, ca_coords=ca,
             )
@@ -353,7 +421,6 @@ class ProtenixDesignTrain(ProtenixDesign):
             # over the sigma axis for the injection (documented limitation); the
             # per-sigma h_res' above is still available for other consumers.
             if use_per_sigma:
-                n_sample = out["sigma"].shape[-1]
                 out["h_res_prime_reduced"] = (
                     h_res_prime.reshape(-1, n_sample, h_res_prime.shape[-2], h_res_prime.shape[-1])
                     .mean(dim=1)
@@ -366,16 +433,26 @@ class ProtenixDesignTrain(ProtenixDesign):
             # Physical regularization (clash + contact) on predicted GLOBAL
             # side-chain coords: local -> global via the residue frames, then a
             # coordinate-only physical loss (no ideal-geometry tables needed).
-            fR = input_feature_dict.get("sc_frame_R")
-            ft = input_feature_dict.get("sc_frame_t")
-            bb = input_feature_dict.get("sc_bb_coords")
+            y_l = y0_local if y0_local.dim() == 4 else y0_local.unsqueeze(0)  # [B,L,A,3]
+            m = sc_mask if sc_mask.dim() == 3 else sc_mask.unsqueeze(0)
+            if R_hat is not None:
+                # Predicted-backbone frames (paper Stage II-B): already [B_, L, ...].
+                fR, ft, bb = R_hat, t_hat, bb_pred
+            else:
+                fR = input_feature_dict.get("sc_frame_R")
+                ft = input_feature_dict.get("sc_frame_t")
+                bb = input_feature_dict.get("sc_bb_coords")
+                if fR is not None and ft is not None and bb is not None:
+                    fR = fR.to(y_l.device).float()
+                    ft = ft.to(y_l.device).float()
+                    bb = bb.to(y_l.device).float()
+                    if use_per_sigma:
+                        fR = _tile_per_sigma(fR, trailing_ndim=3)
+                        ft = _tile_per_sigma(ft, trailing_ndim=2)
+                        bb = _tile_per_sigma(bb, trailing_ndim=3)
+                    elif fR.dim() == 3:
+                        fR, ft, bb = fR.unsqueeze(0), ft.unsqueeze(0), bb.unsqueeze(0)
             if fR is not None and ft is not None and bb is not None:
-                y_l = y0_local if y0_local.dim() == 4 else y0_local.unsqueeze(0)  # [B,L,A,3]
-                fR = fR.to(y_l.device).float()
-                ft = ft.to(y_l.device).float()
-                bb = bb.to(y_l.device).float()
-                if fR.dim() == 3:
-                    fR, ft, bb = fR.unsqueeze(0), ft.unsqueeze(0), bb.unsqueeze(0)
                 B_, L_, A_ = y_l.shape[0], y_l.shape[1], y_l.shape[2]
                 # Broadcast per-token frames/backbone to the (possibly per-sigma)
                 # batch B_ so the reshape below is well-formed for B*N_sample rows.
@@ -384,7 +461,6 @@ class ProtenixDesignTrain(ProtenixDesign):
                     ft = ft.expand(B_, -1, -1)
                     bb = bb.expand(B_, -1, -1, -1)
                 y_g = to_global(y_l.float(), fR, ft)                     # [B,L,A,3]
-                m = sc_mask if sc_mask.dim() == 3 else sc_mask.unsqueeze(0)
                 phys = physical_loss(
                     y_g.reshape(B_, L_ * A_, 3),
                     backbone_coords=bb.reshape(B_, L_ * bb.shape[2], 3),
@@ -392,14 +468,37 @@ class ProtenixDesignTrain(ProtenixDesign):
                 )
                 out["sc_phys_val"] = phys["total"]
 
-            # Stage III type routing: coord loss only where predicted AA == GT.
-            if self.sc_route_by_type:
+                # Stop-grad global pseudo-target aux (paper Stage II-B): attach the
+                # GT local side chain to the PREDICTED frame with the frame
+                # stop-gradded on the target side, so the frame cannot move to
+                # trivially reduce the loss but the backbone still gets a signal.
+                if R_hat is not None:
+                    y_gt = input_feature_dict.get("sc_gt_local")
+                    if y_gt is not None:
+                        y_gt = y_gt.to(y_l.device).float()
+                        pseudo = to_global(y_gt, fR.detach(), ft.detach())   # [B,L,A,3]
+                        mm = m.to(y_g.dtype)
+                        se = ((y_g - pseudo) ** 2).sum(-1) * mm
+                        out["sc_global_aux"] = se.sum() / (mm.sum() + 1e-6)
+
+            # Stage III type routing: coord loss only where predicted AA == GT
+            # (physical-only elsewhere). Always on under predicted_mask so the
+            # coord loss is not applied to residues whose predicted atom set differs.
+            if self.sc_route_by_type or getattr(self, "sc_predicted_mask", False):
                 aa_clean = input_feature_dict.get("aa_clean")
                 if aa_clean is not None:
-                    pred = aa_logits.argmax(dim=-1)
+                    # Use the REDUCED predicted type — the same one that
+                    # instantiated the predicted mask — so routing is consistent.
+                    pred = out["aa_logits_reduced"].argmax(dim=-1)   # [L] or [B, L]
                     if pred.dim() > 1:
                         pred = pred[0]
-                    out["sc_type_match"] = (pred == aa_clean.to(pred.device))
+                    aa_clean = aa_clean.to(pred.device)
+                    if aa_clean.dim() > 1:
+                        aa_clean = aa_clean[0]
+                    tm = (pred == aa_clean)                          # [L]
+                    if use_per_sigma:
+                        tm = _tile_per_sigma(tm, trailing_ndim=1)
+                    out["sc_type_match"] = tm
 
         # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
         #    using the side-chain-informed h_res'. h_res' is injected into the

@@ -401,6 +401,11 @@ class DesignFeaturizer:
         sc_frame_R = np.tile(np.eye(3, dtype=np.float32), (n_token, 1, 1))
         sc_frame_t = np.zeros((n_token, 3), dtype=np.float32)
         sc_bb_coords = np.zeros((n_token, 4, 3), dtype=np.float32)  # N,CA,C,O
+        # Atom indices (into the N_atom axis) of this token's N, CA, C, so the
+        # model can gather the PREDICTED backbone (x_denoised) and build predicted
+        # frames F_hat for Stage II-B (paper: S_phi conditions on x_hat_0^bb).
+        # -1 marks non-binder / missing (skipped downstream).
+        sc_bb_atom_idx = np.full((n_token, 3), -1, dtype=np.int64)
 
         for ti, ai in enumerate(rep_idx):
             if not binder[ai]:
@@ -414,6 +419,7 @@ class DesignFeaturizer:
             R, t = build_frame(n, ca, c)
             sc_frame_R[ti] = R[0].numpy()
             sc_frame_t[ti] = t[0].numpy()
+            sc_bb_atom_idx[ti] = (atoms["N"], atoms["CA"], atoms["C"])
             for bi, bn in enumerate(("N", "CA", "C", "O")):
                 if bn in atoms:
                     sc_bb_coords[ti, bi] = coord[atoms[bn]]
@@ -433,6 +439,7 @@ class DesignFeaturizer:
             "sc_frame_R": torch.from_numpy(sc_frame_R),
             "sc_frame_t": torch.from_numpy(sc_frame_t),
             "sc_bb_coords": torch.from_numpy(sc_bb_coords),
+            "sc_bb_atom_idx": torch.from_numpy(sc_bb_atom_idx),
         }
 
     @staticmethod

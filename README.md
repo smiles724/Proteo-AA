@@ -77,29 +77,28 @@ Status, graded honestly (see `reports/` for the full audit):
 | Stage II-A warmup | single reduced-`h_res` baseline + `trunk_grad_scale=0` (side-chain loss can't update the backbone). Labeled as warmup/completion — **not** per-σ co-evolution. |
 | Cycle feedback (`h_res′` → B_θ) | **wiring implemented / being updated.** `s_trunk` is sample-shared in the Protenix diffusion, so `h_res′` is injected **σ-reduced** (true per-σ feedback needs a per-sample `s_trunk` = submodule change). Smoke-tested; `post_aa` stays gated (M2). |
 | physical loss: clash + contact | implemented **and activated** |
-| physical loss: bond / angle / rotamer | implemented, **not activated** (no residue-specific geometry tables wired) |
-| side-chain frames in training | built from **GT backbone** (fine for II-A warmup); predicted-backbone frames only at inference — II-B is not yet true predicted-backbone co-evolution |
-| type-mismatch loss routing (`route_sidechain_loss`) | **skeleton, not wired into training** |
-| Stage III `L_SC-AA` candidate ranking | core implemented + unit-tested, **not integrated** |
-| Full-atom side-chain output at inference (M3) | `cogenerate` now returns S_φ side-chain coords |
+| physical loss: bond / angle / rotamer | implemented, **not activated** — needs a vetted residue-specific ideal-geometry table (bond lengths / angles / χ definitions) |
+| **Predicted-backbone frames in II-B** (paper Stage II-B) | side-chain frames `F̂` built from `x̂₀` (`x_denoised`) via gathered N/CA/C, **plus** a stop-grad global pseudo-target aux loss (`weight_sc_global`). Warmup (II-A) still uses GT frames. |
+| **Stage III predicted-mask branch** | atom set instantiated from the **predicted** residue type; coord loss routed to type-matched residues, physical elsewhere; this is what makes `post_aa` safe to re-enable |
+| type-mismatch loss routing (`route_sidechain_loss` module) | still a skeleton; the model routes coord/physical directly via `sc_type_match` |
+| Stage III `L_SC-AA` candidate ranking | core implemented + unit-tested, **not integrated** (needs per-candidate S_φ orchestration) |
+| iterative termination on sequence stability (paper) | implemented as an optional `cogenerate` early-stop (`stop_on_seq_stable`) |
+| Full-atom side-chain output at inference (M3) | `cogenerate` returns S_φ side-chain coords |
 
-**Two boundaries that must stay explicit:**
-1. **The cycle is a conservative smoke-test, not fully per-σ co-evolution.** `h_res′`
-   must be σ-averaged before it can be injected into Protenix's sample-shared
-   `s_trunk`, so the feedback is not per-σ. Call it a conservative cycle smoke-test —
-   **not** fully per-σ co-evolution.
-2. **Side-chain frames are still GT / II-A-style.** Training builds side-chain frames
-   from the GT backbone; predicted-backbone-frame training is not solved (at high σ
-   the predicted backbone is noise, and the GT-frame target then mismatches). So we
-   **cannot** claim predicted-backbone joint training is validated.
+**Boundaries that must stay explicit:**
+1. **The cycle *feedback* is a conservative smoke-test, not fully per-σ co-evolution.**
+   `h_res′` must be σ-averaged before injecting into Protenix's sample-shared
+   `s_trunk`, so the feedback is not per-σ (true per-σ feedback needs a submodule
+   change). The S_φ *forward* and frames ARE per-σ / predicted-backbone.
+2. **Physical bond/angle/rotamer are not activated** (need a vetted geometry table),
+   and **`L_SC-AA` candidate ranking is not integrated**.
 
 **Deliberately NOT claimed:** method validated · co-evolution verified · fully per-σ
-co-evolution · predicted-backbone joint training validated · Stage III complete ·
-predicted-mask robustness · generalization / design quality. The co-evolution
-AA-refinement objective (`post_aa`) is **not supervised by default**
-(`sidechain.predicted_mask=False`, M2): under GT-type teacher-forcing the GT atom
-composition would leak residue identity into the AA head, so it stays off until the
-side-chain atom set is instantiated from *predicted* type.
+cycle feedback · Stage III complete · generalization / design quality. `post_aa` is
+supervised **only** when `sidechain.predicted_mask=True` (atom set from predicted
+type); it stays off by default so GT atom composition cannot leak identity into the
+AA head. Predicted-backbone-frame training is implemented but **only smoke-tested**,
+not validated.
 
 ---
 

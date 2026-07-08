@@ -76,9 +76,11 @@ def build(args, device):
     )
     if _warmup_only:
         configs.sidechain.trunk_grad_scale = 0.0
-        # Stage II-A warmup: single reduced-h_res baseline (labeled as warmup, not
-        # per-sigma co-evolution). Cycle/coevolution keeps per_sigma=True.
+        # Stage II-A warmup: single reduced-h_res baseline + GT frames (labeled as
+        # warmup, not per-sigma co-evolution). Cycle/coevolution keeps per_sigma=True
+        # and predicted_frame=True.
         configs.sidechain.per_sigma = False
+        configs.sidechain.predicted_frame = False
     trainer = PXDesignTrainer(configs=configs, components=components, device=device)
     return trainer
 

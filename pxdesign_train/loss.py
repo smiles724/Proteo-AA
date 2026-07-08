@@ -61,11 +61,13 @@ class PXDesignLoss(nn.Module):
         aa_time_eps: float = 1e-2,
         weight_sc_local: float = 1.0,
         weight_sc_phys: float = 0.1,
+        weight_sc_global: float = 0.5,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.weight_sc_local = weight_sc_local
         self.weight_sc_phys = weight_sc_phys
+        self.weight_sc_global = weight_sc_global
         self.weight_mse = weight_mse
         self.weight_lddt = weight_lddt
         self.weight_disto = weight_disto
@@ -244,6 +246,7 @@ class PXDesignLoss(nn.Module):
         sc_atom_mask: Optional[torch.Tensor] = None,       # [..., L, A] bool
         sc_type_match: Optional[torch.Tensor] = None,      # [..., L] bool (pred==gt type)
         sc_phys: Optional[torch.Tensor] = None,            # precomputed physical loss scalar
+        sc_global: Optional[torch.Tensor] = None,          # predicted-frame pseudo-target aux (scalar)
         post_pred_coordinate: Optional[torch.Tensor] = None,   # [..., N_sample, N_atom, 3]
         post_gt_coordinate_aug: Optional[torch.Tensor] = None, # [..., N_sample, N_atom, 3]
         post_aa_logits: Optional[torch.Tensor] = None,         # [..., N_token, 20]
@@ -317,15 +320,61 @@ class PXDesignLoss(nn.Module):
         # The physical loss (global-frame, needs ideal-geometry tables) is
         # computed upstream and passed in as `sc_phys`.
         if sc_pred_local is not None and sc_gt_local is not None and sc_atom_mask is not None:
+            def _match_pred_leading(x: torch.Tensor, trailing_ndim: int) -> torch.Tensor:
+                """Match per-item side-chain labels to per-sigma predictions.
+
+                In per-sigma training `sc_pred_local` may be flattened from
+                [B, S, L, A, 3] to [B*S, L, A, 3], while GT targets remain
+                [B, L, A, 3]. Repeat each batch item over S so loss terms are
+                row-aligned with the predictions.
+                """
+                pred_lead = sc_pred_local.shape[:-trailing_ndim]
+                x_lead = x.shape[:-trailing_ndim]
+                if x_lead == pred_lead:
+                    return x
+                if x.dim() == trailing_ndim:
+                    return x
+                if (
+                    len(pred_lead) == 1
+                    and len(x_lead) == 1
+                    and x_lead[0] > 0
+                    and pred_lead[0] % x_lead[0] == 0
+                ):
+                    return x.repeat_interleave(pred_lead[0] // x_lead[0], dim=0)
+                return x.expand(*pred_lead, *x.shape[-trailing_ndim:])
+
+            sc_gt_local = _match_pred_leading(sc_gt_local, trailing_ndim=3)
             coord_mask = sc_atom_mask.bool()
             if sc_type_match is not None:
+                sc_type_match = sc_type_match.bool()
+                target_lead = coord_mask.shape[:-1]  # [..., L]
+                if sc_type_match.shape != target_lead:
+                    if sc_type_match.dim() == 1:
+                        sc_type_match = sc_type_match.expand(*target_lead)
+                    elif (
+                        len(target_lead) == 2
+                        and sc_type_match.dim() == 2
+                        and sc_type_match.shape[0] > 0
+                        and target_lead[0] % sc_type_match.shape[0] == 0
+                        and target_lead[1] == sc_type_match.shape[1]
+                    ):
+                        sc_type_match = sc_type_match.repeat_interleave(
+                            target_lead[0] // sc_type_match.shape[0], dim=0
+                        )
+                    else:
+                        sc_type_match = sc_type_match.expand(*target_lead)
                 coord_mask = coord_mask & sc_type_match.bool()[..., None]
             sc_local = sidechain_local_loss(sc_pred_local, sc_gt_local, coord_mask)
             sc_phys_val = sc_phys if sc_phys is not None else total.sum() * 0.0
-            total = total + self.weight_sc_local * sc_local + self.weight_sc_phys * sc_phys_val
+            # Predicted-frame stop-grad pseudo-target aux (paper Stage II-B).
+            sc_global_val = sc_global if sc_global is not None else total.sum() * 0.0
+            total = (total + self.weight_sc_local * sc_local
+                     + self.weight_sc_phys * sc_phys_val
+                     + self.weight_sc_global * sc_global_val)
         else:
             sc_local = total.sum() * 0.0
             sc_phys_val = total.sum() * 0.0
+            sc_global_val = total.sum() * 0.0
 
         # --- Post-refinement terms (Stage II-B cycle closure) ---
         # Side-chain-informed backbone refinement: reuse the coord / AA loss on
@@ -352,6 +401,7 @@ class PXDesignLoss(nn.Module):
             "aa_mask_frac": aa_mask_frac,
             "sc_local": sc_local.detach(),
             "sc_phys": sc_phys_val.detach(),
+            "sc_global": sc_global_val.detach(),
             "bb_post": bb_post.detach(),
             "aa_post": aa_post_ce.detach(),
         }

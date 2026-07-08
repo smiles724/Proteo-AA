@@ -33,6 +33,8 @@ def cogenerate(
     chunk_size: Optional[int] = None,
     sidechain_cycle: bool = False,
     sc_start_frac: float = 0.5,
+    stop_on_seq_stable: bool = False,
+    seq_patience: int = 3,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -111,6 +113,8 @@ def cogenerate(
     # M3: keep the latest decoded side-chain global coords per committed token so
     # the final result carries a full-atom (backbone + S_phi side-chain) output.
     sidechain_out: dict[int, dict[str, Any]] = {}
+    _prev_seq: tuple = ()          # sequence-stabilization tracking (paper termination)
+    _seq_stable = 0
 
     for step, (sig_t, sig_next) in enumerate(zip(noise_schedule[:-1], noise_schedule[1:])):
         feat["restype"] = restype.unsqueeze(0) if input_feature_dict["restype"].dim() == 3 else restype
@@ -209,6 +213,20 @@ def cogenerate(
             "mean_conf": float(conf[positions].mean()) if positions.numel() else 0.0,
             "sc_committed": len(committed) if sc_enabled and float(sig_t) <= sc_start_frac * float(noise_schedule[0]) else 0,
         })
+
+        # Paper: terminate the iterative refinement when the predicted sequence
+        # stabilizes (all positions committed and unchanged for `seq_patience`
+        # steps). Off by default -> keep the full fixed EDM schedule.
+        if stop_on_seq_stable and not bool(still[positions].any()):
+            cur = tuple(sampled[positions].cpu().tolist())
+            if step > 0 and cur == _prev_seq:
+                _seq_stable += 1
+                if _seq_stable >= seq_patience:
+                    trajectory[-1]["early_stop"] = True
+                    break
+            else:
+                _seq_stable = 0
+            _prev_seq = cur
 
     # M3: full-atom assembly — backbone coords from diffusion + S_phi side-chain
     # global coords per committed design residue (empty dict if the cycle was off

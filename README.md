@@ -49,18 +49,6 @@ injection because Protenix's `s_trunk` is sample-shared); multi-structure / gene
 
 ---
 
-## Why the AA head reads `a_token`
-
-The residue-type head needs a **structure-aware** input. It reads `a_token` — captured
-(via a forward hook, no submodule edit) *after* the DiffusionModule's token
-self-attention — because it has cross-token context **and** is conditioned on the
-binder's own noisy backbone, unlike the structure-blind `s_inputs`/`s_trunk`. This same
-representation is the shared `h_res` handed to `S_φ`. Because training draws `N_sample`
-noise levels per item, the AA loss is computed **per σ and averaged** (a Monte-Carlo
-estimate over the σ distribution), matching how the coordinate MSE and inference-time
-sampling treat the σ axis.
-
----
 
 ## Setup
 

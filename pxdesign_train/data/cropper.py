@@ -47,6 +47,8 @@ class CropResult:
     binder_token_mask: np.ndarray  # [N_token_post] boolean
     n_binder_tokens: int
     n_target_tokens: int
+    original_atom_indices: np.ndarray  # [N_atom_post], indices into pre-crop AtomArray
+    original_token_indices: np.ndarray  # [N_token_post], indices into pre-crop TokenArray
 
 
 class DesignCropper:
@@ -122,11 +124,23 @@ class DesignCropper:
             selected.sort()
             selected_token_indices = torch.from_numpy(selected).long()
 
+        original_token_indices = selected_token_indices.detach().cpu().numpy()
+        original_atom_indices = []
+        for token_idx in original_token_indices:
+            original_atom_indices.extend(token_array[int(token_idx)].atom_indices)
+        original_atom_indices = np.asarray(original_atom_indices, dtype=np.int64)
+
         cropped_token_array, cropped_atom_array = CropData.select_by_token_indices(
             token_array=token_array,
             atom_array=atom_array,
             selected_token_indices=selected_token_indices,
         )
+        if len(cropped_atom_array) != len(original_atom_indices):
+            raise AssertionError(
+                "DesignCropper internal error: original atom index count does not "
+                f"match cropped AtomArray length ({len(original_atom_indices)} vs "
+                f"{len(cropped_atom_array)})"
+            )
 
         # Rebuild masks on the cropped array. Cropping preserves
         # `cropped_atom_array.chain_id` annotations, so we can recompute the
@@ -147,6 +161,8 @@ class DesignCropper:
             binder_token_mask=new_binder_token_mask,
             n_binder_tokens=int(new_binder_token_mask.sum()),
             n_target_tokens=int((~new_binder_token_mask).sum()),
+            original_atom_indices=original_atom_indices,
+            original_token_indices=original_token_indices,
         )
 
     # ----- internals -----

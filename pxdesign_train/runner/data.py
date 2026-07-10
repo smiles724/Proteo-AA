@@ -73,11 +73,15 @@ class DesignSourceDataset(Dataset):
         provider: the underlying complex provider.
         source_name: tag used by the trainer for logging / curriculum sampling.
         crop_size: token budget for `DesignCropper`. Per the report this is 640.
+        max_binder_fraction: maximum fraction of the crop that the binder may
+            occupy before the cropper rejects the example.
         hotspot_radius / hotspot_max_frac / hotspot_force_zero_prob: forwarded
             to `DesignSelection`. See `featurizer.py` for semantics.
         aa_mask_mode / aa_mask_prob / aa_mask_min_prob / aa_mask_max_prob:
             forwarded to `DesignSelection` for all-mask or partial
             residue identity corruption.
+        max_crop_retries: if a sampled item cannot be design-cropped, try this
+            many following provider items before raising.
         seed: base seed; combined with index per call to keep the RNG
             deterministic for a given (epoch, index) without per-epoch state.
     """
@@ -85,6 +89,7 @@ class DesignSourceDataset(Dataset):
     provider: ComplexProvider
     source_name: str
     crop_size: int = 640
+    max_binder_fraction: float = 0.5
     hotspot_radius: float = 8.0
     hotspot_max_frac: float = 0.5
     hotspot_force_zero_prob: float = 0.2
@@ -92,24 +97,36 @@ class DesignSourceDataset(Dataset):
     aa_mask_prob: float = 1.0
     aa_mask_min_prob: float = 0.0
     aa_mask_max_prob: float = 1.0
-    compute_sidechain: bool = False
-    backbone_only_binder: bool = False
     seed: int = 0
     _cropper: DesignCropper = field(init=False)
 
     def __post_init__(self) -> None:
         self._cropper = DesignCropper(crop_size=self.crop_size)
-        # P3: whenever S_phi is trained (compute_sidechain), B_theta must be
-        # backbone-only for the binder — otherwise a standard training entry
-        # point silently loses "binder side chains excluded from L_bb / scrubbed
-        # from the diffusion input". Couple the flags unless explicitly disabled.
-        if self.compute_sidechain and not self.backbone_only_binder:
-            self.backbone_only_binder = True
 
     def __len__(self) -> int:
         return len(self.provider)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        n = len(self.provider)
+        retries = max(1, min(int(self.max_crop_retries), n))
+        last_crop_error: Optional[ValueError] = None
+
+        for attempt in range(retries):
+            local_idx = (idx + attempt) % n
+            try:
+                return self._get_one(local_idx)
+            except ValueError as exc:
+                if "DesignCropper:" not in str(exc):
+                    raise
+                last_crop_error = exc
+
+        raise ValueError(
+            f"DesignSourceDataset: failed to find a crop-valid example after "
+            f"{retries} attempts starting at index {idx}. Last crop error: "
+            f"{last_crop_error}"
+        )
+
+    def _get_one(self, idx: int) -> dict[str, Any]:
         atom_array, token_array, feat, label, binder_selector = self.provider[idx]
 
         # Resolve the binder selector into something the cropper accepts.
@@ -121,7 +138,7 @@ class DesignSourceDataset(Dataset):
 
         # Slice base feature_dict and label_dict to the kept tokens / atoms.
         feat = _slice_feature_dict(feat, atom_array, token_array, crop)
-        label = _slice_label_dict(label, atom_array, crop)
+        label = _slice_label_dict(label, atom_array, token_array, crop)
 
         # Apply design featurization on the cropped complex.
         rng = np.random.default_rng((self.seed + idx) % (2**32))
@@ -194,11 +211,7 @@ def _slice_feature_dict(
         for cid, rid in zip(orig_atom_array.chain_id, orig_atom_array.res_id)
     ])
 
-    # Index tensors for cropping any axis (a pair tensor has TWO token axes;
-    # an msa tensor has a token axis at position 1). We slice EVERY axis whose
-    # length matches a known original size, not just the leading one.
-    token_keep_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0]).long()
-    atom_keep_idx = torch.from_numpy(np.nonzero(atom_keep_mask)[0]).long()
+    atom_old_to_new = _old_to_new_indexer(atom_indexer, n_atom_orig)
 
     sliced: dict[str, torch.Tensor] = {}
     for k, v in feat.items():
@@ -208,39 +221,152 @@ def _slice_feature_dict(
         if v.dim() == 0:
             sliced[k] = v
             continue
-        # Slice each axis independently by matching its length. Token axes are
-        # checked before atom axes so a token/atom size collision (e.g. CA-only
-        # inputs where N_token == N_atom) keeps the historical token preference.
-        for axis in range(v.dim()):
-            if v.shape[axis] == n_token_orig:
-                v = v.index_select(axis, token_keep_idx.to(v.device))
-            elif v.shape[axis] == n_atom_orig:
-                v = v.index_select(axis, atom_keep_idx.to(v.device))
-            # Else leave this axis unchanged (feature/embedding dim etc.).
+        # Try to match an axis by length.
+        if v.shape[0] == n_token_orig:
+            v = v[token_keep_mask]
+        elif v.shape[0] == n_atom_orig:
+            v = v[atom_keep_mask]
+        elif v.dim() >= 2 and v.shape[1] == n_token_orig:
+            # e.g. msa [N_msa, N_token]
+            v = v[:, token_keep_mask]
+        # Else leave unchanged (could be a scalar / pair / extra dim that
+        # the design featurizer either doesn't use or recomputes).
         sliced[k] = v
+
+    # Ensure crop-index-valued features are consistent with the post-crop arrays.
+    if "atom_to_token_idx" in feat:
+        sliced["atom_to_token_idx"] = _tensor_like_index(
+            _atom_to_token_idx_from_token_array(crop.token_array, n_atom_new),
+            feat["atom_to_token_idx"],
+        )
+    if "token_index" in feat:
+        sliced["token_index"] = torch.arange(
+            n_token_new,
+            dtype=feat["token_index"].dtype,
+            device=feat["token_index"].device,
+        )
+
     return sliced
 
 
-def _slice_label_dict(label, orig_atom_array, crop) -> dict[str, torch.Tensor]:
+def _slice_label_dict(label, orig_atom_array, orig_token_array, crop) -> dict[str, torch.Tensor]:
     n_atom_orig = len(orig_atom_array)
-    kept_token_keys = set(
-        (cid, rid) for cid, rid in zip(
-            crop.atom_array.chain_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
-            crop.atom_array.res_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
+    n_token_orig = len(orig_token_array)
+    if hasattr(crop, "original_atom_indices"):
+        atom_indexer = np.asarray(crop.original_atom_indices, dtype=np.int64)
+    else:
+        kept_token_keys = set(
+            (cid, rid) for cid, rid in zip(
+                crop.atom_array.chain_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
+                crop.atom_array.res_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
+            )
         )
-    )
-    atom_keep_mask = np.array([
-        (cid, rid) in kept_token_keys
-        for cid, rid in zip(orig_atom_array.chain_id, orig_atom_array.res_id)
-    ])
+        atom_indexer = np.array([
+            (cid, rid) in kept_token_keys
+            for cid, rid in zip(orig_atom_array.chain_id, orig_atom_array.res_id)
+        ])
+
+    if hasattr(crop, "original_token_indices"):
+        token_indexer = np.asarray(crop.original_token_indices, dtype=np.int64)
+    else:
+        rep_mask = orig_atom_array.distogram_rep_atom_mask.astype(bool)
+        token_indexer = np.array([
+            (cid, rid) in kept_token_keys
+            for cid, rid in zip(
+                orig_atom_array.chain_id[rep_mask],
+                orig_atom_array.res_id[rep_mask],
+            )
+        ])
+
+    atom_old_to_new = _old_to_new_indexer(atom_indexer, n_atom_orig)
 
     sliced = {}
     for k, v in label.items():
         if not isinstance(v, torch.Tensor):
             sliced[k] = v
             continue
-        if v.dim() >= 1 and v.shape[0] == n_atom_orig:
-            sliced[k] = v[atom_keep_mask]
-        else:
+        if v.dim() == 0:
             sliced[k] = v
+            continue
+
+        v = _slice_tensor_by_crop(
+            v=v,
+            token_indexer=token_indexer,
+            atom_indexer=atom_indexer,
+            n_token_orig=n_token_orig,
+            n_atom_orig=n_atom_orig,
+        )
+        if k == "frame_atom_index":
+            v = _remap_index_values(v, atom_old_to_new)
+        sliced[k] = v
     return sliced
+
+
+def _torch_index(indexer: np.ndarray, *, device: torch.device) -> torch.Tensor:
+    return torch.as_tensor(indexer, dtype=torch.long, device=device)
+
+
+def _index_select(v: torch.Tensor, dim: int, indexer: np.ndarray) -> torch.Tensor:
+    return v.index_select(dim, _torch_index(indexer, device=v.device))
+
+
+def _slice_tensor_by_crop(
+    *,
+    v: torch.Tensor,
+    token_indexer: np.ndarray,
+    atom_indexer: np.ndarray,
+    n_token_orig: int,
+    n_atom_orig: int,
+) -> torch.Tensor:
+    """Slice common Protenix tensor layouts after a design crop."""
+    if v.dim() >= 2 and v.shape[0] == n_token_orig and v.shape[1] == n_token_orig:
+        return _index_select(_index_select(v, 0, token_indexer), 1, token_indexer)
+    if v.dim() >= 2 and v.shape[0] == n_atom_orig and v.shape[1] == n_atom_orig:
+        return _index_select(_index_select(v, 0, atom_indexer), 1, atom_indexer)
+    if v.dim() >= 4 and v.shape[1] == n_token_orig and v.shape[2] == n_token_orig:
+        return _index_select(_index_select(v, 1, token_indexer), 2, token_indexer)
+    if v.shape[0] == n_token_orig:
+        return _index_select(v, 0, token_indexer)
+    if v.shape[0] == n_atom_orig:
+        return _index_select(v, 0, atom_indexer)
+    if v.dim() >= 2 and v.shape[1] == n_token_orig:
+        return _index_select(v, 1, token_indexer)
+    if v.dim() >= 2 and v.shape[1] == n_atom_orig:
+        return _index_select(v, 1, atom_indexer)
+    return v
+
+
+def _old_to_new_indexer(indexer: np.ndarray, n_orig: int) -> np.ndarray:
+    old_to_new = np.full(n_orig, -1, dtype=np.int64)
+    if indexer.dtype == bool:
+        old_indices = np.flatnonzero(indexer)
+    else:
+        old_indices = np.asarray(indexer, dtype=np.int64)
+    old_to_new[old_indices] = np.arange(len(old_indices), dtype=np.int64)
+    return old_to_new
+
+
+def _remap_index_values(v: torch.Tensor, old_to_new: np.ndarray) -> torch.Tensor:
+    out = v.clone()
+    valid = out >= 0
+    if not bool(valid.any()):
+        return out
+    old_to_new_t = torch.as_tensor(old_to_new, dtype=torch.long, device=out.device)
+    old_values = out[valid].long()
+    remapped = old_to_new_t[old_values]
+    out[valid] = remapped.to(dtype=out.dtype)
+    return out
+
+
+def _atom_to_token_idx_from_token_array(token_array, n_atom: int) -> np.ndarray:
+    atom_to_token = np.full(n_atom, -1, dtype=np.int64)
+    for token_idx, token in enumerate(token_array):
+        for atom_idx in token.atom_indices:
+            atom_to_token[int(atom_idx)] = token_idx
+    if np.any(atom_to_token < 0):
+        raise ValueError("Cropped token_array does not cover every cropped atom")
+    return atom_to_token
+
+
+def _tensor_like_index(values: np.ndarray, like: torch.Tensor) -> torch.Tensor:
+    return torch.as_tensor(values, dtype=like.dtype, device=like.device)

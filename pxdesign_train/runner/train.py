@@ -16,6 +16,8 @@ it, write a small Python driver that:
 The CLI here is a thin wrapper that just parses configs and dispatches to
 your driver — see `scripts/train_demo.sh` for an example invocation against
 the synthetic test data.
+
+Test commit
 """
 from __future__ import annotations
 

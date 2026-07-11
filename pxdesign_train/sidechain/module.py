@@ -1,13 +1,13 @@
-"""Side-Chain Module S_phi: one-step, local-frame atom denoiser.
+"""Side-Chain Module S_phi: one-step, global-coordinate atom denoiser.
 
 Follows the SideCraft Overleaf appendix ("Side-Chain Module"): a light atom
 transformer with local (intra-residue) attention. Atom features are initialised
 as
 
     u_ij = Embed_atom(name_ij) + W_res h_res_i + W_aa softmax(p(a_i))
-           + W_t e_t + W_xyz y_noisy_ij
+           + W_t e_t + W_xyz x_noisy_ij
 
-and one-step-decoded to local-frame side-chain coordinates y0. There is no
+and one-step-decoded to global-frame side-chain coordinates x0. There is no
 side-chain reverse-diffusion loop here (decode-first, APM-borrowed one-step).
 
 The `trunk_grad_scale` knob controls how much of the side-chain loss gradient
@@ -120,7 +120,7 @@ class SideChainModule(nn.Module):
         restype_logits: torch.Tensor, # [B, L, n_type]
         atom_name_ids: torch.Tensor,  # [B, L, A] long
         atom_mask: torch.Tensor,      # [B, L, A] bool
-        noisy_local: torch.Tensor,    # [B, L, A, 3]
+        noisy_local: torch.Tensor,    # [B, L, A, 3] global coords in current path
         t: torch.Tensor,              # [B] or scalar diffusion time
         ca_coords: Optional[torch.Tensor] = None,  # [B, L, 3] residue CA (frame origin)
     ):
@@ -154,6 +154,12 @@ class SideChainModule(nn.Module):
             res_ctx = self.cross_res(res_feat, ca_coords, res_mask)  # [B,L,c]
             atom_feats = atom_feats + res_ctx[:, :, None, :]        # broadcast back
 
-        y0_local = self.out(self.out_ln(atom_feats))       # [B, L, A, 3]
-        y0_local = y0_local * atom_mask[..., None].to(y0_local.dtype)
-        return y0_local, atom_feats
+        # S_phi emits GLOBAL coordinates. The head predicts atom offsets anchored
+        # at the current residue CA/global frame origin; if no CA is provided, the
+        # offsets themselves are interpreted as global coordinates for backward
+        # compatibility with small unit tests.
+        x0_global = self.out(self.out_ln(atom_feats))      # [B, L, A, 3]
+        if ca_coords is not None:
+            x0_global = x0_global + ca_coords[:, :, None, :].to(x0_global.dtype)
+        x0_global = x0_global * atom_mask[..., None].to(x0_global.dtype)
+        return x0_global, atom_feats

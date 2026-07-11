@@ -284,7 +284,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 if a_full is not None else out["aa_logits_reduced"]
             )
 
-        # 4. Side-Chain Module (Stage II-A): one-step local-frame decode + feedback.
+        # 4. Side-Chain Module (Stage II-A): one-step global-coordinate decode + feedback.
         if self.enable_sidechain and "sc_atom_name_ids" in input_feature_dict:
             # Per-sigma (Stage II-B main line) vs single reduced-h_res (warmup).
             # In per-sigma mode each S_phi batch row corresponds to ONE specific
@@ -376,7 +376,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             sc_ids = sc_ids.to(h_res.device).long()
             sc_mask = sc_mask.to(h_res.device).bool()
             B = h_res.shape[0]
-            noisy = gaussian_init_local(
+            noisy_init = gaussian_init_local(
                 sc_mask.detach().cpu(), sigma=self.sc_init_sigma
             ).to(h_res.device).to(h_res.dtype)
             # Sigma-embedding for S_phi's time input: the REAL per-sample noise
@@ -400,10 +400,33 @@ class ProtenixDesignTrain(ProtenixDesign):
                     R_hat, t_hat, _fvalid = frames_from_backbone_index(xden_flat, bb_idx)
                     bb_pred = xden_flat[:, bb_idx.clamp_min(0), :]   # [B*N_sample, L, 3, 3] (N,CA,C)
 
-            ca = input_feature_dict.get("sc_frame_t")
-            if t_hat is not None:
-                ca = t_hat                                          # predicted CA
-            elif ca is not None:
+            # Active frame for S_phi context, global initialization, physical
+            # regularization, and coordinate supervision. Under Stage II-B this
+            # is the predicted frame F_hat; warmup falls back to GT frames.
+            fR, ft, bb = R_hat, t_hat, bb_pred
+            if fR is None:
+                fR = input_feature_dict.get("sc_frame_R")
+                ft = input_feature_dict.get("sc_frame_t")
+                bb = input_feature_dict.get("sc_bb_coords")
+                if fR is not None and ft is not None and bb is not None:
+                    fR = fR.to(h_res.device).float()
+                    ft = ft.to(h_res.device).float()
+                    bb = bb.to(h_res.device).float()
+                    if use_per_sigma:
+                        fR = _tile_per_sigma(fR, trailing_ndim=3)
+                        ft = _tile_per_sigma(ft, trailing_ndim=2)
+                        bb = _tile_per_sigma(bb, trailing_ndim=3)
+                    elif fR.dim() == 3:
+                        fR, ft, bb = fR.unsqueeze(0), ft.unsqueeze(0), bb.unsqueeze(0)
+                    if fR.shape[0] != B:
+                        fR = fR.expand(B, -1, -1, -1)
+                        ft = ft.expand(B, -1, -1)
+                        bb = bb.expand(B, -1, -1, -1)
+
+            ca = ft
+            if ca is None:
+                ca = input_feature_dict.get("sc_frame_t")
+            if ca is not None and ca is not ft:
                 ca = ca.to(h_res.device).float()
                 if use_per_sigma:
                     ca = _tile_per_sigma(ca, trailing_ndim=2)
@@ -412,17 +435,35 @@ class ProtenixDesignTrain(ProtenixDesign):
                         ca = ca.unsqueeze(0)
                     if ca.shape[0] != B:
                         ca = ca.expand(B, -1, -1)
-            y0_local, atom_feats = self.sidechain_module(
-                h_res, aa_logits, sc_ids, sc_mask, noisy, t, ca_coords=ca,
+
+            # S_phi consumes global coordinates in the same active frame used for
+            # supervision. Detaching the frame here keeps the side-chain coord
+            # objective from nudging the predicted backbone frame through the
+            # initialization path.
+            if fR is not None and ft is not None:
+                noisy = to_global(noisy_init.float(), fR.detach(), ft.detach()).to(h_res.dtype)
+            else:
+                noisy = noisy_init
+
+            ca_for_module = ca.detach() if ca is not None else None
+            y0_global, atom_feats = self.sidechain_module(
+                h_res, aa_logits, sc_ids, sc_mask, noisy, t, ca_coords=ca_for_module,
             )
             h_res_prime = self.sidechain_feedback(
                 atom_feats, sc_mask, h_res, detach=self.sc_detach_feedback,
             )
             if squeeze:                             # restore the collapsed batch dim
-                y0_local = y0_local.squeeze(0)
+                y0_global = y0_global.squeeze(0)
                 sc_mask = sc_mask.squeeze(0)
                 h_res_prime = h_res_prime.squeeze(0)
-            out["sc_pred_local"] = y0_local
+                if fR is not None:
+                    fR = fR.squeeze(0)
+                    ft = ft.squeeze(0)
+                    bb = bb.squeeze(0) if bb is not None else None
+            out["sc_pred_global"] = y0_global
+            if fR is not None and ft is not None:
+                out["sc_frame_R"] = fR
+                out["sc_frame_t"] = ft
             out["sc_atom_mask"] = sc_mask
             out["h_res_prime"] = h_res_prime        # per-sigma [B*N_sample, L, C] when per-sigma
             # Reduced h_res' for the cycle injection: the Protenix diffusion shares
@@ -441,60 +482,23 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["h_res_prime_reduced"] = h_res_prime
 
             # Physical regularization (clash + contact) on predicted GLOBAL
-            # side-chain coords: local -> global via the residue frames, then a
-            # coordinate-only physical loss (no ideal-geometry tables needed).
-            y_l = y0_local if y0_local.dim() == 4 else y0_local.unsqueeze(0)  # [B,L,A,3]
+            # side-chain coords (S_phi output is already global).
+            y_g = y0_global if y0_global.dim() == 4 else y0_global.unsqueeze(0)  # [B,L,A,3]
             m = sc_mask if sc_mask.dim() == 3 else sc_mask.unsqueeze(0)
-            if R_hat is not None:
-                # Predicted-backbone frames (paper Stage II-B): already [B_, L, ...].
-                fR, ft, bb = R_hat, t_hat, bb_pred
-            else:
-                fR = input_feature_dict.get("sc_frame_R")
-                ft = input_feature_dict.get("sc_frame_t")
-                bb = input_feature_dict.get("sc_bb_coords")
-                if fR is not None and ft is not None and bb is not None:
-                    fR = fR.to(y_l.device).float()
-                    ft = ft.to(y_l.device).float()
-                    bb = bb.to(y_l.device).float()
-                    if use_per_sigma:
-                        fR = _tile_per_sigma(fR, trailing_ndim=3)
-                        ft = _tile_per_sigma(ft, trailing_ndim=2)
-                        bb = _tile_per_sigma(bb, trailing_ndim=3)
-                    elif fR.dim() == 3:
-                        fR, ft, bb = fR.unsqueeze(0), ft.unsqueeze(0), bb.unsqueeze(0)
             if fR is not None and ft is not None and bb is not None:
-                B_, L_, A_ = y_l.shape[0], y_l.shape[1], y_l.shape[2]
+                B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
                 # Broadcast per-token frames/backbone to the (possibly per-sigma)
                 # batch B_ so the reshape below is well-formed for B*N_sample rows.
                 if fR.shape[0] != B_:
                     fR = fR.expand(B_, -1, -1, -1)
                     ft = ft.expand(B_, -1, -1)
                     bb = bb.expand(B_, -1, -1, -1)
-                y_g = to_global(y_l.float(), fR, ft)                     # [B,L,A,3]
                 phys = physical_loss(
-                    y_g.reshape(B_, L_ * A_, 3),
+                    y_g.float().reshape(B_, L_ * A_, 3),
                     backbone_coords=bb.reshape(B_, L_ * bb.shape[2], 3),
                     valid_mask=m.reshape(B_, L_ * A_),
                 )
                 out["sc_phys_val"] = phys["total"]
-
-                # Stop-grad global pseudo-target aux (paper Stage II-B): attach the
-                # GT local side chain to the PREDICTED frame with the frame
-                # stop-gradded on the target side, so the frame cannot move to
-                # trivially reduce the loss but the backbone still gets a signal.
-                if R_hat is not None:
-                    y_gt = input_feature_dict.get("sc_gt_local")
-                    if y_gt is not None:
-                        y_gt = y_gt.to(y_l.device).float()
-                        # Tile GT local target over the sigma axis like frames/bb
-                        # (not just batch=1 broadcast) so it stays row-aligned with
-                        # the [B*N_sample] predictions when macro-batch grows.
-                        if use_per_sigma:
-                            y_gt = _tile_per_sigma(y_gt, trailing_ndim=3)
-                        pseudo = to_global(y_gt, fR.detach(), ft.detach())   # [B,L,A,3]
-                        mm = m.to(y_g.dtype)
-                        se = ((y_g - pseudo) ** 2).sum(-1) * mm
-                        out["sc_global_aux"] = se.sum() / (mm.sum() + 1e-6)
 
             # Stage III type routing: coord loss only where predicted AA == GT
             # (physical-only elsewhere). Always on under predicted_mask so the

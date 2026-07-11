@@ -1,9 +1,9 @@
 """Residue-local frames from backbone atoms (N, CA, C).
 
-Side-chain coordinates are supervised in a residue-local frame so the learning
-signal is about local geometry, not the absolute placement of the whole protein
-(this removes the backbone-frame train/inference mismatch — SideCraft spec, and
-the group-chat "local residue frame" idea).
+Ground-truth side-chain geometry is stored in residue-local coordinates, then
+attached to the active backbone frame for global-coordinate S_phi supervision.
+This preserves local geometry while keeping model outputs and coordinate losses
+in the global frame.
 
 Frame convention (Gram-Schmidt, AF2-style):
   e1 = normalize(C  - CA)

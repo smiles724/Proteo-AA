@@ -25,7 +25,10 @@ import torch.nn.functional as F
 from protenix.model.loss import SmoothLDDTLoss
 from protenix.metrics.rmsd import weighted_rigid_align
 
-from pxdesign_train.sidechain.losses import sidechain_local_loss
+from pxdesign_train.sidechain.losses import (
+    sidechain_global_frame_aligned_loss,
+    sidechain_local_loss,
+)
 
 
 class PXDesignLoss(nn.Module):
@@ -242,7 +245,10 @@ class PXDesignLoss(nn.Module):
         aa_loss_mask: Optional[torch.Tensor] = None,       # [..., N_token]
         aa_t: Optional[torch.Tensor] = None,               # [...] masked-diffusion time
         sc_pred_local: Optional[torch.Tensor] = None,      # [..., L, A, 3]
+        sc_pred_global: Optional[torch.Tensor] = None,     # [..., L, A, 3]
         sc_gt_local: Optional[torch.Tensor] = None,        # [..., L, A, 3]
+        sc_frame_R: Optional[torch.Tensor] = None,         # [..., L, 3, 3]
+        sc_frame_t: Optional[torch.Tensor] = None,         # [..., L, 3]
         sc_atom_mask: Optional[torch.Tensor] = None,       # [..., L, A] bool
         sc_type_match: Optional[torch.Tensor] = None,      # [..., L] bool (pred==gt type)
         sc_phys: Optional[torch.Tensor] = None,            # precomputed physical loss scalar
@@ -316,19 +322,31 @@ class PXDesignLoss(nn.Module):
             aa_mask_frac = torch.zeros_like(aa_ce).detach()
 
         # --- Side-chain terms (Stage II-A onwards) ---
-        # Local-frame coordinate loss, routed to type-matched residues only.
+        # Main coordinate loss. Current S_phi emits GLOBAL coordinates, so the
+        # preferred path compares against stopgrad(F_hat) y_gt_local directly in
+        # the global frame. The legacy local-frame path remains for older callers.
         # The physical loss (global-frame, needs ideal-geometry tables) is
         # computed upstream and passed in as `sc_phys`.
-        if sc_pred_local is not None and sc_gt_local is not None and sc_atom_mask is not None:
+        has_global_sc = (
+            sc_pred_global is not None
+            and sc_gt_local is not None
+            and sc_frame_R is not None
+            and sc_frame_t is not None
+            and sc_atom_mask is not None
+        )
+        has_local_sc = sc_pred_local is not None and sc_gt_local is not None and sc_atom_mask is not None
+        if has_global_sc or has_local_sc:
+            pred_ref = sc_pred_global if has_global_sc else sc_pred_local
+
             def _match_pred_leading(x: torch.Tensor, trailing_ndim: int) -> torch.Tensor:
                 """Match per-item side-chain labels to per-sigma predictions.
 
-                In per-sigma training `sc_pred_local` may be flattened from
+                In per-sigma training side-chain predictions may be flattened from
                 [B, S, L, A, 3] to [B*S, L, A, 3], while GT targets remain
                 [B, L, A, 3]. Repeat each batch item over S so loss terms are
                 row-aligned with the predictions.
                 """
-                pred_lead = sc_pred_local.shape[:-trailing_ndim]
+                pred_lead = pred_ref.shape[:-trailing_ndim]
                 x_lead = x.shape[:-trailing_ndim]
                 if x_lead == pred_lead:
                     return x
@@ -344,7 +362,10 @@ class PXDesignLoss(nn.Module):
                 return x.expand(*pred_lead, *x.shape[-trailing_ndim:])
 
             sc_gt_local = _match_pred_leading(sc_gt_local, trailing_ndim=3)
-            coord_mask = sc_atom_mask.bool()
+            if has_global_sc:
+                sc_frame_R = _match_pred_leading(sc_frame_R, trailing_ndim=3)
+                sc_frame_t = _match_pred_leading(sc_frame_t, trailing_ndim=2)
+            coord_mask = _match_pred_leading(sc_atom_mask, trailing_ndim=2).bool()
             if sc_type_match is not None:
                 sc_type_match = sc_type_match.bool()
                 target_lead = coord_mask.shape[:-1]  # [..., L]
@@ -364,13 +385,29 @@ class PXDesignLoss(nn.Module):
                     else:
                         sc_type_match = sc_type_match.expand(*target_lead)
                 coord_mask = coord_mask & sc_type_match.bool()[..., None]
-            sc_local = sidechain_local_loss(sc_pred_local, sc_gt_local, coord_mask)
+            if has_global_sc:
+                sc_local = sidechain_global_frame_aligned_loss(
+                    sc_pred_global,
+                    sc_gt_local,
+                    sc_frame_R,
+                    sc_frame_t,
+                    coord_mask,
+                    eps=self.eps,
+                )
+            else:
+                sc_local = sidechain_local_loss(sc_pred_local, sc_gt_local, coord_mask, eps=self.eps)
             sc_phys_val = sc_phys if sc_phys is not None else total.sum() * 0.0
-            # Predicted-frame stop-grad pseudo-target aux (paper Stage II-B).
-            sc_global_val = sc_global if sc_global is not None else total.sum() * 0.0
-            total = (total + self.weight_sc_local * sc_local
-                     + self.weight_sc_phys * sc_phys_val
-                     + self.weight_sc_global * sc_global_val)
+            if has_global_sc:
+                # In the global-output path, the predicted-frame-aligned loss is
+                # the primary coordinate loss, not a second auxiliary term.
+                sc_global_val = sc_local
+                total = total + self.weight_sc_local * sc_local + self.weight_sc_phys * sc_phys_val
+            else:
+                # Backward-compatible local path: keep the old optional aux.
+                sc_global_val = sc_global if sc_global is not None else total.sum() * 0.0
+                total = (total + self.weight_sc_local * sc_local
+                         + self.weight_sc_phys * sc_phys_val
+                         + self.weight_sc_global * sc_global_val)
         else:
             sc_local = total.sum() * 0.0
             sc_phys_val = total.sum() * 0.0

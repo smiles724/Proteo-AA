@@ -93,9 +93,12 @@ training_configs["loss"] = {
     "align_before_mse": True,
     # Side-chain terms (Stage II-A onwards). Previously these lived only as
     # PXDesignLoss defaults and were NOT plumbed from config; now透传 (M5).
+    # Main S_phi coordinate term. In the current path S_phi emits global
+    # coordinates and this weights the predicted-frame-aligned global MSE.
     "weight_sc_local": 1.0,
     "weight_sc_phys": 0.1,
-    # Predicted-frame stop-grad pseudo-target aux (paper Stage II-B).
+    # Legacy local-output aux weight. The global-output path uses the
+    # predicted-frame pseudo-target as the primary coordinate term above.
     "weight_sc_global": 0.5,
     # Post-refinement (Stage II-B cycle closure) term weights.
     "weight_bb_post": 1.0,
@@ -117,10 +120,10 @@ training_configs["sidechain"] = {
     "per_sigma": True,
     # Paper Stage II-B: S_phi conditions on the PREDICTED backbone. When True
     # (and per_sigma), side-chain frames F_hat are built from x_denoised (x_hat_0)
-    # rather than the GT backbone, and a stop-grad global pseudo-target aux loss
-    # is added. Warmup (Stage II-A) uses GT frames -> set False.
+    # rather than the GT backbone, and the coordinate loss compares S_phi's global
+    # output to stopgrad(F_hat) y_gt_local. Warmup (Stage II-A) uses GT frames.
     "predicted_frame": True,
-    "weight_sc_global": 0.5,   # weight of the predicted-frame pseudo-target aux loss
+    "weight_sc_global": 0.5,   # legacy local-output aux weight
     # M1: exclude binder side-chain atoms from the backbone (L_bb) target so
     # B_theta is backbone-only and S_phi is the sole side-chain generator.
     "backbone_only_binder": True,

@@ -12,8 +12,8 @@ Two coupled modules communicate through a shared per-residue representation `h_r
   from noise in a single reverse-diffusion pass (no external inverse-folding step).
 - **Side-Chain module (S_φ)** — reads the predicted backbone / AA logits / `h_res`,
   dynamically instantiates the residue-specific atom set (no ghost atoms), and
-  predicts side-chain coordinates in residue-local frames from a **one-step,
-  leakage-free Gaussian init**; it then pools a side-chain-aware `h_res′` back to the
+  predicts global side-chain coordinates from a **one-step, leakage-free Gaussian
+  init** attached to the active backbone frame; it then pools a side-chain-aware `h_res′` back to the
   Backbone module for backbone/type refinement (co-evolution).
 
 Built on **PXDesign-d** (structure diffusion) and **Protenix** (ByteDance;

@@ -186,13 +186,15 @@ def cogenerate(
                 # Sigma-embedding = this step's real noise level (EDM c_noise),
                 # matching per-sigma training — not a constant.
                 sc_t = (0.25 * sig_t.reshape(1).clamp_min(1e-4).log()).to(device)
-                y0_local, atom_feats = model.sidechain_module(
-                    h_c[None], l_c[None], ids[None], m[None], noisy[None],
+                # S_phi emits global side-chain coordinates. Initialize its
+                # coordinate channel in the current predicted frame, then store
+                # the decoded global coordinates directly.
+                noisy_global = to_global(noisy[None].float(), R[None].float(), t[None].float()).to(dtype)
+                y0_global, atom_feats = model.sidechain_module(
+                    h_c[None], l_c[None], ids[None], m[None], noisy_global,
                     sc_t, ca_coords=t[None].float(),
                 )
-                # M3: map predicted local side-chain coords -> global via the
-                # predicted-backbone frame, and store per committed residue.
-                y0_global = to_global(y0_local.float(), R[None].float(), t[None].float())[0]  # [Nc, A, 3]
+                y0_global = y0_global.float()[0]  # [Nc, A, 3]
                 for ci, j in enumerate(committed):
                     names = sidechain_atoms(restypes3[ci])
                     k = len(names)

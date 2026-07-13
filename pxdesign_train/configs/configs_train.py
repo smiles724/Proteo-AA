@@ -117,13 +117,39 @@ training_configs["sidechain"] = {
     # where to place atoms in GLOBAL space. The (anisotropic) template does.
     # False restores the old Gaussian init for A/B.
     "template_init": True,
-    # Frame-aware head: S_phi regresses residue-LOCAL offsets and the (stop-grad)
-    # predicted frame maps them to global. Output space is unchanged (global);
-    # this only removes the rotation the MLP would otherwise have to apply itself.
-    "frame_aware_head": True,
-    # Feed S_phi its own noisy side-chain atoms in the residue-LOCAL frame (well-scaled,
-    # translation-free). Global context belongs in a separate channel.
-    "local_coord_input": True,
+    # ABLATION CANDIDATE -- default OFF, i.e. Yifei's active path
+    #     x0_global = MLP(atom_feats) + ca_coords          (CA-anchored global head)
+    # Turning it ON gives
+    #     x0_global = F_hat . MLP(atom_feats)              (regress LOCAL offsets, let the
+    #                                                       KNOWN stop-grad frame rotate them)
+    # The output space is global either way, so BOTH satisfy Overleaf par.204; the paper does
+    # not mandate a head parameterisation (its appendix explicitly allows equivariant nets),
+    # so this is a TRAINING-STABILITY assumption, not a spec requirement -- hence default OFF
+    # until real data says otherwise.
+    #
+    # What we measured, so nobody flips this blindly (1cse chain B, single-structure
+    # memorization, 400 steps, sc_local; old local-output baseline = 0.51):
+    #     OFF (CA-anchored) + isotropic gaussian init ............ 4.05
+    #     OFF + template init ................................... 3.84
+    #     ON  + template init ................................... 2.22
+    #     ON  + template init + local_coord_input ............... 0.557
+    # Hypothesis for the gap: with random rotation augmentation the CA-anchored MLP must
+    # infer R from its own input AND apply it to its output -- a bilinear op an MLP
+    # approximates poorly. A single-structure memorization run cannot settle this; real data
+    # can. Open it as an ablation arm if training stalls.
+    "frame_aware_head": False,
+    # ABLATION CANDIDATE -- default OFF, i.e. Yifei's active path: S_phi's own noisy
+    # side-chain atoms are fed as RAW GLOBAL coordinates, x = F_hat.(mu + sigma.eps).
+    # Turning it ON feeds them in the residue-LOCAL frame (translation-free).
+    # Overleaf's appendix calls the global-coordinate atom feature "optional", so neither is
+    # a spec violation -- this too is a training-stability assumption.
+    #
+    # The concern (untested on real data): the global form carries t_CA, the residue's
+    # ABSOLUTE position (tens of Angstrom, different per residue), on top of a ~4 A side-chain
+    # geometry, so the linear coord embedding W_xyz sees mostly "where is this residue" rather
+    # than "what shape is this side chain". Measured contribution on the memorization smoke
+    # (with frame_aware_head ON): 2.22 -> 0.557. Open as an ablation arm if training stalls.
+    "local_coord_input": False,
     # Template perturbation scale (Angstrom, per coordinate). Keep it small
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
     # template anisotropy that carries the orientation.

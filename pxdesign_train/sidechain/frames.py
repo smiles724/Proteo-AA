@@ -52,10 +52,15 @@ def frames_from_backbone_index(coords: torch.Tensor, bb_idx: torch.Tensor):
 
     Args:
         coords: [..., N_atom, 3] predicted (or any) global coordinates.
-        bb_idx: [L, 3] long — atom indices of (N, CA, C) per token; -1 = invalid.
+        bb_idx: [L, 3] or [L, 4] long — atom indices of (N, CA, C[, O]) per token;
+            -1 = invalid. Only the first three columns are used: the featurizer's
+            `sc_bb_atom_idx` is (N, CA, C, O) and its O column may be -1 on a token
+            whose frame atoms are all present, so validity must NOT be tested over
+            all four columns.
     Returns:
         R: [..., L, 3, 3], t: [..., L, 3], valid: [L] bool (False where bb_idx<0).
     """
+    bb_idx = bb_idx[..., :3]                             # frame atoms only (N, CA, C)
     valid = (bb_idx >= 0).all(dim=-1)                    # [L]
     safe = bb_idx.clamp_min(0)                           # gather needs non-neg
     n = coords[..., safe[:, 0], :]                       # [..., L, 3]

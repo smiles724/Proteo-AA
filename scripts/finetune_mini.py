@@ -81,6 +81,20 @@ def build(args, device):
         # and predicted_frame=True.
         configs.sidechain.per_sigma = False
         configs.sidechain.predicted_frame = False
+    if getattr(args, "no_template_init", False):
+        configs.sidechain.template_init = False
+    if getattr(args, "no_frame_aware_head", False):
+        configs.sidechain.frame_aware_head = False
+    if getattr(args, "global_coord_input", False):
+        configs.sidechain.local_coord_input = False
+    if getattr(args, "no_hres_inject", False):
+        configs.sidechain.hres_inject = False
+    if getattr(args, "a_direct", False):
+        configs.sidechain.a_direct = True
+    if getattr(args, "bb_context", False):
+        configs.sidechain.bb_context = True
+    if getattr(args, "q_direct", False):
+        configs.sidechain.q_direct = True
     trainer = PXDesignTrainer(configs=configs, components=components, device=device)
     return trainer
 
@@ -260,6 +274,23 @@ def main():
                     help="inference-side cycle: run side-chain step in cogenerate")
     ap.add_argument("--coevolution", action="store_true",
                     help="Stage II-B: close the cycle (h_res'->B_theta refine), report sc_local/bb_post/aa_post")
+    ap.add_argument("--no_hres_inject", action="store_true",
+                    help="ablation: disable the INDIRECT h_res' -> s_trunk feedback. The "
+                         "refinement pass still runs but carries no side-chain info -- this "
+                         "is the TRUE no-feedback control.")
+    ap.add_argument("--a_direct", action="store_true",
+                    help="ablation arm: DIRECT token-level feedback (a'_bb = a_bb + MLP([a_bb,a_sc])).")
+    ap.add_argument("--bb_context", action="store_true",
+                    help="ablation CONTROL: 14-slot S_phi (4 backbone context atoms), no q feedback.")
+    ap.add_argument("--q_direct", action="store_true",
+                    help="ablation arm: ATOM-level feedback (q'_bb = q_bb + MLP([q_bb,q_sc_bb])); implies --bb_context.")
+    ap.add_argument("--global_coord_input", action="store_true",
+                    help="A/B control: feed S_phi raw GLOBAL noisy coords (legacy).")
+    ap.add_argument("--no_frame_aware_head", action="store_true",
+                    help="A/B control: disable the frame-aware head (CA-anchored global head).")
+    ap.add_argument("--no_template_init", action="store_true",
+                    help="A/B control: disable Overleaf par.221 template-anchored init "
+                         "and fall back to the legacy isotropic Gaussian init.")
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)

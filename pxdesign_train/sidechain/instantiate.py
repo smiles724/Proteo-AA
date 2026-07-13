@@ -48,9 +48,38 @@ def sidechain_mask(restypes: Sequence[str]) -> torch.Tensor:
 
 # --- atom-name vocabulary (for the side-chain atom-name embedding in S_phi) ---
 # id 0 is reserved for padding / non-existent atoms.
+#
+# ID STABILITY CONTRACT: the side-chain ids 1..32 are FROZEN. Trained atom-name
+# embeddings index into these rows, so new names are APPENDED after them and the
+# sorted side-chain block is never re-sorted or renumbered.
 _ALL_SC_NAMES = sorted({a for r in STD_AA_3 for a in sidechain_atoms(r)})
 ATOM_NAME_TO_ID = {name: i + 1 for i, name in enumerate(_ALL_SC_NAMES)}
+
+# Legacy vocabulary size: padding + the 32 side-chain names (= 33). Kept so the
+# checkpoint-compatible prefix of the embedding table is explicit.
+SC_VOCAB_SIZE = len(ATOM_NAME_TO_ID) + 1
+
+# The 4 backbone atoms are CONTEXT slots on S_phi's *internal* 14-atom axis (the
+# ATOM14 layout: 4 backbone + up to 10 side-chain). They need embedding ids of
+# their own; they are appended AFTER the frozen side-chain block. `sidechain_atoms`
+# strips backbone names from every residue, so none of these can collide with an
+# existing side-chain id (asserted below).
+BACKBONE_ATOM_NAME_TO_ID = {}
+for _k, _name in enumerate(BACKBONE_ATOMS):
+    assert _name not in ATOM_NAME_TO_ID, f"backbone name {_name} collides with a side-chain id"
+    BACKBONE_ATOM_NAME_TO_ID[_name] = SC_VOCAB_SIZE + _k  # N=33, CA=34, C=35, O=36
+ATOM_NAME_TO_ID.update(BACKBONE_ATOM_NAME_TO_ID)
+
 ATOM_VOCAB_SIZE = len(ATOM_NAME_TO_ID) + 1  # +1 for the padding id 0
+
+# Backbone-slot name ids in BACKBONE_ATOMS order (N, CA, C, O) — the first 4
+# columns of the internal 14-atom axis.
+BACKBONE_ATOM_NAME_IDS = torch.tensor(
+    [BACKBONE_ATOM_NAME_TO_ID[n] for n in BACKBONE_ATOMS], dtype=torch.long
+)
+
+N_BB = len(BACKBONE_ATOMS)      # 4 — backbone context slots
+N_ATOM14 = N_BB + MAX_SC        # 14 — S_phi's internal atom axis (4 + 10)
 
 
 def sidechain_atom_name_ids(restypes: Sequence[str]) -> torch.Tensor:

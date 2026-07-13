@@ -97,11 +97,24 @@ class DesignSourceDataset(Dataset):
     aa_mask_prob: float = 1.0
     aa_mask_min_prob: float = 0.0
     aa_mask_max_prob: float = 1.0
+    compute_sidechain: bool = False
+    backbone_only_binder: bool = False
+    # NOTE: no prior default existed anywhere for this; 8 is a chosen value.
+    # Override at construction if a different retry budget is wanted.
+    max_crop_retries: int = 8
     seed: int = 0
     _cropper: DesignCropper = field(init=False)
 
     def __post_init__(self) -> None:
         self._cropper = DesignCropper(crop_size=self.crop_size)
+        # P3 leakage coupling (SAFETY, not a nicety): `backbone_only_binder` is
+        # what makes the featurizer run `_scrub_design_sidechain_coords` — the P1
+        # leakage fix that collapses design-region side-chain coords onto CA so the
+        # backbone denoiser never sees ground-truth side-chain geometry. Whenever we
+        # compute side-chain targets we MUST also scrub, otherwise the scrub silently
+        # does not fire and GT side-chain geometry leaks into the backbone input.
+        if self.compute_sidechain and not self.backbone_only_binder:
+            self.backbone_only_binder = True
 
     def __len__(self) -> int:
         return len(self.provider)
@@ -211,8 +224,6 @@ def _slice_feature_dict(
         for cid, rid in zip(orig_atom_array.chain_id, orig_atom_array.res_id)
     ])
 
-    atom_old_to_new = _old_to_new_indexer(atom_indexer, n_atom_orig)
-
     sliced: dict[str, torch.Tensor] = {}
     for k, v in feat.items():
         if not isinstance(v, torch.Tensor):
@@ -221,14 +232,16 @@ def _slice_feature_dict(
         if v.dim() == 0:
             sliced[k] = v
             continue
-        # Try to match an axis by length.
-        if v.shape[0] == n_token_orig:
-            v = v[token_keep_mask]
-        elif v.shape[0] == n_atom_orig:
-            v = v[atom_keep_mask]
-        elif v.dim() >= 2 and v.shape[1] == n_token_orig:
-            # e.g. msa [N_msa, N_token]
-            v = v[:, token_keep_mask]
+        # Crop EVERY axis whose length matches an original axis — not just the first.
+        # The if/elif form stopped after axis 0, so a pair tensor [N_token, N_token, C]
+        # kept its second token axis uncropped (that is the bug this test pins).
+        tok_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0])
+        atm_idx = torch.from_numpy(np.nonzero(atom_keep_mask)[0])
+        for dim in range(v.dim()):
+            if v.shape[dim] == n_token_orig:
+                v = torch.index_select(v, dim, tok_idx.to(v.device))
+            elif n_atom_orig != n_token_orig and v.shape[dim] == n_atom_orig:
+                v = torch.index_select(v, dim, atm_idx.to(v.device))
         # Else leave unchanged (could be a scalar / pair / extra dim that
         # the design featurizer either doesn't use or recomputes).
         sliced[k] = v
@@ -245,6 +258,28 @@ def _slice_feature_dict(
             dtype=feat["token_index"].dtype,
             device=feat["token_index"].device,
         )
+
+    # ATOM-INDEX-VALUED features must have their VALUES remapped, not just their
+    # rows sliced: after a crop the atom numbering changes, so an index into the
+    # pre-crop atom axis silently points at the wrong atom (or out of range).
+    # `sc_bb_atom_idx` [N_token, 4] holds atom indices of (N, CA, C, O).
+    #
+    # In the training path (`DesignSourceDataset._get_one`) this key is NOT present
+    # here: cropping happens BEFORE `DesignFeaturizer.transform`, so the featurizer
+    # already resolves the indices against the CROPPED AtomArray and they need no
+    # remap. This branch exists for any caller that featurizes first and crops after
+    # (e.g. a cached/pre-featurized feature dict) — without it that path is a silent
+    # wrong-atom gather. Rows whose atom was dropped by the crop become -1, which is
+    # exactly what every downstream consumer already treats as "invalid".
+    if "sc_bb_atom_idx" in feat and isinstance(feat["sc_bb_atom_idx"], torch.Tensor):
+        v = feat["sc_bb_atom_idx"]
+        if v.shape[0] == n_token_orig:
+            tok_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0]).to(v.device)
+            v = torch.index_select(v, 0, tok_idx)
+            atom_old_to_new = _old_to_new_indexer(
+                np.nonzero(atom_keep_mask)[0], n_atom_orig,
+            )
+            sliced["sc_bb_atom_idx"] = _remap_index_values(v, atom_old_to_new)
 
     return sliced
 

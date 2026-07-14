@@ -37,15 +37,41 @@ Both `--sidechain_warmup` and `--coevolution` run end-to-end on GPU (`sc_local` 
 losses finite, no shape/leakage issues). See [`docs/method_status.md`](docs/method_status.md)
 for the honest per-stage grading.
 
-**Leakage safeguards.** Side chains initialise from Gaussian noise (never noised GT);
-binder side chains are excluded from `L_bb` *and* scrubbed (→ Cα) from the diffusion
-input, so the backbone never sees GT side-chain geometry; `post_aa` is supervised only
-under predicted-mask, so GT atom composition cannot leak identity into the AA head.
+**Side-chain template.** Side chains do not start from noise, and they do not start from a
+noised ground-truth side chain either. Each residue is initialised from its own ideal
+covalent geometry, posed at a rotamer drawn from a **backbone-dependent rotamer library**
+conditioned on the φ̂/ψ̂ of the *predicted* backbone, then placed in the predicted local
+frame (Overleaf 0714 appendix, "Residue-Specific Side-Chain Template Construction"):
 
-**Not yet done** (left for the training phase): physical bond/angle/rotamer activation
-(needs a residue-specific geometry table); Stage III `L_SC-AA` candidate ranking (core
-only, not orchestrated); *strict* per-σ cycle feedback (`h_res′` is σ-averaged before
-injection because Protenix's `s_trunk` is sample-shared); multi-structure / generalization.
+```
+mu_ideal = BuildSC( a_hat, G_ideal(a_hat), chi ~ p(r | a_hat, phi_hat, psi_hat) )
+y_T      = mu_ideal + sigma_T * eps          x_T = F_hat . y_T
+```
+
+Measured against 2790 residues of 33 real chains, this puts the initialisation **1.28 Å**
+from the true side chain, versus **2.89 Å** for isotropic Gaussian noise; χ₁ is recovered
+within 40° for **68.7%** of residues. Regenerate with `scripts/eval_template_quality.py`.
+Build the library once with `python scripts/build_rotamer_library.py --download`; without
+it the code falls back to a static template and says so.
+
+> The rotamer library is the **Dunbrack BBDEP2010** table, redistributed under ODC-By.
+> If you publish results computed with it, you must cite:
+> Shapovalov, M.V. & Dunbrack, R.L. Jr. (2011). *A smoothed backbone-dependent rotamer
+> library for proteins derived from adaptive kernel density estimates and regressions.*
+> **Structure** 19, 844–858.
+
+**Leakage safeguards.** The template conditions only on residue type, the atom mask, and the
+**predicted** backbone — all inference-available; the provider contract has no parameter
+through which GT side-chain coordinates could arrive, and a test asserts that. Binder side
+chains are excluded from `L_bb` *and* scrubbed (→ Cα) from the diffusion input, so the
+backbone never sees GT side-chain geometry; `post_aa` is supervised only under
+predicted-mask, so GT atom composition cannot leak identity into the AA head.
+
+**Not yet done** (left for the training phase): physical bond/angle/rotamer activation (the
+geometry table it was blocked on now exists — `sidechain/chi_constants.py` — but the losses
+are still off); Stage III `L_SC-AA` candidate ranking (core only, not orchestrated); *strict*
+per-σ cycle feedback (`h_res′` is σ-averaged before injection because Protenix's `s_trunk` is
+sample-shared); multi-structure / generalization.
 
 ---
 

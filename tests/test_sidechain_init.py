@@ -22,15 +22,18 @@ def test_no_gt_argument():
 def test_template_init_no_gt_argument():
     """Same leakage guard for the template-anchored init (Overleaf para 221).
 
-    Allowed: residue TYPE, the atom mask, and the PREDICTED backbone (par.221 initializes
-    "around the predicted backbone frames"; `backbone` exists so a phi/psi-conditioned
-    rotamer library can be registered as the mu_ideal provider).
+    Allowed: residue TYPE, the atom mask, and the PREDICTED backbone -- par.221 initializes
+    "around the predicted backbone frames", and the 0714 appendix conditions the rotamer on
+    the PREDICTED backbone's dihedrals (phi, psi), both inference-available.
     Never allowed: ground-truth SIDE-CHAIN coordinates -- a partially-noised GT side chain
     still encodes the residue identity through its own geometry.
+
+    The parameter set is asserted EXACTLY, not just checked against a blocklist: that is
+    the mechanism that stops a GT channel being added under an innocent name.
     """
     params = set(inspect.signature(template_init_local).parameters)
     assert not (params & _GT_NAMES)
-    assert params == {"type_idx", "mask", "sigma_T", "generator", "backbone"}
+    assert params == {"type_idx", "mask", "sigma_T", "generator", "backbone", "phi", "psi"}
 
 
 def test_shape_and_masking():

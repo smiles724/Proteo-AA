@@ -210,6 +210,24 @@ class ProtenixDesignTrain(ProtenixDesign):
                     "is not importable; falling back to isotropic Gaussian init."
                 )
                 self.sc_template_init = False
+            # 0714 appendix: which mu_ideal construction to use.
+            #   dunbrack      BuildSC with chi ~ Categorical(p(r | a, phi, psi))   [default]
+            #   dunbrack_mode BuildSC with chi = argmax_r p(r | a, phi, psi)
+            #   ccd           the static one-conformer CCD table (pre-0714 baseline)
+            if self.sc_template_init:
+                from pxdesign_train.sidechain import rotamers, templates as _templates
+
+                name = str(getattr(sc_cfg, "template_provider", "dunbrack")) if sc_cfg is not None else "dunbrack"
+                if name.startswith("dunbrack") and not rotamers.available():
+                    logging.getLogger(__name__).warning(
+                        "sidechain.template_provider=%s but the rotamer library is not "
+                        "built; run `python scripts/build_rotamer_library.py --download`. "
+                        "Falling back to the static CCD template.",
+                        name,
+                    )
+                    name = "ccd"
+                _templates.set_provider_by_name(name)
+                self.sc_template_provider = name
             self.sc_detach_feedback = bool(getattr(sc_cfg, "detach_feedback", False)) if sc_cfg is not None else False
             # Stage III routing: supervise coord loss only where predicted type
             # matches GT; mismatched residues fall back to physical loss.
@@ -296,6 +314,10 @@ class ProtenixDesignTrain(ProtenixDesign):
             # bb_context alone is the CONTROL arm that isolates the q channel.
             self.sc_bb_context = bool(getattr(sc_cfg, "bb_context", False)) if sc_cfg is not None else False
             self.sc_hres_inject = bool(getattr(sc_cfg, "hres_inject", True)) if sc_cfg is not None else True
+            # Context (receptor/motif/ligand) awareness — see configs_train.py.
+            self.sc_context_aware = bool(getattr(sc_cfg, "context_aware", True)) if sc_cfg is not None else True
+            self.sc_context_radius = float(getattr(sc_cfg, "context_radius", 10.0)) if sc_cfg is not None else 10.0
+            self.sc_context_max_atoms = int(getattr(sc_cfg, "context_max_atoms", 4096)) if sc_cfg is not None else 4096
             if self.sc_q_direct and not self.sc_bb_context:
                 logging.getLogger(__name__).info(
                     "sidechain.q_direct=True implies bb_context=True (S_phi needs the "
@@ -581,6 +603,87 @@ class ProtenixDesignTrain(ProtenixDesign):
             return a.gather(dim=-3, index=idx_e).squeeze(-3)
         return a.mean(dim=-3)
 
+    def _template_phi_psi(
+        self, input_feature_dict, out, n_rows: int, n_token: int, use_predicted: bool
+    ):
+        """(phi, psi) for the template's rotamer lookup — 0714 appendix, Step 2.
+
+        `use_predicted` mirrors the ACTIVE FRAME's choice of backbone and must not be
+        decided independently: mu_ideal is posed in that frame, so the rotamer has to be
+        conditioned on the same backbone the frame is built from. Stage II-B uses the
+        predicted x_hat_0 (what the appendix specifies, and what inference has); the
+        Stage II-A warmup has no predicted frame and uses the GT backbone, which is that
+        stage's own definition ("ideal templates in the ground-truth local frames"). The
+        leakage rule is about side-chain coordinates, not the backbone, so both are sound.
+
+        Returns CPU tensors [n_rows, n_token] in radians (NaN where undefined), or
+        (None, None) if no backbone is available — the provider then falls back to the
+        backbone-independent marginal rather than failing the step.
+        """
+        from pxdesign_train.sidechain.frames import backbone_phi_psi, phi_psi_from_ncac
+
+        ri = input_feature_dict.get("residue_index")
+        ai = input_feature_dict.get("asym_id")
+        if ri is None or ai is None:
+            self._warn_once(
+                "_warned_no_phipsi_feats",
+                "template_init: residue_index/asym_id absent; the rotamer lookup "
+                "falls back to the backbone-independent marginal.",
+            )
+            return None, None
+        ri = ri.detach().cpu().reshape(-1)[:n_token]
+        ai = ai.detach().cpu().reshape(-1)[:n_token]
+
+        bb_idx = input_feature_dict.get("sc_bb_atom_idx")
+        if bb_idx is None:
+            return None, None
+        bb_idx = bb_idx.detach().cpu().long().reshape(-1, bb_idx.shape[-1])[:n_token]
+        # The featurizer fills the backbone slots for BINDER tokens only; everything else
+        # is -1 (and sc_bb_coords is all-zero there). Without this mask the GT branch would
+        # read those zeros as real coordinates, find a "peptide bond" of length 0, and hand
+        # back a confident-looking dihedral of three coincident points.
+        have = (bb_idx[:, :3] >= 0).all(dim=-1)
+
+        xden = out.get("x_denoised")
+        phi = psi = None
+        if use_predicted and xden is not None:
+            x = xden.detach().cpu().float()
+            x = x.reshape(-1, x.shape[-2], x.shape[-1])          # [B*N_sample, N_atom, 3]
+            phi, psi = backbone_phi_psi(x, bb_idx, ri, ai)
+        else:
+            gt = input_feature_dict.get("sc_bb_coords")          # [.., L, 4, 3] (N,CA,C,O)
+            if gt is not None:
+                g = gt.detach().cpu().float()
+                g = g.reshape(-1, g.shape[-3], g.shape[-2], g.shape[-1])
+                phi, psi = phi_psi_from_ncac(
+                    g[..., 0, :], g[..., 1, :], g[..., 2, :], ri, ai, have=have
+                )
+        if phi is None:
+            return None, None
+
+        # Match the [B*N_sample, L] tiling that sc_type_idx / sc_mask already have.
+        if phi.shape[0] != n_rows:
+            if phi.shape[0] == 1:
+                phi = phi.expand(n_rows, -1)
+                psi = psi.expand(n_rows, -1)
+            elif n_rows % phi.shape[0] == 0:
+                rep = n_rows // phi.shape[0]
+                phi = phi.repeat_interleave(rep, dim=0)
+                psi = psi.repeat_interleave(rep, dim=0)
+            else:
+                self._warn_once(
+                    "_warned_phipsi_shape",
+                    f"template_init: phi/psi rows {phi.shape[0]} do not tile to "
+                    f"{n_rows}; falling back to the marginal rotamer distribution.",
+                )
+                return None, None
+        return phi.contiguous(), psi.contiguous()
+
+    def _warn_once(self, flag: str, msg: str) -> None:
+        if not getattr(self, flag, False):
+            logging.getLogger(__name__).warning(msg)
+            setattr(self, flag, True)
+
     def _train_forward(
         self,
         input_feature_dict: dict[str, Any],
@@ -807,8 +910,48 @@ class ProtenixDesignTrain(ProtenixDesign):
                     f"template init: type {tuple(tix.shape)} not aligned with atom "
                     f"mask {tuple(mask_cpu.shape)} — per-item tiling is broken"
                 )
+                # 0714 appendix Step 2: the rotamer is conditioned on the backbone's
+                # dihedrals. phi needs residue i-1's C and psi residue i+1's N, so this
+                # has to be computed here, over the whole chain — a per-residue template
+                # lookup cannot do it.
+                #
+                # It must come from the SAME backbone that builds F_hat below, because
+                # mu_ideal is expressed in that frame: conditioning the rotamer on the
+                # predicted backbone while posing it in a GT frame (or vice versa) puts
+                # the side chain in a frame belonging to a different structure. So mirror
+                # the frame's own choice exactly — predicted x_hat_0 under Stage II-B,
+                # GT backbone in the Stage II-A warmup, which is also why the row counts
+                # line up (predicted: B*N_sample rows; GT: B rows).
+                use_pred_bb = (
+                    bool(getattr(self, "sc_predicted_frame", False))
+                    and use_per_sigma
+                    and out.get("x_denoised") is not None
+                )
+                phi, psi = self._template_phi_psi(
+                    input_feature_dict, out, n_rows=tix.shape[0], n_token=tix.shape[-1],
+                    use_predicted=use_pred_bb,
+                )
+                # Say ONCE whether the backbone conditioning is actually live: a silent
+                # fall-back to the marginal looks exactly like a working run. Measured over
+                # the tokens that HAVE a side chain to initialize -- the featurizer resolves
+                # backbone atoms for binder tokens only, so a fraction over all tokens would
+                # just report the binder's share of the crop and tell us nothing.
+                if not getattr(self, "_logged_phipsi", False):
+                    self._logged_phipsi = True
+                    sc_tok = mask_cpu.any(-1)
+                    cov = (
+                        float((torch.isfinite(phi) & sc_tok).sum() / sc_tok.sum().clamp_min(1))
+                        if phi is not None else 0.0
+                    )
+                    logging.getLogger(__name__).info(
+                        "template_init: provider=%s, phi/psi from %s, backbone-conditioned "
+                        "for %.1f%% of side-chain-bearing tokens (rest: marginal)",
+                        getattr(self, "sc_template_provider", "?"),
+                        "predicted x_hat_0" if use_pred_bb else "GT backbone",
+                        100.0 * cov,
+                    )
                 noisy_init = template_init_local(
-                    tix, mask_cpu, sigma_T=self.sc_init_sigma_T,
+                    tix, mask_cpu, sigma_T=self.sc_init_sigma_T, phi=phi, psi=psi,
                 )
             else:
                 if getattr(self, "sc_template_init", False) and not getattr(self, "_warned_no_type_src", False):
@@ -872,6 +1015,25 @@ class ProtenixDesignTrain(ProtenixDesign):
                         ft = ft.expand(B, -1, -1)
                         bb = bb.expand(B, -1, -1, -1)
 
+            # Validity of every row of `bb`. `bb` is a per-TOKEN table, so its
+            # non-binder rows are NOT absent — they are (0,0,0) on the GT path
+            # (sc_bb_coords is zero-filled there) and a copy of atom 0 on the
+            # predicted path (bb_idx.clamp_min(0)). Anything that reduces over that
+            # axis (contact_loss's `min`) will happily select them unless masked.
+            bb_valid = None
+            if bb is not None:
+                _bbi = input_feature_dict.get("sc_bb_atom_idx")
+                if _bbi is not None:
+                    _bbi = _bbi.to(h_res.device).long()[..., : bb.shape[-2]]
+                    if use_per_sigma:
+                        _bbi = _tile_per_sigma(_bbi, trailing_ndim=2)
+                    else:
+                        if _bbi.dim() == 2:
+                            _bbi = _bbi.unsqueeze(0)
+                        if _bbi.shape[0] != B:
+                            _bbi = _bbi.expand(B, -1, -1)
+                    bb_valid = _bbi >= 0                      # [B, L, K] bool
+
             ca = ft
             if ca is None:
                 ca = input_feature_dict.get("sc_frame_t")
@@ -904,6 +1066,52 @@ class ProtenixDesignTrain(ProtenixDesign):
                 noisy = noisy_init
 
             ca_for_module = ca.detach() if ca is not None else None
+
+            # ---- CONTEXT: receptor / motif / ligand (SPEC, see configs_train.py) ----
+            # S_phi must be able to attend to the thing it packs against, and the
+            # clash/contact terms must score against it. Both need the atoms S_phi does
+            # NOT own, expressed in the SAME frame as its predicted side chains — so we
+            # take them from x_denoised (the augmented frame), never from the
+            # featurizer's un-augmented coordinates. All of it is stop-grad: the
+            # receptor is fixed conditioning, not something the side-chain loss may move.
+            #
+            # Gated on use_per_sigma for the same reason predicted frames are: that is
+            # the path where x_denoised's rows line up with S_phi's rows. The Stage II-A
+            # warmup (single reduced baseline, GT frames) runs without context.
+            ctx_tok = None                     # [B, L] bool — token is context, not binder
+            ctx_atoms = None                   # (coords [B,M,3], mask [B,M], group [B,M])
+            xden_ctx = out.get("x_denoised")
+            if (
+                getattr(self, "sc_context_aware", False)
+                and use_per_sigma
+                and xden_ctx is not None
+                and input_feature_dict.get("sc_token_center_idx") is not None
+                and input_feature_dict.get("atom_to_token_idx") is not None
+                and input_feature_dict.get("sc_bb_atom_idx") is not None
+            ):
+                from pxdesign_train.sidechain.physical import build_sidechain_context
+
+                ca_for_module, ctx_tok, ctx_atoms = build_sidechain_context(
+                    xyz=xden_ctx.reshape(
+                        -1, xden_ctx.shape[-2], xden_ctx.shape[-1]
+                    ).to(h_res.device).float(),                               # [B, N_atom, 3]
+                    center_idx=_tile_per_sigma(
+                        input_feature_dict["sc_token_center_idx"].to(h_res.device).long(),
+                        trailing_ndim=1,
+                    ),                                                        # [B, L]
+                    atom_to_token=_tile_per_sigma(
+                        input_feature_dict["atom_to_token_idx"].to(h_res.device).long(),
+                        trailing_ndim=1,
+                    ),                                                        # [B, N_atom]
+                    bb_atom_idx=_tile_per_sigma(
+                        input_feature_dict["sc_bb_atom_idx"].to(h_res.device).long(),
+                        trailing_ndim=2,
+                    ),                                                        # [B, L, 4]
+                    ca=ca_for_module,
+                    radius=float(getattr(self, "sc_context_radius", 10.0)),
+                    max_atoms=int(getattr(self, "sc_context_max_atoms", 4096)),
+                )
+
             # Frame-aware head (sidechain.frame_aware_head): hand S_phi the SAME stop-grad
             # rigid frame the target is built on, so it regresses rotation-invariant local
             # offsets and the known transform does the rotating. Output stays global.
@@ -981,6 +1189,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 h_res, aa_logits, sc_ids, sc_mask, noisy, t, ca_coords=ca_for_module,
                 frame_R=(fR.detach() if _fa else None),
                 frame_t=(ft.detach() if _fa else None),
+                ctx_mask=ctx_tok,
                 **sc_kwargs,
             )
             # 3-tuple only when we opted into the 14-slot axis (bb_local given).
@@ -1057,22 +1266,55 @@ class ProtenixDesignTrain(ProtenixDesign):
 
             # Physical regularization (clash + contact) on predicted GLOBAL
             # side-chain coords (S_phi output is already global).
+            #
+            # The context set (backbone atoms + receptor/motif/ligand, radius-filtered
+            # and MASKED) is what both terms score against. It replaces the old
+            # `backbone_coords=bb.reshape(...)` reference, which was binder-only AND
+            # unmasked: `bb` is a per-TOKEN table, so every receptor token contributed
+            # phantom atoms — (0,0,0) on the GT-frame path (sc_bb_coords is zero there)
+            # and a duplicate of atom 0 on the predicted path (bb_idx.clamp_min(0)).
+            # `contact_loss` takes a min over that axis, so those phantoms silently
+            # zeroed the runaway penalty for any side-chain atom near them.
             y_g = y0_global if y0_global.dim() == 4 else y0_global.unsqueeze(0)  # [B,L,A,3]
             m = sc_mask if sc_mask.dim() == 3 else sc_mask.unsqueeze(0)
-            if fR is not None and ft is not None and bb is not None:
+            if fR is not None and ft is not None and ctx_atoms is None and bb is not None and bb_valid is not None:
+                # Stage II-A warmup fallback: no receptor. GT frames live in the RAW,
+                # un-augmented coordinate frame, while x_denoised (our only source of
+                # receptor atoms) lives in the AUGMENTED one — scoring one against the
+                # other is a frame bug, not a conservative approximation. So warmup keeps
+                # the binder's own backbone as context, now MASKED (this is where the
+                # phantom atoms used to enter).
+                B_, L_, K_ = bb.shape[0], bb.shape[1], bb.shape[2]
+                if bb_valid.shape[0] != B_:
+                    bb_valid = bb_valid.expand(B_, -1, -1)
+                _g = torch.arange(L_, device=y_g.device)[:, None].expand(L_, K_)
+                ctx_atoms = (
+                    bb.reshape(B_, L_ * K_, 3).detach(),
+                    bb_valid.reshape(B_, L_ * K_),
+                    _g.reshape(1, L_ * K_).expand(B_, -1),
+                )
+            if fR is not None and ft is not None and ctx_atoms is not None:
                 B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
-                # Broadcast per-token frames/backbone to the (possibly per-sigma)
-                # batch B_ so the reshape below is well-formed for B*N_sample rows.
-                if fR.shape[0] != B_:
-                    fR = fR.expand(B_, -1, -1, -1)
-                    ft = ft.expand(B_, -1, -1)
-                    bb = bb.expand(B_, -1, -1, -1)
+                ctx_xyz, ctx_m, ctx_g = ctx_atoms
+                # Residue id of each side-chain atom, so the clash term can drop
+                # same-residue (bonded) side-chain<->backbone pairs.
+                sc_group = (
+                    torch.arange(L_, device=y_g.device)[:, None]
+                    .expand(L_, A_)
+                    .reshape(1, L_ * A_)
+                    .expand(B_, -1)
+                )
                 phys = physical_loss(
                     y_g.float().reshape(B_, L_ * A_, 3),
-                    backbone_coords=bb.reshape(B_, L_ * bb.shape[2], 3),
+                    context_coords=ctx_xyz,
+                    context_mask=ctx_m,
+                    context_group_id=ctx_g,
+                    group_id=sc_group,
                     valid_mask=m.reshape(B_, L_ * A_),
                 )
                 out["sc_phys_val"] = phys["total"]
+                out["sc_phys_clash"] = phys["clash"].detach()
+                out["sc_phys_contact"] = phys["contact"].detach()
 
             # Stage III type routing: coord loss only where predicted AA == GT
             # (physical-only elsewhere). Always on under predicted_mask so the

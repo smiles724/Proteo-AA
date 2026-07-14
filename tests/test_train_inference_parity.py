@@ -43,6 +43,12 @@ TRAIN_ONLY = {
     "init_sigma": "consulted at sampling (the Gaussian fallback)",
     "q_direct_zero_init": "initialisation-time only",
     "a_direct_zero_init": "initialisation-time only",
+    # context_aware itself IS mirrored (cogenerate appends the key-only context rows).
+    # These two only shape the ATOM set the clash/contact terms score against, and there
+    # is no coordinate loss at sampling. The cross-residue context KEYS — the part that
+    # changes S_phi's forward — are not radius-filtered in either path.
+    "context_radius": "loss-side only: bounds the clash/contact atom set, no loss at inference",
+    "context_max_atoms": "loss-side only: memory cap on the clash/contact atom set",
 }
 
 

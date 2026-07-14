@@ -262,7 +262,8 @@ def _slice_feature_dict(
     # ATOM-INDEX-VALUED features must have their VALUES remapped, not just their
     # rows sliced: after a crop the atom numbering changes, so an index into the
     # pre-crop atom axis silently points at the wrong atom (or out of range).
-    # `sc_bb_atom_idx` [N_token, 4] holds atom indices of (N, CA, C, O).
+    # `sc_bb_atom_idx` [N_token, 4] holds atom indices of (N, CA, C, O);
+    # `sc_token_center_idx` [N_token] holds each token's representative (CA) atom.
     #
     # In the training path (`DesignSourceDataset._get_one`) this key is NOT present
     # here: cropping happens BEFORE `DesignFeaturizer.transform`, so the featurizer
@@ -271,15 +272,16 @@ def _slice_feature_dict(
     # (e.g. a cached/pre-featurized feature dict) — without it that path is a silent
     # wrong-atom gather. Rows whose atom was dropped by the crop become -1, which is
     # exactly what every downstream consumer already treats as "invalid".
-    if "sc_bb_atom_idx" in feat and isinstance(feat["sc_bb_atom_idx"], torch.Tensor):
-        v = feat["sc_bb_atom_idx"]
-        if v.shape[0] == n_token_orig:
-            tok_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0]).to(v.device)
-            v = torch.index_select(v, 0, tok_idx)
-            atom_old_to_new = _old_to_new_indexer(
-                np.nonzero(atom_keep_mask)[0], n_atom_orig,
-            )
-            sliced["sc_bb_atom_idx"] = _remap_index_values(v, atom_old_to_new)
+    for _key in ("sc_bb_atom_idx", "sc_token_center_idx"):
+        if _key in feat and isinstance(feat[_key], torch.Tensor):
+            v = feat[_key]
+            if v.shape[0] == n_token_orig:
+                tok_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0]).to(v.device)
+                v = torch.index_select(v, 0, tok_idx)
+                atom_old_to_new = _old_to_new_indexer(
+                    np.nonzero(atom_keep_mask)[0], n_atom_orig,
+                )
+                sliced[_key] = _remap_index_values(v, atom_old_to_new)
 
     return sliced
 

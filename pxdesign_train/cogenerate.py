@@ -109,6 +109,16 @@ def cogenerate(
     # stays off there rather than guessing.
     bb_atom_idx4 = {}
     if sc_enabled:
+        # The mu_ideal provider is process-global mutable state. Re-register the model's
+        # own choice (sc_template_provider, set from sidechain.template_provider at
+        # construction) so the sampler cannot silently run a DIFFERENT template
+        # construction than the one the checkpoint was trained under — which is exactly
+        # the failure test_train_inference_parity exists to prevent.
+        _prov = getattr(model, "sc_template_provider", None)
+        if _prov is not None:
+            from pxdesign_train.sidechain import templates as _tpl
+
+            _tpl.set_provider_by_name(_prov)
         a2t = feat["atom_to_token_idx"]
         while a2t.dim() > 1:
             a2t = a2t.squeeze(0)
@@ -278,9 +288,30 @@ def cogenerate(
                 # training block exactly (same switches, same frame), otherwise S_phi
                 # is sampled off the input distribution it was trained on.
                 if getattr(model, "sc_template_init", False):
+                    # 0714 appendix Step 2: the rotamer is conditioned on the predicted
+                    # backbone's (phi, psi). These are chain-wide quantities — phi_i needs
+                    # residue i-1's C — so they are computed over ALL tokens from x_denoised
+                    # and only then restricted to the committed ones. Training does exactly
+                    # the same thing (model._template_phi_psi); if these two drift apart,
+                    # S_phi is sampled off the input distribution it was trained on.
+                    phi_c = psi_c = None
+                    _ri = feat.get("residue_index")
+                    _ai = feat.get("asym_id")
+                    if _bbidx is not None and _ri is not None and _ai is not None:
+                        from pxdesign_train.sidechain.frames import backbone_phi_psi
+
+                        _phi, _psi = backbone_phi_psi(
+                            xc.detach().cpu().float(),
+                            _bbidx.detach().cpu().long(),
+                            _ri.detach().cpu().reshape(-1),
+                            _ai.detach().cpu().reshape(-1),
+                        )
+                        sel = torch.as_tensor(committed)
+                        phi_c, psi_c = _phi[sel], _psi[sel]
                     noisy_local = sc_init.template_init_local(
                         a_hat.cpu(), m.cpu(),
                         sigma_T=getattr(model, "sc_init_sigma_T", sc_init.DEFAULT_SIGMA_T),
+                        phi=phi_c, psi=psi_c,
                     )
                 else:
                     noisy_local = sc_init.gaussian_init_local(
@@ -335,11 +366,55 @@ def cogenerate(
                     bb4 = bb4 * v4[..., None].to(bb4.dtype)
                     bb_local = to_local(bb4, R.float(), t.float()) * v4[..., None]
                     sc_kwargs = {"bb_local": bb_local[None].to(dtype)}
+                # CONTEXT (sidechain.context_aware): training lets S_phi's cross-residue
+                # attention key on the receptor / motif / ligand tokens. Sampling MUST do
+                # the same or the trained module runs blind to the thing it packs against.
+                # Here S_phi's token axis is only the COMMITTED residues, so we append the
+                # context tokens as KEY-ONLY rows: no side-chain slots (mask all False, so
+                # they decode nothing), h_res as their feature, their real CA as position.
+                # Everything below slices back to the first Nc rows.
+                h_e, l_e, ids_e, m_e = h_c[None], l_c[None], ids[None], m[None]
+                noisy_e, ca_e, ctx_e = noisy_in, t[None].float(), None
+                R_e, t_e = R, t
+                Nc = h_c.shape[0]
+                _center = feat.get("sc_token_center_idx")
+                if getattr(model, "sc_context_aware", False) and _center is not None and _bbidx is not None:
+                    _c = _center.to(device).long().reshape(-1)                 # [N_token]
+                    _isb = (_bbidx.to(device).long()[..., :3] >= 0).all(dim=-1)  # [N_token]
+                    _cx = torch.nonzero((_c >= 0) & ~_isb, as_tuple=True)[0]     # context tokens
+                    if _cx.numel() > 0:
+                        Nx = int(_cx.numel())
+                        ctx_ca = xc[_c[_cx]].float()                            # [Nx, 3]
+                        h_e = torch.cat([h_c, a_full[_cx].to(h_c.dtype)], 0)[None]
+                        l_e = torch.cat([l_c, logits[_cx].to(l_c.dtype)], 0)[None]
+                        ids_e = torch.cat([ids, ids.new_zeros(Nx, ids.shape[-1])], 0)[None]
+                        m_e = torch.cat([m, m.new_zeros(Nx, m.shape[-1])], 0)[None]
+                        noisy_e = torch.cat(
+                            [noisy_in[0], noisy_in.new_zeros(Nx, noisy_in.shape[-2], 3)], 0
+                        )[None]
+                        ca_e = torch.cat([t.float(), ctx_ca], 0)[None]
+                        ctx_e = torch.cat(
+                            [torch.zeros(Nc, dtype=torch.bool, device=device),
+                             torch.ones(Nx, dtype=torch.bool, device=device)], 0
+                        )[None]
+                        # Frames for the padded rows are never used (we slice to :Nc), but
+                        # they must be finite: identity rotation at the context CA.
+                        R_e = torch.cat([R.float(), torch.eye(3, device=device).expand(Nx, 3, 3)], 0)
+                        t_e = torch.cat([t.float(), ctx_ca], 0)
+                        if "bb_local" in sc_kwargs:
+                            _bl = sc_kwargs["bb_local"][0]
+                            sc_kwargs["bb_local"] = torch.cat(
+                                [_bl, _bl.new_zeros(Nx, _bl.shape[-2], 3)], 0
+                            )[None]
+                            # Without res_mask the padded rows would get 4 VALID backbone
+                            # slots, making them look like real side-chain residues.
+                            sc_kwargs["res_mask"] = ctx_e.logical_not()
                 sc_out = model.sidechain_module(
-                    h_c[None], l_c[None], ids[None], m[None], noisy_in,
-                    sc_t, ca_coords=t[None].float(),
-                    frame_R=(R[None].float() if _fa else None),
-                    frame_t=(t[None].float() if _fa else None),
+                    h_e, l_e, ids_e, m_e, noisy_e,
+                    sc_t, ca_coords=ca_e,
+                    frame_R=(R_e[None].float() if _fa else None),
+                    frame_t=(t_e[None].float() if _fa else None),
+                    ctx_mask=ctx_e,
                     **sc_kwargs,
                 )
                 bb_feats = None
@@ -347,6 +422,11 @@ def cogenerate(
                     y0_global, atom_feats, bb_feats = sc_out
                 else:
                     y0_global, atom_feats = sc_out
+                # Drop the key-only context rows: only the committed residues decode.
+                y0_global = y0_global[:, :Nc]
+                atom_feats = atom_feats[:, :Nc]
+                if bb_feats is not None:
+                    bb_feats = bb_feats[:, :Nc]
                 y0_global = y0_global.float()[0]  # [Nc, A, 3]
                 for ci, j in enumerate(committed):
                     names = sidechain_atoms(restypes3[ci])

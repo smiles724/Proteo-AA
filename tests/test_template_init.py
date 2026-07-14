@@ -131,7 +131,9 @@ def test_no_gt_argument():
         "sc_gt_local", "sc_gt", "y_gt", "x_sc_gt", "target",
     }
     assert not (params & forbidden), f"GT side-chain coordinates reachable via {params & forbidden}"
-    assert params == {"type_idx", "mask", "sigma_T", "generator", "backbone"}
+    # phi/psi (0714 appendix Step 2) are dihedrals of the PREDICTED backbone, so they are
+    # inference-available and carry no side-chain information.
+    assert params == {"type_idx", "mask", "sigma_T", "generator", "backbone", "phi", "psi"}
 
 
 # --- shape / mask / determinism ---------------------------------------------
@@ -267,9 +269,11 @@ def test_config_defaults():
     from pxdesign_train.configs.configs_train import training_configs
 
     sc = training_configs["sidechain"]
-    # Interface present, but default OFF while the Overleaf/code correspondence is
-    # confirmed. True activates the CCD/static ideal-template implementation.
-    assert sc["template_init"] is False
+    # ON since 2026-07-14: par.221 specifies the formula and the 0714 appendix specifies
+    # how mu_ideal is built (backbone-dependent rotamer library). It was held OFF only
+    # while the CCD table's arbitrary chi was the best mu_ideal available; that is fixed.
+    assert sc["template_init"] is True
+    assert sc["template_provider"] == "dunbrack_mode"
     assert sc["init_sigma_T"] == DEFAULT_SIGMA_T
     assert sc["init_sigma"] == 1.0              # old Gaussian knob preserved for A/B
 

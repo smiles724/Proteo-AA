@@ -50,12 +50,14 @@ class _SpySideChain(nn.Module):
         self.calls = []
 
     def forward(self, h_res, restype_logits, atom_name_ids, atom_mask, noisy_local,
-                t, ca_coords=None, frame_R=None, frame_t=None):
+                t, ca_coords=None, frame_R=None, frame_t=None, bb_local=None,
+                res_mask=None, ctx_mask=None):
         self.calls.append({
             "noisy": noisy_local.detach().clone(),
             "mask": atom_mask.detach().clone(),
             "frame_R": None if frame_R is None else frame_R.detach().clone(),
             "frame_t": None if frame_t is None else frame_t.detach().clone(),
+            "ctx_mask": None if ctx_mask is None else ctx_mask.detach().clone(),
         })
         B, L, A = atom_name_ids.shape
         return (torch.zeros(B, L, A, 3), torch.zeros(B, L, A, C_ATOM))
@@ -63,7 +65,8 @@ class _SpySideChain(nn.Module):
 
 class _FakeModel(nn.Module):
     def __init__(self, template_init=True, sigma_T=0.3,
-                 local_coord_input=True, frame_aware_head=True):
+                 local_coord_input=True, frame_aware_head=True,
+                 context_aware=False):
         super().__init__()
         self.aa_input_source = "diffusion_internal"
         self.enable_sidechain = True
@@ -73,6 +76,7 @@ class _FakeModel(nn.Module):
         self.sc_init_sigma_T = sigma_T
         self.sc_local_coord_input = local_coord_input
         self.sc_frame_aware_head = frame_aware_head
+        self.sc_context_aware = context_aware
         self.diffusion_module = _FakeDiffusion()
         self.sidechain_module = _SpySideChain()
         self._a_token_cache = torch.randn(1, N_TOKEN, C)
@@ -102,7 +106,7 @@ class _FakeModel(nn.Module):
         return torch.zeros(1, N_TOKEN, C)
 
 
-def _feat():
+def _feat(with_bb_index=False):
     aa20_to_36, xpb = build_aa20_to_restype36()
     n_ch = int(max(int(aa20_to_36.max()), xpb)) + 1
     restype = torch.zeros(N_TOKEN, n_ch)
@@ -110,14 +114,26 @@ def _feat():
     a2t = torch.arange(N_TOKEN).repeat_interleave(ATOMS_PER_TOKEN)
     dtm = torch.zeros(N_TOKEN, dtype=torch.bool)
     dtm[0] = dtm[1] = True
-    return {
+    feat = {
         "restype": restype,
         "atom_to_token_idx": a2t,
         "design_token_mask": dtm,
     }
+    if with_bb_index:
+        # Binder tokens 0,1 own N/CA/C/O; token 2 is context (receptor) -> -1.
+        bb = torch.full((N_TOKEN, 4), -1, dtype=torch.long)
+        for tok in (0, 1):
+            for k in range(4):
+                bb[tok, k] = ATOMS_PER_TOKEN * tok + k
+        feat["sc_bb_atom_idx"] = bb
+        # Every token's representative (CA) atom — including the receptor's.
+        feat["sc_token_center_idx"] = torch.tensor(
+            [ATOMS_PER_TOKEN * t + 1 for t in range(N_TOKEN)], dtype=torch.long
+        )
+    return feat
 
 
-def _run(monkeypatch, **model_kw):
+def _run(monkeypatch, with_bb_index=False, **model_kw):
     """Run cogenerate with both initializers spied; returns (model, calls)."""
     import protenix.model.protenix as pxm
     monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
@@ -125,10 +141,14 @@ def _run(monkeypatch, **model_kw):
     calls = {"template": [], "gaussian": []}
     real_tpl, real_gauss = sc_init.template_init_local, sc_init.gaussian_init_local
 
-    def spy_tpl(type_idx, mask, sigma_T=sc_init.DEFAULT_SIGMA_T, generator=None):
+    def spy_tpl(type_idx, mask, sigma_T=sc_init.DEFAULT_SIGMA_T, generator=None,
+                backbone=None, phi=None, psi=None):
         calls["template"].append({"type_idx": type_idx.clone(), "mask": mask.clone(),
-                                  "sigma_T": sigma_T})
-        return real_tpl(type_idx, mask, sigma_T=sigma_T, generator=generator)
+                                  "sigma_T": sigma_T,
+                                  "phi": None if phi is None else phi.clone(),
+                                  "psi": None if psi is None else psi.clone()})
+        return real_tpl(type_idx, mask, sigma_T=sigma_T, generator=generator,
+                        backbone=backbone, phi=phi, psi=psi)
 
     def spy_gauss(mask, sigma=1.0, generator=None):
         calls["gaussian"].append({"mask": mask.clone(), "sigma": sigma})
@@ -139,8 +159,36 @@ def _run(monkeypatch, **model_kw):
 
     torch.manual_seed(0)
     model = _FakeModel(**model_kw)
-    out = cogenerate(model, _feat(), N_step=2, sidechain_cycle=True, sc_start_frac=0.5)
+    out = cogenerate(model, _feat(with_bb_index), N_step=2,
+                     sidechain_cycle=True, sc_start_frac=0.5)
     return model, calls, out
+
+
+def test_sampler_gives_sphi_the_receptor_as_context_keys(monkeypatch):
+    """sidechain.context_aware is mirrored at SAMPLING, behaviourally.
+
+    Training lets S_phi's cross-residue attention key on the receptor. If the sampler
+    does not, the trained module runs blind to the thing it packs against — the exact
+    train/inference mismatch the parity test exists to prevent, and one a source-scrape
+    alone cannot catch.
+    """
+    model, _, _ = _run(monkeypatch, with_bb_index=True, context_aware=True)
+    call = model.sidechain_module.calls[-1]
+
+    ctx = call["ctx_mask"]
+    assert ctx is not None, "sampler never handed S_phi a context mask"
+    # Token axis = [committed residues 0,1] + [context token 2], key-only.
+    assert ctx.shape == (1, 3)
+    assert ctx.tolist() == [[False, False, True]]
+    # The context row owns NO side-chain slot, so it decodes nothing.
+    assert not call["mask"][0, 2].any()
+
+
+def test_sampler_without_context_aware_is_unchanged(monkeypatch):
+    model, _, _ = _run(monkeypatch, with_bb_index=True, context_aware=False)
+    call = model.sidechain_module.calls[-1]
+    assert call["ctx_mask"] is None
+    assert call["mask"].shape[1] == 2, "only the committed residues on the token axis"
 
 
 def test_sampler_uses_template_init_with_predicted_type(monkeypatch):

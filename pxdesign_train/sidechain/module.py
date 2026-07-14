@@ -133,6 +133,7 @@ class SideChainModule(nn.Module):
         frame_t: Optional[torch.Tensor] = None,    # [B, L, 3] local->global translation
         bb_local: Optional[torch.Tensor] = None,   # [B, L, 4, 3] N,CA,C,O in the LOCAL frame
         res_mask: Optional[torch.Tensor] = None,   # [B, L] bool — residue exists
+        ctx_mask: Optional[torch.Tensor] = None,   # [B, L] bool — context (receptor/motif) token
     ):
         """One-step side-chain denoise.
 
@@ -183,7 +184,8 @@ class SideChainModule(nn.Module):
         te = self.w_t(te)                                  # [B, c_atom]
         if te.dim() == 1:
             te = te[None]
-        res_feat = self.w_res(h_res)[:, :, None, :]        # [B, L, 1, c_atom]
+        h_proj = self.w_res(h_res)                         # [B, L, c_atom]
+        res_feat = h_proj[:, :, None, :]                   # [B, L, 1, c_atom]
         type_feat = self.w_aa(torch.softmax(restype_logits, dim=-1))[:, :, None, :]
         atom_feat = self.atom_embed(ids)                   # [B, L, A, c_atom]
         xyz_feat = self.w_xyz(coords)                      # [B, L, A, c_atom]
@@ -201,13 +203,30 @@ class SideChainModule(nn.Module):
             x = blk(x, key_padding_mask=kpm)
         atom_feats = x.reshape(B, L, A, self.c_atom)
 
-        # Cross-residue geometric attention (side-chain<->neighbour context).
+        # Cross-residue geometric attention (side-chain <-> neighbour context).
+        #
+        # CONTEXT KEYS. Appendix ("Side-Chain Module"): "inter-residue and context
+        # attention capture side-chain--side-chain, side-chain--backbone, and
+        # side-chain--RECEPTOR interactions", and the global-frame state exists
+        # precisely so side chains "directly attend to neighboring residues,
+        # receptor atoms, fixed motifs, ligands, and other spatial context".
+        # Keying only on tokens that own S_phi atoms makes every receptor/motif/
+        # ligand token an all-masked key, so the side chain could never see the
+        # thing it is packing against. `ctx_mask` marks those tokens; they carry no
+        # S_phi atoms (their pooled feature is 0), so we seed them from h_res — the
+        # only representation that exists for EVERY token. They are keys only: their
+        # own query output is discarded downstream (they own no side-chain slot).
         if ca_coords is not None:
-            am = mask.to(atom_feats.dtype)[..., None]              # [B,L,A,1]
-            res_feat = (atom_feats * am).sum(2) / (am.sum(2) + 1e-6)  # [B,L,c]
-            res_mask_ctx = mask.bool().any(dim=-1)                  # [B,L] bool
-            res_ctx = self.cross_res(res_feat, ca_coords, res_mask_ctx)  # [B,L,c]
-            atom_feats = atom_feats + res_ctx[:, :, None, :]        # broadcast back
+            am = mask.to(atom_feats.dtype)[..., None]                 # [B,L,A,1]
+            pooled = (atom_feats * am).sum(2) / (am.sum(2) + 1e-6)    # [B,L,c]
+            has_sc = mask.bool().any(dim=-1)                          # [B,L] bool
+            keys_mask = has_sc
+            if ctx_mask is not None:
+                ctx_mask = ctx_mask.to(has_sc.device).bool()
+                pooled = torch.where(has_sc[..., None], pooled, h_proj.to(pooled.dtype))
+                keys_mask = has_sc | ctx_mask
+            res_ctx = self.cross_res(pooled, ca_coords, keys_mask)    # [B,L,c]
+            atom_feats = atom_feats + res_ctx[:, :, None, :]          # broadcast back
 
         # Split the 14 slots back apart. Coordinates are decoded for the 10
         # SIDE-CHAIN slots only — backbone slots never produce coordinates and so

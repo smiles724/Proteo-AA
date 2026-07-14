@@ -140,58 +140,95 @@ def apply_sidechain_ablation_arm(configs, arm: str):
 # enable_sidechain=True). Kept off by default; finetune scripts opt in.
 training_configs["sidechain"] = {
     "init_sigma": 1.0,
+    # ---- Context (receptor / motif / ligand) awareness ----
+    # SPEC, not an option. The paper requires it in six places, e.g.
+    #   - "Operating in the global frame allows side-chain atoms to directly attend
+    #     to neighboring residues, receptor atoms, fixed motifs, ligands, and other
+    #     spatial context.";
+    #   - clash covers "side-chain--backbone, side-chain--side-chain, and
+    #     side-chain--context atom pairs";
+    #   - contact "promotes compatible interactions with ... receptor atoms ...";
+    #   - the appendix says our own default S_phi's "inter-residue and context
+    #     attention capture ... side-chain--receptor interactions".
+    # Before this, S_phi could see NONE of it: every non-binder token was an
+    # all-masked key in the cross-residue attention, clash scored side-chain <->
+    # side-chain pairs only, and contact's reference was binder-only (and unmasked,
+    # so its phantom rows silently zeroed the penalty). Emitting GLOBAL coordinates
+    # was necessary for receptor awareness but never sufficient — no path carried
+    # the receptor in.
+    # A switch so it can be ablated, and so the Stage II-A warmup can run without it:
+    # warmup uses GT frames, which live in the RAW coordinate frame, while x_denoised
+    # (our only source of receptor atoms) lives in the AUGMENTED one — scoring one
+    # against the other would be a frame bug, not a conservative approximation.
+    "context_aware": True,
+    "context_radius": 10.0,      # A; atoms beyond this from any binder CA are dropped
+    "context_max_atoms": 4096,   # hard cap on the context set (memory bound)
     # Overleaf paragraph 221 (template-anchored leakage-free initialization):
     # start side-chain denoising from the type-conditioned IDEAL template
     # perturbed by sigma_T, rather than isotropic Gaussian noise. An isotropic
     # Gaussian is rotation-invariant, so pushing it through the predicted frame
     # F_hat carries no backbone-orientation information and S_phi cannot learn
     # where to place atoms in GLOBAL space. The (anisotropic) template does.
-    # ============================ STATUS: NOT ENABLED ============================
-    # Overleaf par.221 specifies this as a FORMULA, and the appendix repeats it for
-    # inference. Yifei's code (069645a) implements the same equation with mu_ideal == 0:
-    # its only initializer is gaussian_init_local(mask, sigma), whose signature never even
-    # receives the residue type, so it structurally cannot produce a residue-specific
-    # template.
+    # ============================== STATUS: ENABLED ==============================
+    # Overleaf par.221 specifies this as a FORMULA, and the 0714 appendix
+    # ("Residue-Specific Side-Chain Template Construction") specifies how mu_ideal is
+    # actually built. Yifei's code (069645a) implements par.221's equation with
+    # mu_ideal == 0: its only initializer is gaussian_init_local(mask, sigma), whose
+    # signature never even receives the residue type, so it structurally cannot produce
+    # a residue-specific template.
     #
-    # WHAT IS BUILT (all of it, tested, and NOT on):
-    #   - sidechain/templates.py : mu_ideal from the wwPDB CCD ideal coordinates, expressed
-    #     in frames.py's residue-local frame, column order == instantiate.sidechain_atoms.
-    #     Regenerable: scripts/build_sidechain_templates.py --check reproduces it to 2e-7.
-    #   - init.py::template_init_local : y_T = mu_ideal[a, j] + sigma_T * eps ; the model
-    #     then maps it to global through the stop-grad predicted frame. Leakage-free: it
-    #     takes residue TYPE and the atom mask, never GT side-chain coordinates.
-    #   - training AND sampling paths both honour this switch (cogenerate mirrors it).
+    # THIS WAS OFF UNTIL 2026-07-14, waiting for one thing. In the 2026-07-09 meeting
+    # FangWu asked Jiaming to research how the ideal template should be built --
+    # "从统计分析上去做...还是说已经有一些比较成熟的方法" -- because the CCD table has the
+    # right bond lengths and angles but ONE ARBITRARY chi, which is 2-3 A from real side
+    # chains on the multi-chi residues. That research landed as the 0714 appendix:
+    # a mature method exists, namely a BACKBONE-DEPENDENT ROTAMER LIBRARY (Dunbrack
+    # BBDEP2010). It is now implemented, so the blocker is gone and the spec'd
+    # initialization is the default.
     #
-    # WHY IT IS OFF, AND WHAT IT IS WAITING FOR:
-    # The CCD table is chemically right but CONFORMATIONALLY ARBITRARY -- correct bond
-    # lengths and angles, but one canonical choice of chi. Measured against real side chains
-    # (1cse chain B, in the residue-local frame):
-    #     ALA (no chi) ......... 0.07 A from truth      <- essentially exact
-    #     PRO (ring) ........... 0.68 A
-    #     THR / LEU / SER ...... 1.0 - 1.2 A
-    #     HIS/GLU/ARG/TYR ...... 2.4 - 3.4 A            <- the chi is arbitrary
-    # In the 2026-07-09 meeting FangWu asked Jiaming to research how the ideal template
-    # should actually be built -- "从统计分析上去做...还是说已经有一些比较成熟的方法" --
-    # and Jiaming pointed at APM's empirical ROTAMER DISTRIBUTION. That research is what
-    # fixes exactly the part the CCD table gets wrong (the chi), so we wait for it rather
-    # than ship an arbitrary conformation.
+    # WHAT RUNS NOW (0714 appendix, Steps 1-3):
+    #   Step 1  chi_constants.py   A_sc, K_i and G_ideal (connectivity, bond lengths/angles,
+    #                              rigid groups) from the CCD + Protenix's AF chi tables.
+    #   Step 2  rotamers.py        chi ~ p(r | a_hat, phi_hat, psi_hat) from BBDEP2010,
+    #                              phi/psi being dihedrals of the PREDICTED backbone.
+    #   Step 3  buildsc.py         BuildSC: pose G_ideal at those torsions, in the local
+    #                              frame. Bond lengths/angles are preserved exactly.
+    #   init.py                    y_T = mu_ideal[a, chi, j] + sigma_T * eps
+    #   model.py / cogenerate.py   x_T = F_hat y_T  (training and sampling mirror each other)
     #
-    # HOW HIS TABLE DROPS IN (one line; nothing in model.py / init.py / cogenerate.py moves):
-    #     from pxdesign_train.sidechain import templates
-    #     templates.set_ideal_template_provider(my_provider)
-    # The provider contract already supports all three shapes his answer could take:
-    #     provider(type_idx, *, generator=None, backbone=None) -> (coords, mask)
-    #   - a different STATIC table            (ignore generator/backbone)
-    #   - SAMPLING from a rotamer DISTRIBUTION (use `generator`, so runs stay reproducible)
-    #   - a BACKBONE-DEPENDENT library         (use `backbone`: the residue's own N/CA/C/O
-    #                                          in its local frame, for phi/psi conditioning)
-    # NOTE: phi/psi conditioning and sample-vs-mode were NOT decided in the meeting -- the
-    # interface merely does not foreclose them. See tests/test_template_provider.py, which
-    # actually swaps the provider rather than claiming it is swappable.
+    # Measured on 2790 residues of 33 real chains, mean local-frame distance of the
+    # initialization from the true side chain: 2.887 A (Gaussian, i.e. what runs today)
+    # -> 1.277 A (this). scripts/eval_template_quality.py regenerates the numbers.
     #
-    # Flip to True to enable the CCD table today (e.g. for an A/B against the Gaussian init).
+    # Set to False to restore Yifei's isotropic Gaussian init (the A/B baseline).
     # ============================================================================
-    "template_init": False,
+    "template_init": True,
+    # Which mu_ideal construction to use:
+    #   "dunbrack_mode" BuildSC, chi = argmax_r p(r | a, phi, psi)       [default]
+    #   "dunbrack"      BuildSC, chi ~ Categorical(p(r | a, phi, psi))
+    #   "ccd"           the static one-conformer CCD table (pre-0714 baseline)
+    #
+    # The appendix permits deterministic OR sampled selection and does not choose. We
+    # measured both on 2790 real residues (scripts/eval_template_quality.py), mean
+    # local-frame RMSD of the template from the true side chain:
+    #
+    #     gaussian (mu=0, the pre-0714 default) .. 2.887 A     chi1 recovery   n/a
+    #     ccd      (static, one arbitrary chi) ... 1.662 A                    46.3 %
+    #     dunbrack (sampled) .................... 1.487 A                    61.0 %
+    #     dunbrack_mode (argmax) ................ 1.277 A                    68.7 %
+    #     oracle   (true chi; lower bound) ...... 0.333 A                   100.0 %
+    #
+    # Mode wins on 18 of 19 side-chain-bearing types. Sampling is WORSE than the old
+    # static table on the high-entropy residues (GLN -19%, GLU -16%, LYS -6%, ARG -4%),
+    # because their rotamer distributions are nearly flat (GLN's modal rotamer carries
+    # only 12% of the mass over 108 rotamers), so a draw is usually far from the truth.
+    # As an INITIALIZATION, lower error is the whole point, so mode is the default.
+    #
+    # OPEN: sampling is the more natural prior for a *generative* model -- it makes the
+    # init distribution match p(r | a, phi, psi) instead of collapsing it to the mode.
+    # That argument is about sample diversity, which this geometric benchmark cannot
+    # measure; it needs a training A/B. Nothing here forecloses it -- flip this string.
+    "template_provider": "dunbrack_mode",
     # ABLATION CANDIDATE -- default OFF, i.e. the CA-anchored global-head baseline.
     #     x0_global = MLP(atom_feats) + ca_coords          (CA-anchored global head)
     # Turning it ON gives

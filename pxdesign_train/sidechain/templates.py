@@ -338,51 +338,104 @@ def ideal_template(type_idx: torch.Tensor):
 # ---------------------------------------------------------------------------
 # The table above is the wwPDB CCD *ideal* geometry: correct bond lengths and bond
 # angles, but ONE canonical choice of chi (torsion). Measured against real side chains
-# (1cse chain B, residue-local frame): ALA, which has no chi, sits 0.07 A from truth,
-# while multi-chi residues are off by 2.4-3.4 A (HIS 3.37, GLU 2.60, ARG 2.42, TYR 2.38).
-# So the template is chemically right and conformationally arbitrary.
+# it is exact for ALA (no chi) and 2-3 A off for the multi-chi residues, because the
+# chi is arbitrary. That is the ONLY thing wrong with it, and it is exactly what the
+# 0714 appendix's Step 2 (a backbone-dependent rotamer library) fixes.
 #
-# That is exactly what a rotamer-statistics table would improve, so the lookup is a
-# REGISTERABLE PROVIDER rather than a hard-wired call. A replacement drops in with one
-# line and NOTHING in model.py / init.py / cogenerate.py has to change:
+# So the lookup is a REGISTERABLE PROVIDER rather than a hard-wired call. A replacement
+# drops in with one line and NOTHING in model.py / init.py / cogenerate.py has to change:
 #
 #     from pxdesign_train.sidechain import templates
 #     templates.set_ideal_template_provider(my_provider)
 #
-# The provider contract (all three levels are supported):
+# The provider contract:
 #
-#     provider(type_idx, *, generator=None, backbone=None) -> (coords, mask)
+#     provider(type_idx, *, generator=None, backbone=None, phi=None, psi=None)
+#         -> (coords, mask)
 #
 #     type_idx   LongTensor [...]              residue type, STD_AA_3 order
-#     generator  Optional[torch.Generator]     for a STOCHASTIC provider -- e.g. sampling a
-#                                              rotamer from a distribution instead of always
-#                                              returning the same chi. Use it, do not create
-#                                              your own RNG, or runs stop being reproducible.
+#     generator  Optional[torch.Generator]     for a STOCHASTIC provider -- sampling a
+#                                              rotamer from p(r | a, phi, psi) instead of
+#                                              always returning the same chi. Use it, do
+#                                              not create your own RNG, or runs stop being
+#                                              reproducible.
+#     phi, psi   Optional[Tensor [...]]        PREDICTED backbone dihedrals in RADIANS,
+#                                              NaN where undefined (chain termini/breaks).
+#                                              This is what a BACKBONE-DEPENDENT rotamer
+#                                              library is conditioned on (appendix Step 2).
 #     backbone   Optional[Tensor [..., 4, 3]]  the residue's own N, CA, C, O in its LOCAL
-#                                              frame, for a BACKBONE-DEPENDENT provider
-#                                              (phi/psi-conditioned rotamer libraries).
-#                                              None when the caller has no backbone to give.
+#                                              frame. LEGACY, and nearly useless: the local
+#                                              frame is BUILT from N/CA/C, so in it they are
+#                                              essentially constant, and phi/psi need the
+#                                              PREVIOUS residue's C and the NEXT residue's
+#                                              N, which a per-residue tensor cannot carry.
+#                                              Kept only so old providers still import.
 #     returns    coords [..., MAX_SC, 3] float32 in the residue-LOCAL frame,
 #                mask   [..., MAX_SC] bool, column order == instantiate.sidechain_atoms.
 #
 # LEAKAGE RULE, enforced by test: a provider may depend on residue TYPE, on the atom mask,
 # and on the (predicted) BACKBONE. It must NEVER receive or consult ground-truth side-chain
 # COORDINATES -- that is the whole point of paragraph 221's "leakage-free" initialization.
-# There is deliberately no parameter through which they could arrive.
+# There is deliberately no parameter through which they could arrive. phi/psi are computed
+# from the PREDICTED backbone (frames.backbone_phi_psi), so they are inference-available.
 
 
-def _default_provider(type_idx, *, generator=None, backbone=None):
-    """The shipped CCD ideal table: deterministic, type-only (ignores generator/backbone)."""
+def ccd_provider(type_idx, *, generator=None, backbone=None, phi=None, psi=None):
+    """The static CCD ideal table: deterministic, type-only. Ignores everything else.
+
+    This is the pre-0714 behaviour, kept as the A/B baseline for the rotamer provider.
+    """
     return ideal_template(type_idx)
 
 
-_PROVIDER = _default_provider
+def dunbrack_provider(
+    type_idx, *, generator=None, backbone=None, phi=None, psi=None, select="sample"
+):
+    """Overleaf 0714 appendix Steps 1-3: mu_ideal = BuildSC(a_hat, G_ideal, chi(a,phi,psi)).
+
+    Step 1  residue constants  -> A_sc, K_i, G_ideal      (chi_constants + this table)
+    Step 2  rotamer lookup     -> chi ~ p(r | a, phi, psi) (rotamers.select_chi, BBDEP2010)
+    Step 3  BuildSC            -> Cartesian local template (buildsc.build_sidechain_local)
+
+    Degrades gracefully: with no rotamer library on disk, or with phi/psi unavailable,
+    it falls back to the marginal rotamer distribution and finally to the CCD conformer,
+    rather than failing a training run.
+    """
+    from pxdesign_train.sidechain import rotamers
+    from pxdesign_train.sidechain.buildsc import build_sidechain_local
+
+    chi = rotamers.select_chi(
+        type_idx, phi=phi, psi=psi, mode=select, generator=generator
+    )
+    if chi is None:                      # library not built -> static CCD conformer
+        return ideal_template(type_idx)
+    return build_sidechain_local(type_idx, chi)
+
+
+def dunbrack_mode_provider(type_idx, *, generator=None, backbone=None, phi=None, psi=None):
+    """Deterministic variant: r_i = argmax_r p_{i,r} (the appendix permits either)."""
+    return dunbrack_provider(
+        type_idx, generator=generator, backbone=backbone, phi=phi, psi=psi, select="mode"
+    )
+
+
+# The default is the spec's construction, not the static table. Deterministic
+# selection: measured against 2790 real residues it beats sampling on every residue
+# type (see scripts/eval_template_quality.py) -- 1.28 A vs 1.49 A mean local-frame
+# RMSD, 68.7% vs 61.0% chi1 recovery. Sampling is available and the appendix permits
+# it, but as an INITIALIZATION it is strictly worse, and on the high-entropy residues
+# (GLN, GLU, LYS, ARG) it is worse than even the old static table.
+_DEFAULT_PROVIDER = dunbrack_mode_provider
+_PROVIDER = _DEFAULT_PROVIDER
+
+# Back-compat alias: the old name for what is now explicitly the CCD baseline.
+_default_provider = ccd_provider
 
 
 def set_ideal_template_provider(fn=None):
-    """Register the mu_ideal provider. Pass None to restore the CCD default."""
+    """Register the mu_ideal provider. Pass None to restore the 0714 default."""
     global _PROVIDER
-    _PROVIDER = _default_provider if fn is None else fn
+    _PROVIDER = _DEFAULT_PROVIDER if fn is None else fn
 
 
 def get_ideal_template_provider():
@@ -390,4 +443,17 @@ def get_ideal_template_provider():
 
 
 def is_default_provider() -> bool:
-    return _PROVIDER is _default_provider
+    return _PROVIDER is _DEFAULT_PROVIDER
+
+
+PROVIDERS = {
+    "dunbrack": dunbrack_provider,            # sampled  r ~ Categorical(p)
+    "dunbrack_mode": dunbrack_mode_provider,  # deterministic argmax
+    "ccd": ccd_provider,                      # static, pre-0714 baseline
+}
+
+
+def set_provider_by_name(name: str):
+    if name not in PROVIDERS:
+        raise ValueError(f"unknown template provider {name!r}; have {sorted(PROVIDERS)}")
+    set_ideal_template_provider(PROVIDERS[name])

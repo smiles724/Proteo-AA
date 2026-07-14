@@ -450,6 +450,11 @@ class DesignFeaturizer:
             "sc_frame_t": torch.from_numpy(sc_frame_t),
             "sc_bb_coords": torch.from_numpy(sc_bb_coords),
             "sc_bb_atom_idx": torch.from_numpy(sc_bb_atom_idx),
+            # Representative (CA, for protein) atom of EVERY token — binder AND
+            # receptor/motif/ligand. `sc_bb_atom_idx` is binder-only (-1 elsewhere),
+            # so it cannot give S_phi a position for the context tokens it must
+            # attend to. Same N_atom axis, so it is remapped on crop like the others.
+            "sc_token_center_idx": torch.from_numpy(np.asarray(rep_idx, dtype=np.int64)),
         }
 
     @staticmethod

@@ -1,4 +1,4 @@
-"""DIRECT a-level side-chain -> backbone feedback (FangWu's slide) + the
+"""DIRECT a-level side-chain -> backbone feedback + the
 batch>1 fix in the template-init type source.
 
     a'_bb = a_bb + MLP(LayerNorm(concat(a_bb, W a_sc)))

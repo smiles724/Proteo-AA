@@ -114,10 +114,24 @@ def _cloud(local: torch.Tensor, mask: torch.Tensor, R: torch.Tensor) -> torch.Te
 
 # --- leakage guard -----------------------------------------------------------
 def test_no_gt_argument():
-    """template_init_local may see residue TYPE + atom mask, never GT coords."""
+    """template_init_local may see residue TYPE, the atom mask, and the PREDICTED backbone.
+
+    It may never see ground-truth SIDE-CHAIN coordinates -- that is the entire point of
+    paragraph 221's "leakage-free" initialization: a partially-noised GT side chain still
+    encodes the residue identity through its own geometry.
+
+    `backbone` is allowed and is NOT a hole: it carries the residue's own N/CA/C/O, which
+    S_phi already conditions on (par.221 initializes "around the PREDICTED backbone
+    frames"). It exists so a phi/psi-conditioned rotamer library can be registered as the
+    provider. The forbidden set below is what must never appear.
+    """
     params = set(inspect.signature(template_init_local).parameters)
-    assert not (params & {"gt", "gt_coords", "x0", "true", "ground_truth", "sc_gt_local"})
-    assert params == {"type_idx", "mask", "sigma_T", "generator"}
+    forbidden = {
+        "gt", "gt_coords", "gt_local", "x0", "true", "ground_truth",
+        "sc_gt_local", "sc_gt", "y_gt", "x_sc_gt", "target",
+    }
+    assert not (params & forbidden), f"GT side-chain coordinates reachable via {params & forbidden}"
+    assert params == {"type_idx", "mask", "sigma_T", "generator", "backbone"}
 
 
 # --- shape / mask / determinism ---------------------------------------------
@@ -253,12 +267,9 @@ def test_config_defaults():
     from pxdesign_train.configs.configs_train import training_configs
 
     sc = training_configs["sidechain"]
-    # Overleaf par.221 specifies the template-anchored init as a FORMULA, not an option, and
-    # the appendix repeats it for inference. Yifei's code implements the same equation with
-    # mu_ideal == 0 (its init never even receives the residue type), which leaves the init
-    # both orientation-free and at the wrong scale. That is a spec gap, so the default closes
-    # it; False reproduces the original Gaussian baseline for A/B.
-    assert sc["template_init"] is True
+    # Interface present, but default OFF while the Overleaf/code correspondence is
+    # confirmed. True activates the CCD/static ideal-template implementation.
+    assert sc["template_init"] is False
     assert sc["init_sigma_T"] == DEFAULT_SIGMA_T
     assert sc["init_sigma"] == 1.0              # old Gaussian knob preserved for A/B
 

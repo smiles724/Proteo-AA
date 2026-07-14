@@ -170,8 +170,8 @@ def cogenerate(
             s_trunk_step = s_trunk + model.hres_injector(h_res_prime_inject).to(s_trunk.dtype)
 
         # Arm the direct a-level injection for THIS backbone call only. a_sc_inject is the
-        # side-chain summary from the PREVIOUS step (FangWu: "only available after the
-        # first-round"), mirroring how h_res_prime_inject is persisted. The finally-clause
+        # side-chain summary from the PREVIOUS step, mirroring how h_res_prime_inject
+        # is persisted. The finally-clause
         # disarms even on exception, so step 0 can never inherit a live flag.
         # q_direct's call-key registry exists ONLY to make the forward and the
         # activation-checkpoint RECOMPUTE agree during training. Inference runs under

@@ -1,5 +1,4 @@
-"""DIRECT q-level (ATOM-level) side-chain -> backbone feedback (FangWu's slide,
-"Interconnection between Backbone Module and Side-chain Module").
+"""DIRECT q-level (ATOM-level) side-chain -> backbone feedback.
 
     q'_bb = q_bb + MLP(LayerNorm(concat(q_bb, W q_sc_bb)))
 

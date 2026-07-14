@@ -249,7 +249,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 self.w_aa_post = float(getattr(sc_cfg, "weight_aa_post", 1.0)) if sc_cfg is not None else 1.0
 
             # ---- DIRECT a-level feedback (sidechain.a_direct) ----
-            # FangWu's slide:  a'_bb = a_bb + MLP(concat(a_bb, a_sc)).
+            # Direct token-level fusion: a'_bb = a_bb + MLP(concat(a_bb, a_sc)).
             # The indirect path above projects h_res' into s_trunk and the
             # DiffusionModule then RECOMPUTES a_token from scratch, so the fused
             # representation never *is* the next round's token. With a_direct we
@@ -276,9 +276,9 @@ class ProtenixDesignTrain(ProtenixDesign):
                 )
 
             # ---- DIRECT q-level ATOM feedback (sidechain.q_direct) ----
-            # FangWu: "the side-chain module always keeps 14 atoms in its
-            # representation; by changing the last 10 it adjusts the first 4, and
-            # those 4 are passed back to the backbone module's 4 atoms."
+            # 14-slot design: the side-chain module keeps backbone atoms in its
+            # representation, updates those slots through side-chain attention, and
+            # passes the resulting four backbone-atom features back to the backbone module.
             #     q'_bb = q_bb + MLP(concat(q_bb, W q_sc_bb))
             # q_bb are the Backbone Module's per-atom features (AtomAttentionEncoder
             # q_skip) of a residue's N/CA/C/O; q_sc_bb are S_phi's features for the
@@ -910,7 +910,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             _fa = getattr(self, "sc_frame_aware_head", False) and fR is not None and ft is not None
 
             # ---- ATOM-level (q) feedback: give S_phi its 4 backbone context slots ----
-            # FangWu's 14-slot picture: S_phi attends over ATOM14 = (N, CA, C, O) +
+            # 14-slot context: S_phi attends over ATOM14 = (N, CA, C, O) +
             # 10 side-chain slots. The backbone slots are CONTEXT ONLY (known coords,
             # never denoised, never supervised); their post-attention features are the
             # q_sc_bb handed back to the Backbone Module's 4 atom rows.

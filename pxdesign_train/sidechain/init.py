@@ -60,16 +60,25 @@ def gaussian_init_local(
     return noise * mask[..., None].to(noise.dtype)
 
 
-def _ideal_template(type_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Indirection over the ideal-template table (lazy import; test-patchable).
+def _ideal_template(
+    type_idx: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+    backbone: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Indirection over the REGISTERED mu_ideal provider (lazy import; test-patchable).
 
     Returns (coords [..., MAX_SC, 3] float32, mask [..., MAX_SC] bool) in the
     residue-local frame, row/column order matching
     `instantiate.instantiate_from_type_indices` / `sidechain_atoms`.
-    """
-    from pxdesign_train.sidechain.templates import ideal_template
 
-    return ideal_template(type_idx)
+    `generator` and `backbone` are forwarded so a STOCHASTIC provider (sampling a rotamer
+    from a distribution) or a BACKBONE-DEPENDENT one (phi/psi-conditioned rotamer library)
+    can be dropped in without touching this file, model.py or cogenerate.py. The shipped
+    CCD provider ignores both.
+    """
+    from pxdesign_train.sidechain.templates import get_ideal_template_provider
+
+    return get_ideal_template_provider()(type_idx, generator=generator, backbone=backbone)
 
 
 def templates_available() -> bool:
@@ -86,6 +95,7 @@ def template_init_local(
     mask: torch.Tensor,
     sigma_T: float = DEFAULT_SIGMA_T,
     generator: Optional[torch.Generator] = None,
+    backbone: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Overleaf 0721 (0712) paragraph 221: y_T = mu_ideal[a, j] + sigma_T * eps.
 
@@ -115,7 +125,7 @@ def template_init_local(
     )
     # Out-of-place: type_idx is often an expand()ed view (per-sigma tiling).
     safe_idx = type_idx.long().clamp(0, len(STD_AA_3) - 1)
-    mu, tmask = _ideal_template(safe_idx)
+    mu, tmask = _ideal_template(safe_idx, generator=generator, backbone=backbone)
     mu = mu.to(device=mask.device, dtype=torch.float32)
     tmask = tmask.to(device=mask.device, dtype=torch.bool)
     assert mu.shape == (*mask.shape, 3), (

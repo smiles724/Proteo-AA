@@ -331,3 +331,63 @@ def ideal_template(type_idx: torch.Tensor):
     idx = torch.where(valid, type_idx, torch.full_like(type_idx, gly))
 
     return table[idx], mask_table[idx]
+
+
+# ---------------------------------------------------------------------------
+# Swappable provider
+# ---------------------------------------------------------------------------
+# The table above is the wwPDB CCD *ideal* geometry: correct bond lengths and bond
+# angles, but ONE canonical choice of chi (torsion). Measured against real side chains
+# (1cse chain B, residue-local frame): ALA, which has no chi, sits 0.07 A from truth,
+# while multi-chi residues are off by 2.4-3.4 A (HIS 3.37, GLU 2.60, ARG 2.42, TYR 2.38).
+# So the template is chemically right and conformationally arbitrary.
+#
+# That is exactly what a rotamer-statistics table would improve, so the lookup is a
+# REGISTERABLE PROVIDER rather than a hard-wired call. A replacement drops in with one
+# line and NOTHING in model.py / init.py / cogenerate.py has to change:
+#
+#     from pxdesign_train.sidechain import templates
+#     templates.set_ideal_template_provider(my_provider)
+#
+# The provider contract (all three levels are supported):
+#
+#     provider(type_idx, *, generator=None, backbone=None) -> (coords, mask)
+#
+#     type_idx   LongTensor [...]              residue type, STD_AA_3 order
+#     generator  Optional[torch.Generator]     for a STOCHASTIC provider -- e.g. sampling a
+#                                              rotamer from a distribution instead of always
+#                                              returning the same chi. Use it, do not create
+#                                              your own RNG, or runs stop being reproducible.
+#     backbone   Optional[Tensor [..., 4, 3]]  the residue's own N, CA, C, O in its LOCAL
+#                                              frame, for a BACKBONE-DEPENDENT provider
+#                                              (phi/psi-conditioned rotamer libraries).
+#                                              None when the caller has no backbone to give.
+#     returns    coords [..., MAX_SC, 3] float32 in the residue-LOCAL frame,
+#                mask   [..., MAX_SC] bool, column order == instantiate.sidechain_atoms.
+#
+# LEAKAGE RULE, enforced by test: a provider may depend on residue TYPE, on the atom mask,
+# and on the (predicted) BACKBONE. It must NEVER receive or consult ground-truth side-chain
+# COORDINATES -- that is the whole point of paragraph 221's "leakage-free" initialization.
+# There is deliberately no parameter through which they could arrive.
+
+
+def _default_provider(type_idx, *, generator=None, backbone=None):
+    """The shipped CCD ideal table: deterministic, type-only (ignores generator/backbone)."""
+    return ideal_template(type_idx)
+
+
+_PROVIDER = _default_provider
+
+
+def set_ideal_template_provider(fn=None):
+    """Register the mu_ideal provider. Pass None to restore the CCD default."""
+    global _PROVIDER
+    _PROVIDER = _default_provider if fn is None else fn
+
+
+def get_ideal_template_provider():
+    return _PROVIDER
+
+
+def is_default_provider() -> bool:
+    return _PROVIDER is _default_provider

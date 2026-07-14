@@ -105,6 +105,37 @@ training_configs["loss"] = {
     "weight_aa_post": 1.0,
 }
 
+SC_ABLATION_ARMS = {
+    # true control: refinement pass runs, no side-chain info reaches the backbone
+    "no":            dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False),
+    # current/default indirect channel: h_res' -> s_trunk -> a_token recomputed
+    "a-indirect":    dict(hres_inject=True,  a_direct=False, bb_context=False, q_direct=False),
+    # token-level concat/fusion: a'_bb = a_bb + MLP([a_bb, a_sc])
+    "a-direct":      dict(hres_inject=False, a_direct=True,  bb_context=False, q_direct=False),
+    # q control: S_phi sees 4 backbone context atoms, but no q feedback is written back
+    "bbctx":         dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False),
+    # atom-level concat/fusion: q'_bb = q_bb + MLP([q_bb, q_sc_bb])
+    "q":             dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=True),
+    # both explicit concat/fusion channels
+    "a-direct+q":    dict(hres_inject=False, a_direct=True,  bb_context=True,  q_direct=True),
+}
+
+
+def apply_sidechain_ablation_arm(configs, arm: str):
+    """Apply a named side-chain feedback ablation arm to a config object/dict."""
+    if arm in (None, "", "default"):
+        return configs
+    if arm not in SC_ABLATION_ARMS:
+        raise ValueError(f"unknown side-chain ablation arm {arm!r}; choose one of {sorted(SC_ABLATION_ARMS)}")
+    sc = configs["sidechain"] if isinstance(configs, dict) else configs.sidechain
+    for key, value in SC_ABLATION_ARMS[arm].items():
+        if isinstance(sc, dict):
+            sc[key] = value
+        else:
+            setattr(sc, key, value)
+    return configs
+
+
 # Side-Chain Module knobs (consumed by ProtenixDesignTrain when
 # enable_sidechain=True). Kept off by default; finetune scripts opt in.
 training_configs["sidechain"] = {
@@ -115,25 +146,53 @@ training_configs["sidechain"] = {
     # Gaussian is rotation-invariant, so pushing it through the predicted frame
     # F_hat carries no backbone-orientation information and S_phi cannot learn
     # where to place atoms in GLOBAL space. The (anisotropic) template does.
-    # Overleaf par.221 -- a SPEC requirement, not an engineering opinion, hence default ON:
-    #     y_T,ij = mu_ideal[a_i, j] + sigma_T * eps_ij ,   then   x_T,ij = F_hat_i . y_T,ij
-    # The appendix repeats it for inference ("side-chain atoms are initialized from
-    # residue-specific ideal templates around the predicted backbone frames"), and
-    # cogenerate honours it too.
+    # ============================ STATUS: NOT ENABLED ============================
+    # Overleaf par.221 specifies this as a FORMULA, and the appendix repeats it for
+    # inference. Yifei's code (069645a) implements the same equation with mu_ideal == 0:
+    # its only initializer is gaussian_init_local(mask, sigma), whose signature never even
+    # receives the residue type, so it structurally cannot produce a residue-specific
+    # template.
     #
-    # Yifei's code implements this equation with mu_ideal identically ZERO -- its init is
-    # gaussian_init_local(mask, sigma), whose signature never even receives the residue type,
-    # so it structurally cannot produce a residue-specific template. Two measured consequences:
-    #   1. NO ORIENTATION. An isotropic Gaussian is rotation-invariant (R.eps ~ eps), so
-    #      mapping it through F_hat carries no backbone orientation at all -- to_global
-    #      degenerates into a translation.
-    #   2. WRONG SCALE. At sigma=1.0 it packs every side-chain atom within ~1.6 A of CA,
-    #      while a real ARG reaches 6.6 A, LYS 6.3 A, TYR 6.3 A. That is not merely a weaker
-    #      prior, it is a physically impossible starting conformation.
-    # This is a spec/architecture gap, so we close it rather than leave it to a flag.
-    # Set False to reproduce Yifei's original Gaussian baseline for A/B.
-    "template_init": True,
-    # ABLATION CANDIDATE -- default OFF, i.e. Yifei's active path
+    # WHAT IS BUILT (all of it, tested, and NOT on):
+    #   - sidechain/templates.py : mu_ideal from the wwPDB CCD ideal coordinates, expressed
+    #     in frames.py's residue-local frame, column order == instantiate.sidechain_atoms.
+    #     Regenerable: scripts/build_sidechain_templates.py --check reproduces it to 2e-7.
+    #   - init.py::template_init_local : y_T = mu_ideal[a, j] + sigma_T * eps ; the model
+    #     then maps it to global through the stop-grad predicted frame. Leakage-free: it
+    #     takes residue TYPE and the atom mask, never GT side-chain coordinates.
+    #   - training AND sampling paths both honour this switch (cogenerate mirrors it).
+    #
+    # WHY IT IS OFF, AND WHAT IT IS WAITING FOR:
+    # The CCD table is chemically right but CONFORMATIONALLY ARBITRARY -- correct bond
+    # lengths and angles, but one canonical choice of chi. Measured against real side chains
+    # (1cse chain B, in the residue-local frame):
+    #     ALA (no chi) ......... 0.07 A from truth      <- essentially exact
+    #     PRO (ring) ........... 0.68 A
+    #     THR / LEU / SER ...... 1.0 - 1.2 A
+    #     HIS/GLU/ARG/TYR ...... 2.4 - 3.4 A            <- the chi is arbitrary
+    # In the 2026-07-09 meeting FangWu asked Jiaming to research how the ideal template
+    # should actually be built -- "从统计分析上去做...还是说已经有一些比较成熟的方法" --
+    # and Jiaming pointed at APM's empirical ROTAMER DISTRIBUTION. That research is what
+    # fixes exactly the part the CCD table gets wrong (the chi), so we wait for it rather
+    # than ship an arbitrary conformation.
+    #
+    # HOW HIS TABLE DROPS IN (one line; nothing in model.py / init.py / cogenerate.py moves):
+    #     from pxdesign_train.sidechain import templates
+    #     templates.set_ideal_template_provider(my_provider)
+    # The provider contract already supports all three shapes his answer could take:
+    #     provider(type_idx, *, generator=None, backbone=None) -> (coords, mask)
+    #   - a different STATIC table            (ignore generator/backbone)
+    #   - SAMPLING from a rotamer DISTRIBUTION (use `generator`, so runs stay reproducible)
+    #   - a BACKBONE-DEPENDENT library         (use `backbone`: the residue's own N/CA/C/O
+    #                                          in its local frame, for phi/psi conditioning)
+    # NOTE: phi/psi conditioning and sample-vs-mode were NOT decided in the meeting -- the
+    # interface merely does not foreclose them. See tests/test_template_provider.py, which
+    # actually swaps the provider rather than claiming it is swappable.
+    #
+    # Flip to True to enable the CCD table today (e.g. for an A/B against the Gaussian init).
+    # ============================================================================
+    "template_init": False,
+    # ABLATION CANDIDATE -- default OFF, i.e. the CA-anchored global-head baseline.
     #     x0_global = MLP(atom_feats) + ca_coords          (CA-anchored global head)
     # Turning it ON gives
     #     x0_global = F_hat . MLP(atom_feats)              (regress LOCAL offsets, let the
@@ -154,7 +213,7 @@ training_configs["sidechain"] = {
     # approximates poorly. A single-structure memorization run cannot settle this; real data
     # can. Open it as an ablation arm if training stalls.
     "frame_aware_head": False,
-    # ABLATION CANDIDATE -- default OFF, i.e. Yifei's active path: S_phi's own noisy
+    # ABLATION CANDIDATE -- default OFF, i.e. S_phi's own noisy
     # side-chain atoms are fed as RAW GLOBAL coordinates, x = F_hat.(mu + sigma.eps).
     # Turning it ON feeds them in the residue-LOCAL frame (translation-free).
     # Overleaf's appendix calls the global-coordinate atom feature "optional", so neither is
@@ -193,7 +252,7 @@ training_configs["sidechain"] = {
     # teacher-forcing (the current default) GT atom composition would leak
     # residue identity into post_aa via h_res', so we do NOT supervise it.
     "predicted_mask": False,
-    # DIRECT a-level side-chain -> backbone feedback (FangWu's slide):
+    # DIRECT a-level side-chain -> backbone feedback:
     #     a'_bb = a_bb + MLP(concat(a_bb, a_sc))
     # The default (indirect) path projects h_res' into s_trunk and lets the
     # DiffusionModule recompute a_token from scratch, so the fused representation
@@ -205,8 +264,7 @@ training_configs["sidechain"] = {
     # residual branch is zero-initialised, so turning it on is a no-op at step 0.
     "a_direct": False,
     "a_direct_zero_init": True,
-    # DIRECT q-level (ATOM-level) side-chain -> backbone feedback (FangWu's slide,
-    # "Interconnection between Backbone Module and Side-chain Module"):
+    # DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
     #     q'_bb = q_bb + MLP(concat(q_bb, W q_sc_bb))
     # a_direct closes the loop at the TOKEN level (one vector per residue). q_direct
     # closes it at the ATOM level: S_phi keeps all 14 ATOM14 slots — (N, CA, C, O) +

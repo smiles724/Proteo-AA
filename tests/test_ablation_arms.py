@@ -23,25 +23,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from pxdesign_train.configs.configs_train import training_configs
-
-
-# name -> the sidechain config overrides that DEFINE the arm.
-ARMS = {
-    # true control: refinement pass runs, no side-chain info reaches the backbone
-    "no":            dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False),
-    # the pre-existing indirect channel (h_res' -> s_trunk -> a_token recomputed)
-    "a-indirect":    dict(hres_inject=True,  a_direct=False, bb_context=False, q_direct=False),
-    # FangWu's slide: a'_bb = a_bb + MLP([a_bb, a_sc]) injected into the token itself
-    "a-direct":      dict(hres_inject=False, a_direct=True,  bb_context=False, q_direct=False),
-    # CONTROL for q: S_phi gets the 4 backbone context atoms, but NO q channel.
-    # Without this arm, "q helps" is confounded with "S_phi went from 10 to 14 slots".
-    "bbctx":         dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False),
-    # the atom-level channel proper (implies bb_context)
-    "q":             dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=True),
-    # both channels
-    "a-direct+q":    dict(hres_inject=False, a_direct=True,  bb_context=True,  q_direct=True),
-}
+from pxdesign_train.configs.configs_train import (
+    SC_ABLATION_ARMS as ARMS,
+    apply_sidechain_ablation_arm,
+    training_configs,
+)
 
 
 def _sc_cfg(**overrides):
@@ -74,6 +60,14 @@ def test_defaults_reproduce_the_a_indirect_arm():
     assert d["bb_context"] is False
     assert d["q_direct"] is False
     assert dict(hres_inject=True, a_direct=False, bb_context=False, q_direct=False) == ARMS["a-indirect"]
+
+
+@pytest.mark.parametrize("arm", list(ARMS))
+def test_config_helper_applies_named_arm(arm):
+    cfg = {"sidechain": dict(training_configs["sidechain"])}
+    apply_sidechain_ablation_arm(cfg, arm)
+    for key, value in ARMS[arm].items():
+        assert cfg["sidechain"][key] is value
 
 
 def test_no_arm_really_has_no_feedback_channel():

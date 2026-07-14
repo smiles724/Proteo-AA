@@ -21,7 +21,10 @@ def build(args, device):
     from pxdesign_train.runner import DesignSourceDataset, TrainerComponents
     from pxdesign_train.runner.cif_provider import CifFileProvider
     from protenix.config.config import parse_configs
-    from pxdesign_train.configs.configs_train import training_configs
+    from pxdesign_train.configs.configs_train import (
+        apply_sidechain_ablation_arm,
+        training_configs,
+    )
     from pxdesign_train.runner.trainer import PXDesignTrainer
 
     cifs = args.train_cifs.split(",") if args.train_cifs else [args.cif]
@@ -81,6 +84,7 @@ def build(args, device):
         # and predicted_frame=True.
         configs.sidechain.per_sigma = False
         configs.sidechain.predicted_frame = False
+    apply_sidechain_ablation_arm(configs, getattr(args, "sc_ablation_arm", "default"))
     if getattr(args, "no_template_init", False):
         configs.sidechain.template_init = False
     if getattr(args, "no_frame_aware_head", False):
@@ -274,6 +278,12 @@ def main():
                     help="inference-side cycle: run side-chain step in cogenerate")
     ap.add_argument("--coevolution", action="store_true",
                     help="Stage II-B: close the cycle (h_res'->B_theta refine), report sc_local/bb_post/aa_post")
+    from pxdesign_train.configs.configs_train import SC_ABLATION_ARMS
+    ap.add_argument("--sc_ablation_arm", default="default",
+                    choices=["default", *SC_ABLATION_ARMS.keys()],
+                    help="named side-chain feedback arm: default/a-indirect keeps the "
+                         "indirect h_res channel; a-direct/q/a-direct+q are explicit "
+                         "concat/fusion arms.")
     ap.add_argument("--no_hres_inject", action="store_true",
                     help="ablation: disable the INDIRECT h_res' -> s_trunk feedback. The "
                          "refinement pass still runs but carries no side-chain info -- this "

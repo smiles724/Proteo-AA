@@ -56,7 +56,7 @@ def pool_side_chain_atoms(
 
 
 class ATokenFusion(nn.Module):
-    """DIRECT a-level side-chain -> backbone feedback (FangWu's slide):
+    """DIRECT a-level side-chain -> backbone feedback:
 
         a'_bb = a_bb + MLP(LayerNorm(concat(a_bb, W a_sc)))
 
@@ -119,8 +119,7 @@ class ATokenFusion(nn.Module):
 
 
 class QAtomFusion(nn.Module):
-    """DIRECT q-level (ATOM-level) side-chain -> backbone feedback (FangWu's slide,
-    "Interconnection between Backbone Module and Side-chain Module"):
+    """DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
 
         q'_bb = q_bb + MLP(LayerNorm(concat(q_bb, W q_sc_bb)))
 

@@ -154,7 +154,7 @@ training_configs["sidechain"] = {
     # Template RMSD to true side chain: gaussian 2.89 / ccd 1.66 / dunbrack 1.49 /
     # dunbrack_mode 1.28 A. docs/sidechain_config_notes.md.
     "template_provider": "dunbrack_mode",
-    # Ablation candidate, default OFF (Yifei's CA-anchored head x0 = MLP + ca_coords). ON:
+    # Ablation candidate, default OFF (CA-anchored head x0 = MLP + ca_coords). ON:
     # x0 = F_hat.MLP (regress local offsets, known frame rotates). docs/sidechain_config_notes.md.
     "frame_aware_head": False,
     # Ablation candidate, default OFF (feed S_phi's noisy coords as raw global). ON: feed them

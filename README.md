@@ -30,12 +30,20 @@ Over the reproduction baseline this branch adds the full side-chain co-design la
 - **Correctness** — Overleaf par.221/256 conformance, plus 16 blocking bugs fixed that had
   left the side-chain training path unable to run at all.
 
-See the commit history for the per-change detail.
-
 **Status:** engineering prototype — runs end-to-end on single-structure GPU smoke, not yet
 method-validated. Per-stage grading and design rationale in
 [`docs/`](docs/) ([`method_status.md`](docs/method_status.md),
 [`sidechain_config_notes.md`](docs/sidechain_config_notes.md)).
+
+## Where to look
+
+| What changed | Main code |
+|---|---|
+| **New framing loss** — predicted-frame-aligned side-chain coordinate supervision | [`pxdesign_train/sidechain/losses.py`](pxdesign_train/sidechain/losses.py), [`pxdesign_train/loss.py`](pxdesign_train/loss.py), [`tests/test_sidechain_losses.py`](tests/test_sidechain_losses.py) |
+| **Ideal-template init** — `mu_ideal` + Dunbrack/BuildSC template instead of pure Gaussian init | [`pxdesign_train/sidechain/init.py`](pxdesign_train/sidechain/init.py), [`templates.py`](pxdesign_train/sidechain/templates.py), [`rotamers.py`](pxdesign_train/sidechain/rotamers.py), [`buildsc.py`](pxdesign_train/sidechain/buildsc.py) |
+| **Backbone-SideChain interconnection** — direct `a`/`q` side-chain feedback into the backbone module | [`pxdesign_train/sidechain/coevolution.py`](pxdesign_train/sidechain/coevolution.py), [`pxdesign_train/sidechain/module.py`](pxdesign_train/sidechain/module.py), [`pxdesign_train/model.py`](pxdesign_train/model.py) |
+| **Ablation arms** — `no`, `a-indirect`, `a-direct`, `bbctx`, `q`, `a-direct+q` | [`pxdesign_train/configs/configs_train.py`](pxdesign_train/configs/configs_train.py), [`scripts/finetune_mini.py`](scripts/finetune_mini.py), [`tests/test_ablation_arms.py`](tests/test_ablation_arms.py) |
+| **Status / caveats** — what is smoke-tested vs. still waiting for real-data comparison | [`docs/method_status.md`](docs/method_status.md), [`docs/sidechain_config_notes.md`](docs/sidechain_config_notes.md) |
 
 ## Repository layout
 

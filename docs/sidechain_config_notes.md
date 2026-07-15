@@ -3,6 +3,21 @@
 Detail behind the one-line comments in `pxdesign_train/configs/configs_train.py`
 (`training_configs["sidechain"]` / `["loss"]`). Kept here so the config stays readable.
 
+## TL;DR
+
+| Switch / arm | Default | Purpose |
+|---|---:|---|
+| `template_init` | `True` | Use Overleaf 0714 template-anchored initialization instead of isotropic Gaussian. |
+| `template_provider` | `"dunbrack_mode"` | Build `mu_ideal` with predicted-backbone `phi/psi` and Dunbrack mode rotamers. |
+| `context_aware` | `True` | Let S_φ and physical terms see receptor / motif / ligand context. |
+| `frame_aware_head` | `False` | Optional training-stability ablation; default keeps the CA-anchored global head. |
+| `local_coord_input` | `False` | Optional training-stability ablation; default feeds global noisy coordinates. |
+| `a_direct`, `q_direct` | `False` | Direct feedback channels are enabled by named ablation arms, not by default. |
+
+Named feedback arms are `no`, `a-indirect`, `a-direct`, `bbctx`, `q`, and
+`a-direct+q`. They are selected with `scripts/finetune_mini.py --sc_ablation_arm ...`.
+The mechanism is smoke-tested; real-data ranking of these arms is still pending.
+
 ## `context_aware` (default `True`) — spec, not an option
 
 Overleaf requires it in six places, e.g. *"Operating in the global frame allows

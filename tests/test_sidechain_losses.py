@@ -93,7 +93,7 @@ def test_contact_penalizes_runaway():
 def test_physical_contact_rotamer_present_and_backprop():
     coords = torch.randn(1, 6, 3, requires_grad=True)
     out = physical_loss(
-        coords, backbone_coords=torch.randn(1, 4, 3),
+        coords, context_coords=torch.randn(1, 4, 3),
         torsion_idx=torch.tensor([[0, 1, 2, 3]]),
         rotamer_targets=torch.tensor([math.pi]),
     )

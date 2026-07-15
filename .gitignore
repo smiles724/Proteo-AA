@@ -7,3 +7,6 @@ build/
 .eggs/
 
 .DS_Store
+
+# rotamer-library build cache (regenerable)
+.pdb_cache/

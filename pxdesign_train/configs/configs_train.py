@@ -105,10 +105,65 @@ training_configs["loss"] = {
     "weight_aa_post": 1.0,
 }
 
+SC_ABLATION_ARMS = {
+    # true control: refinement pass runs, no side-chain info reaches the backbone
+    "no":            dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False),
+    # current/default indirect channel: h_res' -> s_trunk -> a_token recomputed
+    "a-indirect":    dict(hres_inject=True,  a_direct=False, bb_context=False, q_direct=False),
+    # token-level concat/fusion: a'_bb = a_bb + MLP([a_bb, a_sc])
+    "a-direct":      dict(hres_inject=False, a_direct=True,  bb_context=False, q_direct=False),
+    # q control: S_phi sees 4 backbone context atoms, but no q feedback is written back
+    "bbctx":         dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False),
+    # atom-level concat/fusion: q'_bb = q_bb + MLP([q_bb, q_sc_bb])
+    "q":             dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=True),
+    # both explicit concat/fusion channels
+    "a-direct+q":    dict(hres_inject=False, a_direct=True,  bb_context=True,  q_direct=True),
+}
+
+
+def apply_sidechain_ablation_arm(configs, arm: str):
+    """Apply a named side-chain feedback ablation arm to a config object/dict."""
+    if arm in (None, "", "default"):
+        return configs
+    if arm not in SC_ABLATION_ARMS:
+        raise ValueError(f"unknown side-chain ablation arm {arm!r}; choose one of {sorted(SC_ABLATION_ARMS)}")
+    sc = configs["sidechain"] if isinstance(configs, dict) else configs.sidechain
+    for key, value in SC_ABLATION_ARMS[arm].items():
+        if isinstance(sc, dict):
+            sc[key] = value
+        else:
+            setattr(sc, key, value)
+    return configs
+
+
 # Side-Chain Module knobs (consumed by ProtenixDesignTrain when
 # enable_sidechain=True). Kept off by default; finetune scripts opt in.
 training_configs["sidechain"] = {
     "init_sigma": 1.0,
+    # Receptor / motif / ligand context. Spec (Overleaf requires it in 6 places), not an
+    # option; a switch only so Stage II-A warmup (GT frames) can skip it. See
+    # docs/sidechain_config_notes.md.
+    "context_aware": True,
+    "context_radius": 10.0,      # A; atoms beyond this from any binder CA are dropped
+    "context_max_atoms": 4096,   # hard cap on the context set (memory bound)
+    # Overleaf par.221: init from the type-conditioned ideal template + sigma_T noise,
+    # not isotropic Gaussian (mu_ideal == 0). False restores the Gaussian A/B baseline.
+    # docs/sidechain_config_notes.md.
+    "template_init": True,
+    # mu_ideal construction: "dunbrack_mode" (argmax) | "dunbrack" (sampled) | "ccd" (static).
+    # Template RMSD to true side chain: gaussian 2.89 / ccd 1.66 / dunbrack 1.49 /
+    # dunbrack_mode 1.28 A. docs/sidechain_config_notes.md.
+    "template_provider": "dunbrack_mode",
+    # Ablation candidate, default OFF (Yifei's CA-anchored head x0 = MLP + ca_coords). ON:
+    # x0 = F_hat.MLP (regress local offsets, known frame rotates). docs/sidechain_config_notes.md.
+    "frame_aware_head": False,
+    # Ablation candidate, default OFF (feed S_phi's noisy coords as raw global). ON: feed them
+    # in the residue-local frame (translation-free). docs/sidechain_config_notes.md.
+    "local_coord_input": False,
+    # Template perturbation scale (Angstrom, per coordinate). Keep it small
+    # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
+    # template anisotropy that carries the orientation.
+    "init_sigma_T": 0.3,
     "c_atom": 128,
     "trunk_grad_scale": 1.0,
     "detach_feedback": False,
@@ -132,6 +187,43 @@ training_configs["sidechain"] = {
     # teacher-forcing (the current default) GT atom composition would leak
     # residue identity into post_aa via h_res', so we do NOT supervise it.
     "predicted_mask": False,
+    # DIRECT a-level side-chain -> backbone feedback:
+    #     a'_bb = a_bb + MLP(concat(a_bb, a_sc))
+    # The default (indirect) path projects h_res' into s_trunk and lets the
+    # DiffusionModule recompute a_token from scratch, so the fused representation
+    # never *is* the next round's token. With a_direct=True the fusion happens at
+    # the a_token level itself (a forward hook on DiffusionModule.layernorm_a
+    # replaces its output) and KEEPS the previous backbone token as the residual
+    # base. a_sc only exists after round 1, so it fires ONLY in the refinement
+    # pass (requires enable_coevolution). Ablation arm: default False, and the
+    # residual branch is zero-initialised, so turning it on is a no-op at step 0.
+    "a_direct": False,
+    "a_direct_zero_init": True,
+    # DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
+    #     q'_bb = q_bb + MLP(concat(q_bb, W q_sc_bb))
+    # a_direct closes the loop at the TOKEN level (one vector per residue). q_direct
+    # closes it at the ATOM level: S_phi keeps all 14 ATOM14 slots — (N, CA, C, O) +
+    # 10 side-chain slots — and "by changing the last 10 it adjusts the first 4"; those
+    # 4 per-atom features are fused into the Backbone Module's per-atom q (its
+    # AtomAttentionEncoder q_skip) for the SAME 4 atoms, via a forward-pre-hook on
+    # DiffusionModule.atom_attention_decoder. Every other atom row (receptor, binder
+    # side-chain atoms) passes through untouched.
+    # q_sc_bb only exists after round 1, so it fires ONLY in the refinement pass
+    # (requires enable_coevolution). Independent of a_direct -> the intended ablation
+    # is no / a-only / q-only / a+q. Default False, residual branch zero-initialised,
+    # so turning it on is an exact no-op at step 0.
+    # 14-slot S_phi: the residue's 4 backbone atoms (N,CA,C,O) join the intra-residue
+    # attention as CONTEXT (never denoised, never supervised) so the side chain can move
+    # their features. This is the PREREQUISITE for q_direct, and also the CONTROL arm that
+    # separates "S_phi sees the backbone" from "the q feedback channel".
+    # INDIRECT token-level feedback: h_res' -> HResInjector -> s_trunk (today's path).
+    # Set False for the TRUE no-feedback control arm: the refinement pass still runs,
+    # but carries no side-chain information. Not the same as enable_coevolution=False,
+    # which removes the second pass entirely.
+    "hres_inject": True,
+    "bb_context": False,
+    "q_direct": False,
+    "q_direct_zero_init": True,
     "weight_bb_post": 1.0,
     "weight_aa_post": 1.0,
 }

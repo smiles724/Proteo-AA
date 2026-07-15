@@ -286,7 +286,15 @@ class PXDesignTrainer:
             aa_clean=batch["input_feature_dict"].get("aa_clean"),
             aa_loss_mask=batch["input_feature_dict"].get("aa_loss_mask"),
             aa_t=batch["input_feature_dict"].get("aa_t"),
+            # S_phi emits GLOBAL side-chain coords plus the predicted frame it used.
+            # loss.py's `has_global_sc` needs all of sc_pred_global / sc_gt_local /
+            # sc_frame_R / sc_frame_t / sc_atom_mask; without these three the whole
+            # side-chain coordinate loss block is skipped and sc_local stays 0.0.
+            # sc_pred_local is kept for backward compat with older model outputs.
             sc_pred_local=out.get("sc_pred_local"),
+            sc_pred_global=out.get("sc_pred_global"),
+            sc_frame_R=out.get("sc_frame_R"),
+            sc_frame_t=out.get("sc_frame_t"),
             sc_gt_local=batch["input_feature_dict"].get("sc_gt_local"),
             sc_atom_mask=out.get("sc_atom_mask"),
             sc_type_match=out.get("sc_type_match"),
@@ -400,6 +408,37 @@ class PXDesignTrainer:
         self._log(f"Saved checkpoint -> {path}")
         return path
 
+    def _migrate_atom_name_vocab(self, state: dict) -> dict:
+        """Zero-pad S_phi's atom-name embedding when an OLDER checkpoint is loaded.
+
+        The atom-name vocab grew when the 4 backbone names (N, CA, C, O) were appended
+        for the 14-slot S_phi axis: ATOM_VOCAB_SIZE 33 -> 37. The 32 side-chain ids
+        (1..32) are FROZEN — append-only — so rows 0..32 keep their exact meaning and the
+        new rows are simply absent from old checkpoints.
+
+        Without this, every existing side-chain checkpoint becomes unloadable: strict=False
+        does NOT tolerate a shape mismatch, it still raises
+        RuntimeError("size mismatch for sidechain_module.atom_embed.weight ...").
+        """
+        out = dict(state)
+        for k, v in state.items():
+            if not k.endswith("atom_embed.weight") or not torch.is_tensor(v):
+                continue
+            cur = self.model.state_dict().get(k)
+            if cur is None or cur.shape == v.shape:
+                continue
+            if cur.dim() != 2 or v.dim() != 2 or cur.shape[1] != v.shape[1]:
+                continue                       # not the vocab axis — leave it to load_state_dict
+            if cur.shape[0] <= v.shape[0]:
+                continue                       # shrinking is not a migration we understand
+            pad = cur.new_zeros(cur.shape[0] - v.shape[0], cur.shape[1])
+            out[k] = torch.cat([v.to(cur.dtype).to(cur.device), pad], dim=0)
+            self._log(
+                f"Migrated {k}: {tuple(v.shape)} -> {tuple(out[k].shape)} "
+                f"(zero-padded {pad.shape[0]} new atom-name rows; existing ids unchanged)"
+            )
+        return out
+
     def load_checkpoint(self, path: str, params_only: bool = False) -> None:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         load_strict = bool(getattr(self.configs, "load_strict", False))
@@ -407,6 +446,7 @@ class PXDesignTrainer:
         state = ckpt["model"]
         if not self.use_ddp and any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
+        state = self._migrate_atom_name_vocab(state)
         missing, unexpected = self.model.load_state_dict(state, strict=load_strict)
         self._log(f"Loaded {path} (missing={len(missing)}, unexpected={len(unexpected)})")
         if not params_only:

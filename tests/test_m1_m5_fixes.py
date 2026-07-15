@@ -335,7 +335,8 @@ def test_per_sigma_sidechain_forward_and_loss():
     y_g = to_global(y0, fR, ft)
     bb = torch.randn(S, L, 4, 3)
     phys = physical_loss(y_g.reshape(S, L * A, 3),
-                         backbone_coords=bb.reshape(S, L * 4, 3),
+                         context_coords=bb.reshape(S, L * 4, 3),
+                         context_mask=torch.ones(S, L * 4, dtype=torch.bool),
                          valid_mask=m.reshape(S, L * A))
     assert torch.isfinite(phys["total"])
 

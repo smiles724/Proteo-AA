@@ -8,13 +8,32 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
 
-from pxdesign_train.sidechain.init import gaussian_init_local
+from pxdesign_train.sidechain.init import gaussian_init_local, template_init_local
+
+_GT_NAMES = {"gt", "gt_coords", "x0", "true", "ground_truth"}
 
 
 def test_no_gt_argument():
     """Leakage guard: the initializer must not be able to see GT coords."""
     params = set(inspect.signature(gaussian_init_local).parameters)
-    assert not (params & {"gt", "gt_coords", "x0", "true", "ground_truth"})
+    assert not (params & _GT_NAMES)
+
+
+def test_template_init_no_gt_argument():
+    """Same leakage guard for the template-anchored init (Overleaf para 221).
+
+    Allowed: residue TYPE, the atom mask, and the PREDICTED backbone -- par.221 initializes
+    "around the predicted backbone frames", and the 0714 appendix conditions the rotamer on
+    the PREDICTED backbone's dihedrals (phi, psi), both inference-available.
+    Never allowed: ground-truth SIDE-CHAIN coordinates -- a partially-noised GT side chain
+    still encodes the residue identity through its own geometry.
+
+    The parameter set is asserted EXACTLY, not just checked against a blocklist: that is
+    the mechanism that stops a GT channel being added under an innocent name.
+    """
+    params = set(inspect.signature(template_init_local).parameters)
+    assert not (params & _GT_NAMES)
+    assert params == {"type_idx", "mask", "sigma_T", "generator", "backbone", "phi", "psi"}
 
 
 def test_shape_and_masking():

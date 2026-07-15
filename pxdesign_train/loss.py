@@ -346,7 +346,13 @@ class PXDesignLoss(nn.Module):
                 [B, L, A, 3]. Repeat each batch item over S so loss terms are
                 row-aligned with the predictions.
                 """
-                pred_lead = pred_ref.shape[:-trailing_ndim]
+                # pred_ref is ALWAYS [..., L, A, 3] (4 dims), so its batch lead is
+                # shape[:-3] regardless of x's own trailing rank. Slicing it with x's
+                # trailing_ndim instead folded the TOKEN axis into the lead: for
+                # sc_frame_t [B, L, 3] (trailing_ndim=2) that gave pred_lead=[B_, L] and
+                # then expand() to [B_, L, L, 3] -> RuntimeError. It crashed every
+                # per-sigma / co-evolution run and reddened 4 unit tests.
+                pred_lead = pred_ref.shape[:-3]
                 x_lead = x.shape[:-trailing_ndim]
                 if x_lead == pred_lead:
                     return x

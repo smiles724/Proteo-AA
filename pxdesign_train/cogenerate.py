@@ -4,10 +4,16 @@ Joint sequence-structure co-generation.
 Merges PXDesign-d (structure) and the ProteinMPNN stage (sequence) into ONE
 reverse process: at every denoising step we run the DiffusionModule once (which
 denoises coordinates AND, via the forward hook, exposes the structure-aware
-`a_token`), take an EDM step on the coordinates, and use `a_token` to predict +
-progressively unmask residue identities. Because the AA head reads the SAME
-a_token that sees the binder's own noisy backbone, sequence is generated
-conditioned on the structure being generated — the co-design the author asked for.
+`a_token`), take an EDM step on the coordinates, and use `a_token` to predict
+residue identities. Because the AA head reads the SAME a_token that sees the
+binder's own noisy backbone, sequence is generated conditioned on the structure
+being generated — the co-design the author asked for.
+
+By default (`seq_mode="complete_unmask"`) the design region is kept fully masked
+and re-predicted in full every step, with the final sequence read out at the last
+step — no unmasking schedule. `seq_mode="sequential"` is the LLaDA-style ablation
+that progressively commits residues on a schedule and re-encodes the trunk each step
+so commitments feed back (see `cogenerate` docstring).
 
 This is a MINIMAL, correctness-first sampler (deterministic EDM Euler step, no
 predictor-corrector / churn). Quality tuning is out of scope here.
@@ -37,6 +43,7 @@ def cogenerate(
     sc_start_frac: float = 0.5,
     stop_on_seq_stable: bool = False,
     seq_patience: int = 3,
+    seq_mode: str = "complete_unmask",
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -44,6 +51,23 @@ def cogenerate(
     `input_feature_dict` must be a real featurized input (for N_atom,
     atom_to_token_idx, design_token_mask, restype template, ...); its GT
     coordinates are NOT used — structure starts from noise.
+
+    `seq_mode` selects how residue identities are produced along the reverse
+    trajectory:
+      * "complete_unmask" (DEFAULT): the design region stays FULLY MASKED as model
+        input the whole trajectory. Every step re-predicts the entire design region
+        from the current structure (predict-all); the final sequence is the prediction
+        at the last, cleanest step. No commit, no freeze, no schedule. Matches training
+        `residue_type.mask_mode="all"` — train == inference. The trunk is encoded once
+        (restype never changes), so this path costs one trunk pass.
+      * "sequential" (ABLATION, LLaDA-style): start fully masked and progressively
+        commit the top-k highest-confidence positions each step (schedule via
+        `_unmask_counts`), freezing them and writing their types into `restype`. To make
+        this a REAL co-design loop (not open-loop), the trunk is RE-ENCODED each step so
+        committed residues actually condition the next backbone step — otherwise restype
+        never re-enters the diffusion module. Costs one trunk pass per step. To be a
+        valid comparison this ablation needs a checkpoint trained with
+        `mask_mode="time_dependent"` (an all-masked model never saw partial sequences).
 
     Returns {coordinate, sequence (aa20 per design token, -1 elsewhere),
              trajectory}.
@@ -53,15 +77,15 @@ def cogenerate(
     assert model.aa_input_source == "diffusion_internal", (
         "cogenerate needs input_source='diffusion_internal' (a_token)."
     )
+    if seq_mode not in ("complete_unmask", "sequential"):
+        raise ValueError(
+            f"seq_mode must be 'complete_unmask' or 'sequential', got {seq_mode!r}"
+        )
     model.eval()
 
     feat = dict(input_feature_dict)
     feat = model.diffusion_module.diffusion_conditioning.relpe.generate_relp(feat)
     feat = update_input_feature_dict(feat)
-    s_inputs, s_trunk, z_trunk = model.get_condition_embedding(feat, chunk_size=chunk_size)
-
-    device = s_inputs.device
-    dtype = s_inputs.dtype
     N_atom = feat["atom_to_token_idx"].shape[-1]
 
     dtm = feat["design_token_mask"].bool()
@@ -71,7 +95,6 @@ def cogenerate(
     N_token = dtm.shape[-1]
 
     aa20_to_36, xpb = build_aa20_to_restype36()
-    aa20_to_36 = aa20_to_36.to(device)
 
     restype = feat["restype"].clone()
     while restype.dim() > 2:
@@ -79,24 +102,32 @@ def cogenerate(
     n_ch = restype.shape[-1]
 
     def one_hot(ch):
-        v = torch.zeros(n_ch, device=device, dtype=restype.dtype)
+        v = torch.zeros(n_ch, device=restype.device, dtype=restype.dtype)
         v[ch] = 1.0
         return v
 
     for i in positions.tolist():  # design region starts fully masked (xpb)
         restype[i] = one_hot(xpb)
+    feat["restype"] = restype.unsqueeze(0) if input_feature_dict["restype"].dim() == 3 else restype
+
+    s_inputs, s_trunk, z_trunk = model.get_condition_embedding(feat, chunk_size=chunk_size)
+    device = s_inputs.device
+    dtype = s_inputs.dtype
+    aa20_to_36 = aa20_to_36.to(device)
 
     sampled = torch.full((N_token,), -1, dtype=torch.long, device=device)
+    # sequential ablation only: `still` marks positions not yet committed (frozen);
+    # `counts` is the per-step reveal schedule. Unused in complete_unmask.
     still = torch.zeros(N_token, dtype=torch.bool, device=device)
-    still[positions] = True  # True = still masked
+    still[positions] = True
 
     noise_schedule = model.inference_noise_scheduler(
         N_step=N_step, device=device, dtype=dtype
     )
     x = noise_schedule[0] * torch.randn(1, N_atom, 3, device=device, dtype=dtype)
-
     counts = _unmask_counts(int(positions.numel()), N_step)
     counts = counts + [0] * (max(0, len(noise_schedule) - 1 - len(counts)))
+
     trajectory = []
 
     # --- inference-side cycle setup (Overleaf iterative co-evolution) ---
@@ -165,6 +196,18 @@ def cogenerate(
         feat["restype"] = restype.unsqueeze(0) if input_feature_dict["restype"].dim() == 3 else restype
         sigma = sig_t.reshape(1).to(dtype)
 
+        # P3 fix (sequential ablation only): committed residues were written into
+        # `restype` by prior steps, but `restype` is consumed ONLY by the trunk
+        # (InputFeatureEmbedder), which we encoded once before the loop. Re-encode it
+        # here so those commitments actually condition this backbone step — without
+        # this the progressive commit is open-loop (restype never reaches the diffusion
+        # module) and the ablation is meaningless. complete_unmask keeps the single
+        # outer encode (restype never changes → nothing to re-encode).
+        if seq_mode == "sequential" and step > 0:
+            s_inputs, s_trunk, z_trunk = model.get_condition_embedding(
+                feat, chunk_size=chunk_size
+            )
+
         # Persist side-chain-informed h_res' into the trunk for this step — but ONLY when
         # the INDIRECT channel is enabled. Training honours sidechain.hres_inject
         # (model.py: the refinement pass still runs, it just carries no side-chain info);
@@ -220,25 +263,40 @@ def cogenerate(
         if a is None:
             continue
         a_red = model._reduce_a_token(a, sigma).to(dtype)  # [.., N_token, c_token]
-        frac = float(still[positions].float().mean()) if positions.numel() else 0.0
+        # aa_t = the mask fraction the AA head is conditioned on. complete_unmask is
+        # always fully masked (1.0); sequential shrinks it as positions get committed.
+        if seq_mode == "sequential":
+            aa_t = float(still[positions].float().mean()) if positions.numel() else 0.0
+        else:
+            aa_t = 1.0
         logits = model.design_residue_type_head(
-            a_red, aa_t=torch.tensor(frac, device=device)
+            a_red, aa_t=torch.tensor(aa_t, device=device)
         ).float()
         if logits.dim() == 3:
             logits = logits.squeeze(0)  # [N_token, 20]
         probs = torch.softmax(logits, dim=-1)
         conf, pred = probs.max(dim=-1)
 
-        k = counts[step] if step < len(counts) else 0
-        masked_idx = still.nonzero(as_tuple=False).squeeze(-1)
-        if k > 0 and masked_idx.numel() > 0:
-            k = min(k, int(masked_idx.numel()))
-            top = torch.topk(conf[masked_idx], k).indices
-            reveal = masked_idx[top]
-            sampled[reveal] = pred[reveal]
-            still[reveal] = False
-            for j in reveal.tolist():
-                restype[j] = one_hot(int(aa20_to_36[sampled[j]]))
+        if seq_mode == "sequential":
+            # LLaDA-style progressive commit: reveal the top-k highest-confidence
+            # still-masked positions this step, FREEZE them, and write their types into
+            # restype (re-encoded into the trunk at the top of the next step — see P3 fix).
+            k = counts[step] if step < len(counts) else 0
+            masked_idx = still.nonzero(as_tuple=False).squeeze(-1)
+            if k > 0 and masked_idx.numel() > 0:
+                k = min(k, int(masked_idx.numel()))
+                top = torch.topk(conf[masked_idx], k).indices
+                reveal = masked_idx[top]
+                sampled[reveal] = pred[reveal]
+                still[reveal] = False
+                for j in reveal.tolist():
+                    restype[j] = one_hot(int(aa20_to_36[sampled[j]]))
+        else:
+            # complete_unmask (default): sequence stays fully masked as input; keep the
+            # running full argmax so the side-chain cycle can instantiate atoms from the
+            # current best guess. restype is NOT written back (design region stays masked
+            # all trajectory); the final sequence is this prediction at the last step.
+            sampled[positions] = pred[positions]
 
         # --- side-chain step (late sigma): decode side chains for committed
         #     residues, pool -> h_res', persist for the next backbone step. ---
@@ -250,8 +308,16 @@ def cogenerate(
         _n_steps = len(noise_schedule) - 1
         _sc_from = int(round((1.0 - sc_start_frac) * _n_steps))
         if sc_enabled and step >= _sc_from:
-            committed = [int(j) for j in positions.tolist()
-                         if (not bool(still[j])) and (j in bb_atom_idx) and int(sampled[j]) >= 0]
+            # Tokens whose current predicted type feeds the side-chain cycle this step.
+            # sequential: only frozen (committed) tokens qualify. complete_unmask:
+            # nothing is frozen, so every design token with a frame + current argmax
+            # qualifies (its type is this step's running prediction in `sampled`).
+            if seq_mode == "sequential":
+                committed = [int(j) for j in positions.tolist()
+                             if (not bool(still[j])) and (j in bb_atom_idx) and int(sampled[j]) >= 0]
+            else:
+                committed = [int(j) for j in positions.tolist()
+                             if (j in bb_atom_idx) and int(sampled[j]) >= 0]
             if committed:
                 from pxdesign_train.sidechain.frames import build_frame, to_global, to_local
                 from pxdesign_train.sidechain.instantiate import (
@@ -260,13 +326,11 @@ def cogenerate(
                 from pxdesign_train.sidechain import init as sc_init
                 from pxdesign_train.sidechain.coevolution import pool_side_chain_atoms
 
-                # a_hat: the residue types already committed by the unmasking loop.
-                # This is the SINGLE type source for this block — it produces the
-                # atom set (ids / m) AND the ideal template below, exactly as the
-                # training path derives both from one type (GT under teacher forcing,
-                # predicted under sidechain.predicted_mask). `sampled` is in the
-                # 20-class AA index space == _AA3 == instantiate.STD_AA_3 order,
-                # which is the index space template_init_local expects.
+                # a_hat: the current full-sequence prediction. This is the SINGLE type
+                # source for this block: it produces the atom set (ids / m) and the
+                # ideal template below, exactly as the training path derives both from
+                # one type. `sampled` is in the 20-class AA index space == _AA3 ==
+                # instantiate.STD_AA_3 order, which template_init_local expects.
                 a_hat = sampled[torch.as_tensor(committed, device=device)].long()  # [Nc]
                 restypes3 = [_AA3[int(i)] for i in a_hat.tolist()]
                 ids = sidechain_atom_name_ids(restypes3).to(device)
@@ -460,15 +524,16 @@ def cogenerate(
         trajectory.append({
             "step": step,
             "sigma": float(sig_t),
-            "mask_frac": float(still[positions].float().mean()) if positions.numel() else 0.0,
+            "mask_frac": (float(still[positions].float().mean()) if seq_mode == "sequential"
+                          else 1.0) if positions.numel() else 0.0,
             "mean_conf": float(conf[positions].mean()) if positions.numel() else 0.0,
             "sc_committed": len(committed) if (sc_enabled and step >= _sc_from) else 0,
         })
 
         # Paper: terminate the iterative refinement when the predicted sequence
-        # stabilizes (all positions committed and unchanged for `seq_patience`
-        # steps). Off by default -> keep the full fixed EDM schedule.
-        if stop_on_seq_stable and not bool(still[positions].any()):
+        # stabilizes for `seq_patience` steps. Off by default -> keep the full fixed
+        # EDM schedule.
+        if stop_on_seq_stable:
             cur = tuple(sampled[positions].cpu().tolist())
             if step > 0 and cur == _prev_seq:
                 _seq_stable += 1

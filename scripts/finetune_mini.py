@@ -34,7 +34,9 @@ def build(args, device):
     src = DesignSourceDataset(
         provider, source_name="cif", crop_size=args.crop_size,
         hotspot_force_zero_prob=0.0,
-        aa_mask_mode="time_dependent", aa_mask_min_prob=0.15, aa_mask_max_prob=1.0,
+        aa_mask_mode="all",
+        aa_mask_min_prob=0.0,
+        aa_mask_max_prob=1.0,
         compute_sidechain=_sc_on,
         # M1: when S_phi is active, keep B_theta backbone-only for the binder.
         backbone_only_binder=_sc_on,
@@ -51,8 +53,9 @@ def build(args, device):
     configs.residue_type.input_source = args.aa_input_source
     configs.residue_type.trunk_grad_scale = args.trunk_grad_scale
     configs.residue_type.internal_reduce = args.internal_reduce
-    configs.residue_type.mask_mode = "time_dependent"
-    configs.residue_type.mask_min_prob = 0.15
+    configs.residue_type.mask_mode = "all"
+    configs.residue_type.mask_min_prob = 0.0
+    configs.residue_type.mask_max_prob = 1.0
     configs.dtype = args.dtype
     configs.training.lr = args.lr
     configs.training.max_steps = args.max_steps
@@ -109,9 +112,12 @@ def make_batch_from_cif(trainer, cif, chain, crop_size, compute_sidechain=False)
     from pxdesign_train.runner.cif_provider import CifFileProvider
     from torch.utils.data import DataLoader
     prov = CifFileProvider(cif_paths=[cif], binder_chain_ids=[chain])
+    rt = trainer.configs.residue_type
     ds = DesignSourceDataset(
         prov, source_name="heldout", crop_size=crop_size, hotspot_force_zero_prob=0.0,
-        aa_mask_mode="time_dependent", aa_mask_min_prob=0.15, aa_mask_max_prob=1.0,
+        aa_mask_mode=rt.mask_mode,
+        aa_mask_min_prob=rt.mask_min_prob,
+        aa_mask_max_prob=rt.mask_max_prob,
         compute_sidechain=compute_sidechain, backbone_only_binder=compute_sidechain, seed=0)
     dl = DataLoader(ds, batch_size=1, collate_fn=trainer.train_dl.collate_fn)
     return trainer._to_device(next(iter(dl)))
@@ -185,11 +191,9 @@ def eval_coord_fixed_sigma(trainer, batch, sigmas=(1.0, 4.0, 16.0), n_seed=16):
 
 
 @torch.no_grad()
-def evaluate(trainer, batch, k_coord=4, sample_steps=8, n_div=6):
-    from pxdesign_train.sampler import sample_residue_types
+def evaluate(trainer, batch, k_coord=4):
     rm = trainer.raw_model
     rm.eval()
-    feat = batch["input_feature_dict"]
 
     # --- AA metrics + coord, averaged over k forwards.
     # (s_inputs AA is deterministic; diffusion_internal AA is sigma/sample-noisy,
@@ -199,52 +203,7 @@ def evaluate(trainer, batch, k_coord=4, sample_steps=8, n_div=6):
         lo = trainer.forward_loss(batch)
         for kk in acc:
             acc[kk].append(float(lo[kk]))
-    out = {kk: sum(v) / len(v) for kk, v in acc.items()}
-
-    # --- sampler (s_inputs cheap path only; internal needs a coord forward) ---
-    sampler_out = {"sampler_recovery": None, "sampler_mask_frac_traj": None,
-                   "sampler_mean_conf": None, "sampler_mean_entropy": None,
-                   "seq_unique_frac": None, "seq_mean_pos_entropy": None}
-    try:
-        dtm = feat["design_token_mask"]
-        while dtm.dim() > 1:
-            dtm = dtm.squeeze(0)
-        dtm = dtm.bool()
-        sampled, traj = sample_residue_types(rm, feat, dtm, n_steps=sample_steps, temperature=0.0)
-        ac = feat.get("aa_clean")
-        while ac is not None and ac.dim() > 1:
-            ac = ac.squeeze(0)
-        if ac is not None:
-            valid = dtm & (ac != -100).to(dtm.device)
-            if valid.any():
-                sampler_out["sampler_recovery"] = float(
-                    (sampled[valid].cpu() == ac[valid].cpu()).float().mean())
-        seqs = []
-        for _ in range(n_div):
-            s, _ = sample_residue_types(rm, feat, dtm, n_steps=sample_steps, temperature=1.0)
-            seqs.append(tuple(s[dtm].cpu().tolist()))
-        import math
-        from collections import Counter
-        uniq_frac = len(set(seqs)) / len(seqs) if seqs else 0.0
-        ent = 0.0
-        if dtm.sum().item() and seqs:
-            cols = list(zip(*seqs))
-            for col in cols:
-                c = Counter(col); tot = len(col)
-                ent += -sum((n / tot) * math.log(n / tot) for n in c.values())
-            ent /= len(cols)
-        sampler_out.update(
-            sampler_recovery=sampler_out["sampler_recovery"],
-            sampler_mask_frac_traj=[round(d["mask_frac"], 3) for d in traj],
-            sampler_mean_conf=round(sum(d["mean_conf"] for d in traj) / len(traj), 3) if traj else None,
-            sampler_mean_entropy=round(sum(d["mean_entropy"] for d in traj) / len(traj), 3) if traj else None,
-            seq_unique_frac=round(uniq_frac, 3),
-            seq_mean_pos_entropy=round(ent, 3),
-        )
-    except NotImplementedError:
-        sampler_out["sampler_note"] = "skipped (input_source=diffusion_internal needs a coord forward)"
-
-    return {**out, **sampler_out}
+    return {kk: sum(v) / len(v) for kk, v in acc.items()}
 
 
 def main():
@@ -404,7 +363,12 @@ def main():
         batch = trainer._to_device(next(iter(trainer.train_dl)))
         feat = batch["input_feature_dict"]
         print(f"\n=== co-generate ({args.cogen_steps} steps, input_source={args.aa_input_source}) ===")
-        res = cogenerate(trainer.raw_model, feat, N_step=args.cogen_steps, sidechain_cycle=getattr(args, "sc_cycle", False))
+        res = cogenerate(
+            trainer.raw_model,
+            feat,
+            N_step=args.cogen_steps,
+            sidechain_cycle=getattr(args, "sc_cycle", False),
+        )
         seq = res["sequence"]
         dtm = feat["design_token_mask"].bool()
         while dtm.dim() > 1:

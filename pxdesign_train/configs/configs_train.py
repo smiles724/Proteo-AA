@@ -24,7 +24,11 @@ training_configs["residue_type"] = {
     "vocab_size": 20,
     "ignore_index": -100,
     "loss_on_design_only": True,
-    "mask_mode": "time_dependent",
+    # DEFAULT = "all" (complete-mask / predict-all): the design region is always
+    # fully masked, so sequence is a pure prediction target and the model learns
+    # p(a, x0^bb | x_t^bb, C) at every timestep. This matches cogenerate's default
+    # path and avoids a separate sequence unmasking schedule.
+    "mask_mode": "all",
     "mask_prob": 1.0,
     "mask_min_prob": 0.0,
     "mask_max_prob": 1.0,

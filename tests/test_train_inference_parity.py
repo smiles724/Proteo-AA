@@ -34,6 +34,10 @@ TRAIN_ONLY = {
     "weight_sc_global": "loss weight",
     "backbone_only_binder": "featurizer/label-side (which atoms enter L_bb)",
     "route_by_type": "loss routing (which residues get the coordinate loss)",
+    "mismatch_loss": "loss term for type-mismatched residues; no backward at "
+                     "inference. The sampler is unaffected by WHICH regularizer "
+                     "trained the model — unlike template_provider, which changes "
+                     "the input distribution S_phi is fed and so must be mirrored.",
     "predicted_mask": "gates whether post_aa is SUPERVISED; sampling always uses "
                       "the predicted type anyway",
     "predicted_frame": "training-side choice between GT and predicted frames; "

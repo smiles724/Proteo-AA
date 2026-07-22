@@ -172,6 +172,41 @@ training_configs["sidechain"] = {
     "trunk_grad_scale": 1.0,
     "detach_feedback": False,
     "route_by_type": False,
+    # ---- What to do with residues whose PREDICTED aa type is WRONG ----
+    # 0722 renamed the old "physical regularization" to CONTEXT-AWARE regularization
+    # and changed its contents: L_compat = clash + pack + hbond. bond / angle /
+    # rotamer are GONE, and explicitly so -- when the type is right, the coordinate
+    # loss already supervises the complete local geometry "without introducing
+    # additional bond-length, bond-angle, or rotamer losses".
+    #
+    # The mismatch branch is intentionally an ablation switch. The primary
+    # side-chain constraint comes from correctly typed residues with coordinate
+    # supervision; for wrong-type residues these context-aware terms are weak
+    # auxiliary signals and may bias the sequence distribution. The 0722
+    # Limitations section makes the same point: they can be useful but need
+    # careful weighting and ablation, and may be better suited to reranking than
+    # as a replacement for coordinate-supervised side-chain learning.
+    #
+    #   "none"    no term. Wrong-type side chains are unconstrained (they are still
+    #             generated, and still feed h_res' back into B_theta).
+    #   "clash"   steric only. DEFAULT: it is the one term 0722 calls "reliable for
+    #             rejecting severe overlaps", and being purely repulsive it is the
+    #             hardest to game -- the attractive terms (pack/hbond) are where the
+    #             exploitation risk lives.
+    #   "legacy"  clash + the pre-0722 nearest-context hinge. Reproduces earlier runs.
+    #   "compat"  0722 App. 4.9 in full (softplus/vdW clash + pack + hbond).
+    #             NOT IMPLEMENTED -- raises. That is the next work item.
+    #
+    # For reference, these are differentiable simplifications of standard Rosetta
+    # energy terms (clash ~ fa_rep, pack ~ fa_atr/fa_sol, hbond ~ hbond_sc), so the
+    # concepts are not unprecedented even though the smooth forms in 4.9 are bespoke.
+    #
+    # SCOPE: this applies ONLY to residues with a_hat_i != a_i^GT. Under teacher
+    # forcing (Stage II/III) nothing mismatches, so the term is 0 -- matching the
+    # Stage III objective, which contains no L_compat. It goes live in Stage IV.
+    # Before 2026-07-22 the code applied clash+contact to EVERY residue, including
+    # correctly-typed ones; that contradicted the spec and is fixed.
+    "mismatch_loss": "clash",
     # Per-sigma alignment: feed S_phi a per-sigma h_res / aa_logits / sigma
     # (flattened to [B*N_sample, L, C]) instead of a mean/low-sigma-reduced h_res.
     # This is the intended joint-training main line. Stage II-A warmup may set

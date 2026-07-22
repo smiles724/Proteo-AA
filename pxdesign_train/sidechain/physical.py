@@ -1,19 +1,35 @@
-"""Physical regularization losses for side chains.
+"""Regularization losses for side chains whose residue type was predicted WRONG.
 
-Used when the predicted residue type != GT type (so atom-level coordinate MSE is
-undefined): we fall back to physics — chemical bond lengths, bond angles, steric
-clashes, and (stub) rotamer plausibility. Also usable as an auxiliary term when
-types match. All terms are differentiable and finite.
+Overleaf 0722 renamed this from "physical regularization" to CONTEXT-AWARE
+regularization and changed what is in it:
 
-Implementation status (keep in sync with README):
-  - clash, contact: implemented AND activated in training (the model computes
-    them on predicted global side chains, see model._train_forward).
-  - bond, angle, rotamer: implemented and unit-tested as differentiable terms,
-    but NOT activated in training — they require residue-specific ideal-geometry
-    tables (bond_idx/ideal, angle_idx/ideal_cos, torsion_idx/rotamer_targets)
-    that are not wired yet, so `physical_loss` only includes them when those
-    inputs are passed. `rotamer_loss` below is a real periodic dihedral penalty
-    (not a zero stub); it is simply not fed torsion tables at train time.
+    L_compat = lambda_clash L_clash + lambda_pack L_pack + lambda_hbond L_hbond
+
+WHO IT APPLIES TO. Only residues with `a_hat_i != a_i^GT`. When the type matches,
+the paper is explicit that the coordinate loss already supervises the complete
+local geometry, "*without introducing additional bond-length, bond-angle, or
+rotamer losses*". Applying these terms to matched residues too — which this file
+used to do, because the caller passed no subject mask — double-counts them and
+contradicts the current spec. Hence `subject_mask` below.
+
+DEPRECATED BY 0722: `bond_loss`, `angle_loss`, `rotamer_loss`. They were never
+activated in training (their geometry tables were never wired), and 0722 removed
+them from the objective outright. Kept because Stage-IV candidate ranking and the
+`fa_dun`-style rotamer energy may want them later, and because deleting tested
+code to re-derive it in a month is worse. Do not add them to a training objective
+without a spec change.
+
+STATUS:
+  - clash   — implemented, activated, routed to mismatched residues.
+  - pack    — 0722 §4.9. NOT IMPLEMENTED (see `mismatch_loss="compat"`).
+  - hbond   — 0722 §4.9. NOT IMPLEMENTED.
+  - contact — PRE-0722 term, superseded by pack+hbond. Kept only so earlier runs
+    reproduce under `mismatch_loss="legacy"`.
+
+These three are essentially differentiable, simplified Rosetta energy terms
+(clash ~ fa_rep, pack ~ fa_atr/fa_sol, hbond ~ hbond_sc), which is worth knowing
+given the concern that the constraints look unprecedented — the *concepts* are
+standard in full-atom design; only the smooth forms in §4.9 are bespoke.
 """
 from typing import Optional
 
@@ -144,33 +160,69 @@ def clash_loss(
     context_coords: Optional[torch.Tensor] = None,    # [B, M, 3]
     context_mask: Optional[torch.Tensor] = None,      # [B, M] bool
     context_group_id: Optional[torch.Tensor] = None,  # [B, M] long — residue of each context atom
+    subject_mask: Optional[torch.Tensor] = None,      # [B, A] bool — atoms the penalty is ABOUT
 ) -> torch.Tensor:
     """Steric term over the three pair classes the paper requires
-    (§Physical regularization: "side-chain--backbone, side-chain--side-chain,
-    and side-chain--context atom pairs"):
+    ("side-chain--backbone, side-chain--side-chain, and side-chain--context
+    atom pairs"):
 
-      * side-chain <-> side-chain   — all i<j pairs of `coords` (as before);
+      * side-chain <-> side-chain   — all i<j pairs of `coords`;
       * side-chain <-> backbone     — `context_coords` carries the backbone atoms;
       * side-chain <-> context      — ...and the receptor / motif / ligand atoms.
 
     The latter two are one cross term: `context_coords` is simply every atom the
     side chain must not overlap. Pairs inside the SAME residue are EXCLUDED via
     `group_id` / `context_group_id`, because a side chain is BONDED to its own
-    backbone (CB-CA is ~1.53 Å, i.e. *below* `clash_dist`) — scoring that as a
-    clash would fight the bond/angle losses instead of preventing an overlap.
-    Intra-residue geometry is bond_loss/angle_loss/rotamer_loss's job.
+    backbone (CB-CA is ~1.53 A, i.e. *below* `clash_dist`) — scoring that as a
+    clash would penalise a bond rather than an overlap.
 
-    Returns intra + cross, each normalised over its own valid pairs.
+    `subject_mask` makes the term ASYMMETRIC, which is what 0722 §4.9 actually
+    specifies:
+
+        L_clash = 1/|I_unmatched| sum_{i in I_unmatched} 1/|S_i| sum_{u in S_i}
+                  sum_{v in N_clash(u)} l_clash(u, v)
+
+    the SUBJECT atoms `u` range only over mismatched residues' side chains, while
+    the PARTNER atoms `v` range over the whole context — including the side chains
+    of correctly-predicted residues. So a wrong-type residue is still penalised for
+    growing into its (correct) neighbour; it just is not itself a target. Passing
+    `valid_mask` alone cannot express this: it would silently drop every
+    mismatched-vs-matched pair, i.e. exactly the overlaps we care about most.
+    Defaults to `valid_mask` (symmetric, pre-0722 behaviour).
+
+    Returns intra + cross, each normalised over its own scored pairs.
+
+    NOTE vs §4.9: the appendix additionally uses a softplus with per-atom van der
+    Waals radii (alpha_vdw (r_u + r_v)) and a two-level per-residue normalisation.
+    This is the flat-mean, fixed-radius version; the §4.9 form lands with pack and
+    hbond under `mismatch_loss="compat"`.
     """
     B, A, _ = coords.shape
+    subj = subject_mask if subject_mask is not None else valid_mask
     intra = coords.sum() * 0.0
     if A >= 2:
         d = torch.cdist(coords, coords)             # [B, A, A]
         iu = torch.triu_indices(A, A, offset=1, device=coords.device)
         dij = d[:, iu[0], iu[1]]                     # [B, npair]
         pen = torch.relu(clash_dist - dij) ** 2
+        pv = None
         if valid_mask is not None:
             pv = valid_mask[:, iu[0]] & valid_mask[:, iu[1]]
+        if group_id is not None:
+            # "side-chain <-> side-chain" means BETWEEN residues. A residue's own
+            # side-chain atoms are covalently bonded — CB-CG is ~1.5 A, i.e. below
+            # clash_dist — so scoring them here penalises correct geometry instead of
+            # an overlap, and fights the coordinate loss. (0722 App. 4.9: "Pairs
+            # connected by one or two covalent bonds are excluded"; dropping the whole
+            # residue is the coarse version of that, and is what the cross term below
+            # has always done.)
+            pv_same = group_id[:, iu[0]] != group_id[:, iu[1]]
+            pv = pv_same if pv is None else (pv & pv_same)
+        if subj is not None:
+            # score the pair if EITHER end is a subject atom
+            either = subj[:, iu[0]] | subj[:, iu[1]]
+            pv = either if pv is None else (pv & either)
+        if pv is not None:
             pen = pen * pv.to(pen.dtype)
             intra = pen.sum() / pv.sum().clamp_min(1).to(pen.dtype)
         else:
@@ -184,6 +236,8 @@ def clash_loss(
     m = torch.ones_like(pen_c, dtype=torch.bool)
     if valid_mask is not None:
         m = m & valid_mask[:, :, None]
+    if subj is not None:
+        m = m & subj[:, :, None]
     if context_mask is not None:
         m = m & context_mask[:, None, :]
     if group_id is not None and context_group_id is not None:
@@ -231,6 +285,7 @@ def contact_loss(
     context_mask: Optional[torch.Tensor] = None,  # [B, M] bool
     max_dist: float = 8.0,
     eps: float = 1e-8,
+    subject_mask: Optional[torch.Tensor] = None,  # [B, A] bool — atoms the penalty is ABOUT
 ) -> torch.Tensor:
     """Compatibility term: each side-chain atom should stay near some context
     atom (soft hinge on its nearest-context distance beyond `max_dist`) —
@@ -247,6 +302,12 @@ def contact_loss(
     atom within `max_dist` of that phantom scores 0 no matter where the real
     structure is. Masked rows are set to +inf so `min` cannot pick them; an item
     with no valid context atom contributes 0 rather than inf/NaN.
+
+    SUPERSEDED by 0722: the paper replaced this single "stay near something" hinge
+    with two shaped terms — nonpolar packing (finite-width contact kernel, saturating
+    aggregation, nonpolar pairs only) and directional hydrogen bonding. This is not a
+    weaker version of those, it is a different quantity. Reachable only under
+    `mismatch_loss="legacy"`, to reproduce pre-0722 runs.
     """
     d = torch.cdist(coords, context_coords)            # [B, A, M]
     if context_mask is not None:
@@ -256,8 +317,14 @@ def contact_loss(
     pen = torch.relu(nearest - max_dist) ** 2
     pen = torch.where(finite, pen, torch.zeros_like(pen))
     m = finite if valid_mask is None else (valid_mask & finite)
+    if subject_mask is not None:
+        m = m & subject_mask
     m = m.to(pen.dtype)
     return (pen * m).sum() / (m.sum() + eps)
+
+
+# Ablation arms for wrong-type residues. Selected by `sidechain.mismatch_loss`.
+MISMATCH_ARMS = ("none", "clash", "legacy", "compat")
 
 
 def physical_loss(
@@ -273,9 +340,11 @@ def physical_loss(
     context_group_id: Optional[torch.Tensor] = None,
     group_id: Optional[torch.Tensor] = None,
     valid_mask: Optional[torch.Tensor] = None,
+    subject_mask: Optional[torch.Tensor] = None,
     weights: Optional[dict] = None,
+    arm: str = "legacy",
 ) -> dict:
-    """Aggregate physical loss. Terms present only when their inputs are given.
+    """Aggregate the mismatched-residue regularizer for one ablation `arm`.
 
     `context_coords` is every atom the side chain interacts with but does not
     own: its own backbone, other residues' backbones, and the receptor / motif /
@@ -284,12 +353,40 @@ def physical_loss(
     `group_id`/`context_group_id` so the clash term can drop bonded
     same-residue pairs.
 
+    `subject_mask` restricts WHICH side-chain atoms the penalty is about — set it
+    to the atoms of type-MISMATCHED residues, per 0722. Leaving it None scores
+    every residue, which is the pre-0722 behaviour and contradicts the spec.
+
+    Arms:
+        "none"    no term at all (side chains of wrong-type residues unconstrained)
+        "clash"   steric only — the one term 0722 calls "reliable"
+        "legacy"  clash + the pre-0722 contact hinge (reproduces earlier runs)
+        "compat"  0722 §4.9 full: clash + pack + hbond  [NOT IMPLEMENTED]
+
+    bond/angle/rotamer are DEPRECATED (0722 removed them); they are computed only
+    if their tables are explicitly passed, and no caller in training does that.
+
     Returns dict with bond/angle/clash/rotamer/contact/total.
     """
+    if arm not in MISMATCH_ARMS:
+        raise ValueError(f"unknown mismatch_loss arm {arm!r}; choose from {MISMATCH_ARMS}")
+    if arm == "compat":
+        raise NotImplementedError(
+            "mismatch_loss='compat' needs the 0722 Appendix 4.9 pack + hbond terms "
+            "(finite-width nonpolar contact kernel with saturating aggregation, and "
+            "directional donor-acceptor hydrogen bonding), plus the softplus/vdW form "
+            "of clash. Not implemented yet — use 'clash' or 'none'."
+        )
+
     w = {"bond": 1.0, "angle": 1.0, "clash": 1.0, "rotamer": 1.0, "contact": 1.0}
     if weights:
         w.update(weights)
     zero = coords.sum() * 0.0
+
+    if arm == "none":
+        return {"bond": zero, "angle": zero, "clash": zero, "rotamer": zero,
+                "contact": zero, "total": zero}
+
     b = bond_loss(coords, bond_idx, ideal_bond) if bond_idx is not None else zero
     a = angle_loss(coords, angle_idx, ideal_cos) if angle_idx is not None else zero
     c = clash_loss(
@@ -299,11 +396,14 @@ def physical_loss(
         context_coords=context_coords,
         context_mask=context_mask,
         context_group_id=context_group_id,
+        subject_mask=subject_mask,
     )
     r = (rotamer_loss(coords, torsion_idx, rotamer_targets)
          if torsion_idx is not None and rotamer_targets is not None else zero)
-    ct = (contact_loss(coords, context_coords, valid_mask, context_mask)
-          if context_coords is not None else zero)
+    ct = zero
+    if arm == "legacy" and context_coords is not None:
+        ct = contact_loss(coords, context_coords, valid_mask, context_mask,
+                          subject_mask=subject_mask)
     total = (w["bond"] * b + w["angle"] * a + w["clash"] * c
              + w["rotamer"] * r + w["contact"] * ct)
     return {"bond": b, "angle": a, "clash": c, "rotamer": r, "contact": ct, "total": total}

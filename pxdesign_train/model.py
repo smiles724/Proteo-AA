@@ -228,6 +228,16 @@ class ProtenixDesignTrain(ProtenixDesign):
                     name = "ccd"
                 _templates.set_provider_by_name(name)
                 self.sc_template_provider = name
+            # 0722 L_compat arm for type-MISMATCHED residues: none | clash | legacy | compat.
+            from pxdesign_train.sidechain.physical import MISMATCH_ARMS
+
+            self.sc_mismatch_loss = (
+                str(getattr(sc_cfg, "mismatch_loss", "clash")) if sc_cfg is not None else "clash"
+            )
+            if self.sc_mismatch_loss not in MISMATCH_ARMS:
+                raise ValueError(
+                    f"sidechain.mismatch_loss={self.sc_mismatch_loss!r} is not one of {MISMATCH_ARMS}"
+                )
             self.sc_detach_feedback = bool(getattr(sc_cfg, "detach_feedback", False)) if sc_cfg is not None else False
             # Stage III routing: supervise coord loss only where predicted type
             # matches GT; mismatched residues fall back to physical loss.
@@ -683,6 +693,53 @@ class ProtenixDesignTrain(ProtenixDesign):
         if not getattr(self, flag, False):
             logging.getLogger(__name__).warning(msg)
             setattr(self, flag, True)
+
+    def _mismatch_subject_mask(self, out, valid_flat, B_, L_, A_):
+        """Side-chain atoms the mismatch regularizer is ABOUT: 0722's I_unmatched.
+
+        Returns [B_, L_*A_] bool = valid AND belongs to a residue whose predicted
+        type differs from GT.
+
+        With no type-match mask the answer is an EMPTY subject set, not "everything".
+        Those are the teacher-forced stages (II warmup, III joint): the atom set comes
+        from a_GT, so by construction nothing is mismatched, and the Stage III objective
+        in 0722 contains no L_compat term at all. Scoring every residue there would
+        reintroduce the pre-0722 behaviour precisely where the paper says the coordinate
+        loss should be the only side-chain supervision.
+        """
+        tm = out.get("sc_type_match")
+        if tm is None:
+            if getattr(self, "sc_predicted_mask", False):
+                self._warn_once(
+                    "_warned_no_typematch",
+                    "mismatch_loss: predicted_mask is on but no type-match mask was "
+                    "produced (aa_clean missing?), so no residue can be identified as "
+                    "mismatched and the regularizer contributes 0.",
+                )
+            return torch.zeros_like(valid_flat)
+        tm = tm.bool()
+        if tm.dim() == 1:
+            tm = tm.unsqueeze(0)
+        if tm.shape[0] != B_:
+            if tm.shape[0] == 1:
+                tm = tm.expand(B_, -1)
+            elif B_ % tm.shape[0] == 0:
+                tm = tm.repeat_interleave(B_ // tm.shape[0], dim=0)
+            else:
+                self._warn_once(
+                    "_warned_mismatch_shape",
+                    f"mismatch_loss: type-match rows {tm.shape[0]} do not tile to {B_}; "
+                    "the regularizer contributes 0 for this step rather than guessing "
+                    "which residues are mismatched.",
+                )
+                return torch.zeros_like(valid_flat)
+        assert tm.shape[-1] >= L_, (
+            f"mismatch_loss: type-match covers {tm.shape[-1]} tokens but the side-chain "
+            f"axis has {L_} — the two came from different token sets, so the mask would "
+            "silently regularize the wrong residues."
+        )
+        mismatch = ~tm[..., :L_]                                  # [B_, L_]
+        return valid_flat & mismatch[..., None].expand(B_, L_, A_).reshape(B_, L_ * A_)
 
     def _train_forward(
         self,
@@ -1293,32 +1350,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                     bb_valid.reshape(B_, L_ * K_),
                     _g.reshape(1, L_ * K_).expand(B_, -1),
                 )
-            if fR is not None and ft is not None and ctx_atoms is not None:
-                B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
-                ctx_xyz, ctx_m, ctx_g = ctx_atoms
-                # Residue id of each side-chain atom, so the clash term can drop
-                # same-residue (bonded) side-chain<->backbone pairs.
-                sc_group = (
-                    torch.arange(L_, device=y_g.device)[:, None]
-                    .expand(L_, A_)
-                    .reshape(1, L_ * A_)
-                    .expand(B_, -1)
-                )
-                phys = physical_loss(
-                    y_g.float().reshape(B_, L_ * A_, 3),
-                    context_coords=ctx_xyz,
-                    context_mask=ctx_m,
-                    context_group_id=ctx_g,
-                    group_id=sc_group,
-                    valid_mask=m.reshape(B_, L_ * A_),
-                )
-                out["sc_phys_val"] = phys["total"]
-                out["sc_phys_clash"] = phys["clash"].detach()
-                out["sc_phys_contact"] = phys["contact"].detach()
-
-            # Stage III type routing: coord loss only where predicted AA == GT
-            # (physical-only elsewhere). Always on under predicted_mask so the
+            # Stage III/IV type routing: coord loss only where predicted AA == GT
+            # (mismatch regularizer elsewhere). Always on under predicted_mask so the
             # coord loss is not applied to residues whose predicted atom set differs.
+            #
+            # Computed BEFORE the mismatch regularizer, because that term needs the
+            # same mask: 0722 scopes it to I_unmatched = {i : a_hat_i != a_i^GT}.
+            # The primary side-chain constraint comes from correctly typed residues;
+            # wrong-type residues get this auxiliary term, or nothing when
+            # mismatch_loss="none".
             if self.sc_route_by_type or getattr(self, "sc_predicted_mask", False):
                 aa_clean = input_feature_dict.get("aa_clean")
                 if aa_clean is not None:
@@ -1337,6 +1377,47 @@ class ProtenixDesignTrain(ProtenixDesign):
                     if use_per_sigma:
                         tm = _tile_per_sigma(tm, trailing_ndim=1)
                     out["sc_type_match"] = tm
+
+            # Mismatched-residue regularizer (0722 L_compat; arm chosen by
+            # sidechain.mismatch_loss). Scoped to residues whose PREDICTED type
+            # differs from GT: where the type is right, the coordinate loss already
+            # supervises the full local geometry and 0722 explicitly wants no extra
+            # geometric term there.
+            #
+            # Under teacher forcing (Stage II/III) every residue matches by
+            # construction, so the subject set is empty and this contributes 0 —
+            # which is exactly the Stage III objective, whose equation has no
+            # L_compat term at all. It only becomes live under predicted masks
+            # (Stage IV).
+            if (
+                fR is not None and ft is not None and ctx_atoms is not None
+                and self.sc_mismatch_loss != "none"
+            ):
+                B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
+                ctx_xyz, ctx_m, ctx_g = ctx_atoms
+                # Residue id of each side-chain atom, so the clash term can drop
+                # same-residue (bonded) side-chain<->backbone pairs.
+                sc_group = (
+                    torch.arange(L_, device=y_g.device)[:, None]
+                    .expand(L_, A_)
+                    .reshape(1, L_ * A_)
+                    .expand(B_, -1)
+                )
+                valid_flat = m.reshape(B_, L_ * A_)
+                subject_flat = self._mismatch_subject_mask(out, valid_flat, B_, L_, A_)
+                phys = physical_loss(
+                    y_g.float().reshape(B_, L_ * A_, 3),
+                    context_coords=ctx_xyz,
+                    context_mask=ctx_m,
+                    context_group_id=ctx_g,
+                    group_id=sc_group,
+                    valid_mask=valid_flat,
+                    subject_mask=subject_flat,
+                    arm=self.sc_mismatch_loss,
+                )
+                out["sc_phys_val"] = phys["total"]
+                out["sc_phys_clash"] = phys["clash"].detach()
+                out["sc_phys_contact"] = phys["contact"].detach()
 
         # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
         #    using the side-chain-informed h_res'. h_res' is injected into the

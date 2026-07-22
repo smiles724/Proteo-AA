@@ -88,6 +88,15 @@ def build(args, device):
         configs.sidechain.per_sigma = False
         configs.sidechain.predicted_frame = False
     apply_sidechain_ablation_arm(configs, getattr(args, "sc_ablation_arm", "default"))
+    if getattr(args, "mismatch_loss", ""):
+        configs.sidechain.mismatch_loss = args.mismatch_loss
+    if getattr(args, "predicted_mask", False):
+        # Stage IV: instantiate the side-chain atom set from the PREDICTED residue
+        # type. This is the only setting in which residues can be type-mismatched,
+        # and therefore the only one where sidechain.mismatch_loss does anything.
+        configs.sidechain.predicted_mask = True
+    if getattr(args, "route_by_type", False):
+        configs.sidechain.route_by_type = True
     if getattr(args, "no_template_init", False):
         configs.sidechain.template_init = False
     if getattr(args, "no_frame_aware_head", False):
@@ -257,6 +266,19 @@ def main():
                     help="A/B control: feed S_phi raw GLOBAL noisy coords (legacy).")
     ap.add_argument("--no_frame_aware_head", action="store_true",
                     help="A/B control: disable the frame-aware head (CA-anchored global head).")
+    ap.add_argument("--predicted_mask", action="store_true",
+                    help="Stage IV: atom set from the PREDICTED residue type, so residues "
+                         "can be type-mismatched. Required for --mismatch_loss to bite.")
+    ap.add_argument("--route_by_type", action="store_true",
+                    help="coord loss only on type-matched residues (implied by --predicted_mask)")
+    ap.add_argument("--mismatch_loss", default="",
+                    choices=["", "none", "clash", "legacy", "compat"],
+                    help="regularizer for type-MISMATCHED residues (0722 L_compat). "
+                         "'none' = don't supervise them at all, 'clash' = steric "
+                         "only (default), 'legacy' = pre-0722 "
+                         "clash+contact, 'compat' = full 4.9 (not implemented). "
+                         "Only bites under --sc_ablation_arm/predicted masks, since "
+                         "teacher forcing leaves nothing mismatched.")
     ap.add_argument("--no_template_init", action="store_true",
                     help="A/B control: disable Overleaf par.221 template-anchored init "
                          "and fall back to the legacy isotropic Gaussian init.")

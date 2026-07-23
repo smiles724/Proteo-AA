@@ -191,6 +191,10 @@ training_configs["sidechain"] = {
     # teacher-forcing (the current default) GT atom composition would leak
     # residue identity into post_aa via h_res', so we do NOT supervise it.
     "predicted_mask": False,
+    # Stage II-A side-chain-only warm-up: S_phi should condition on GT residue
+    # identity/type masks, not a frozen/untrained AA head. Joint stages keep this
+    # False so S_phi consumes predicted residue-type logits.
+    "force_gt_type_logits": False,
     # DIRECT a-level side-chain -> backbone feedback:
     #     a'_bb = a_bb + MLP(concat(a_bb, a_sc))
     # The default (indirect) path projects h_res' into s_trunk and lets the

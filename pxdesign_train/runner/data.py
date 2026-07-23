@@ -106,7 +106,10 @@ class DesignSourceDataset(Dataset):
     _cropper: DesignCropper = field(init=False)
 
     def __post_init__(self) -> None:
-        self._cropper = DesignCropper(crop_size=self.crop_size)
+        self._cropper = DesignCropper(
+            crop_size=self.crop_size,
+            max_binder_fraction=self.max_binder_fraction,
+        )
         # P3 leakage coupling (SAFETY, not a nicety): `backbone_only_binder` is
         # what makes the featurizer run `_scrub_design_sidechain_coords` — the P1
         # leakage fix that collapses design-region side-chain coords onto CA so the

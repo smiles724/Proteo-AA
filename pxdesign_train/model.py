@@ -239,6 +239,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             # post_aa_logits — an identity->identity shortcut. Default False keeps
             # the leak closed by simply not supervising post_aa in that regime.
             self.sc_predicted_mask = bool(getattr(sc_cfg, "predicted_mask", False)) if sc_cfg is not None else False
+            self.sc_force_gt_type_logits = bool(getattr(sc_cfg, "force_gt_type_logits", False)) if sc_cfg is not None else False
             # Per-sigma alignment: S_phi reads per-sigma h_res/aa_logits/sigma
             # (flattened [B*N_sample, L, C]) rather than a reduced h_res. Warmup
             # can turn this off for the single-baseline path.
@@ -896,6 +897,17 @@ class ProtenixDesignTrain(ProtenixDesign):
             sc_mask = sc_mask.to(h_res.device).bool()
             if sc_type_idx is not None:
                 sc_type_idx = sc_type_idx.to(h_res.device).long()
+            if getattr(self, "sc_force_gt_type_logits", False) and sc_type_idx is not None:
+                n_type = aa_logits.shape[-1]
+                valid_type = (sc_type_idx >= 0) & (sc_type_idx < n_type)
+                gt_logits = torch.full(
+                    (*sc_type_idx.shape, n_type),
+                    -20.0,
+                    device=h_res.device,
+                    dtype=aa_logits.dtype,
+                )
+                gt_logits.scatter_(-1, sc_type_idx.clamp(0, n_type - 1)[..., None], 20.0)
+                aa_logits = torch.where(valid_type[..., None], gt_logits, aa_logits)
             B = h_res.shape[0]
             # Overleaf paragraph 221: y_T = mu_ideal[a_i, j] + sigma_T eps  (the
             # x_T = F_hat y_T half is the to_global(...) call below). sc_type_idx and

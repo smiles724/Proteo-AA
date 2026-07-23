@@ -147,6 +147,74 @@ class PXDesignLoss(nn.Module):
         per_sample = (se * mask).sum(dim=-1) / (mask.sum(dim=-1) + self.eps)  # [..., N_sample]
         return per_sample.mean(dim=-1)                          # [...]
 
+    def _aligned_rmsd_and_tm(
+        self,
+        pred: torch.Tensor,                  # [..., N_sample, N_atom, 3]
+        gt_aug: torch.Tensor,                # [..., N_sample, N_atom, 3]
+        coordinate_mask: torch.Tensor,       # [..., N_atom]
+        metric_atom_mask: Optional[torch.Tensor],
+        compute_tm: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Kabsch-aligned RMSD, plus optional TM-score, over a selected atom mask."""
+        if metric_atom_mask is None:
+            zero = pred.sum() * 0.0
+            return zero.detach(), zero.detach()
+
+        n_atom = pred.shape[-2]
+        n_sample = pred.shape[-3]
+        item_shape = pred.shape[:-3]
+        item_count = int(torch.tensor(item_shape).prod().item()) if item_shape else 1
+
+        p = pred.reshape(item_count, n_sample, n_atom, 3).reshape(-1, n_atom, 3).float()
+        g = gt_aug.reshape(item_count, n_sample, n_atom, 3).reshape(-1, n_atom, 3).float()
+
+        def _prep_mask(m: torch.Tensor) -> torch.Tensor:
+            m = m.to(device=pred.device).bool()
+            if m.dim() == 1:
+                m = m.reshape(1, n_atom).expand(item_count, n_atom)
+            else:
+                if item_shape:
+                    m = m.expand(*item_shape, n_atom).reshape(item_count, n_atom)
+                else:
+                    m = m.reshape(-1, n_atom)[:1].expand(item_count, n_atom)
+            return m[:, None, :].expand(item_count, n_sample, n_atom).reshape(-1, n_atom)
+
+        m = _prep_mask(coordinate_mask) & _prep_mask(metric_atom_mask)
+        w = m.float()
+        count = w.sum(dim=-1)                                  # [B*S]
+        valid = count > 0
+        if not valid.any():
+            zero = pred.sum() * 0.0
+            return zero.detach(), zero.detach()
+
+        denom = count.clamp_min(1.0)[:, None, None]
+        gc = (g * w[..., None]).sum(dim=1, keepdim=True) / denom
+        pc = (p * w[..., None]).sum(dim=1, keepdim=True) / denom
+        g0 = (g - gc) * w[..., None]
+        p0 = (p - pc) * w[..., None]
+
+        cov = g0.transpose(-1, -2) @ p0
+        U, _, Vh = torch.linalg.svd(cov)
+        det = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2))
+        D = torch.eye(3, device=pred.device, dtype=p.dtype).expand(cov.shape[0], 3, 3).clone()
+        D[:, 2, 2] = torch.where(det < 0, -1.0, 1.0)
+        R = Vh.transpose(-1, -2) @ D @ U.transpose(-1, -2)
+        g_aligned = (g - gc) @ R + pc
+
+        d2 = ((g_aligned - p) ** 2).sum(dim=-1)
+        rmsd_per = torch.sqrt((d2 * w).sum(dim=-1) / count.clamp_min(1.0))
+        rmsd = rmsd_per[valid].mean()
+
+        if not compute_tm:
+            return rmsd.detach(), (pred.sum() * 0.0).detach()
+
+        # Standard protein TM-score length scale; clamp for short crops/fragments.
+        d0 = 1.24 * torch.clamp(count.float() - 15.0, min=1.0).pow(1.0 / 3.0) - 1.8
+        d0 = d0.clamp_min(0.5)
+        tm_per_atom = 1.0 / (1.0 + d2 / (d0[:, None] ** 2))
+        tm_per = (tm_per_atom * w).sum(dim=-1) / count.clamp_min(1.0)
+        return rmsd.detach(), tm_per[valid].mean().detach()
+
     def _distogram_term(
         self,
         logits: torch.Tensor,                # [..., N_token, N_token, no_bins]
@@ -256,6 +324,8 @@ class PXDesignLoss(nn.Module):
         post_pred_coordinate: Optional[torch.Tensor] = None,   # [..., N_sample, N_atom, 3]
         post_gt_coordinate_aug: Optional[torch.Tensor] = None, # [..., N_sample, N_atom, 3]
         post_aa_logits: Optional[torch.Tensor] = None,         # [..., N_token, 20]
+        eval_ca_atom_mask: Optional[torch.Tensor] = None,       # [..., N_atom] bool
+        eval_backbone_atom_mask: Optional[torch.Tensor] = None, # [..., N_atom] bool
         weight_bb_post: float = 1.0,
         weight_aa_post: float = 1.0,
     ) -> dict[str, torch.Tensor]:
@@ -277,6 +347,21 @@ class PXDesignLoss(nn.Module):
 
         # --- MSE (always on) ---
         mse = self._mse_term(pred_coordinate, gt_coordinate_aug, coordinate_mask)  # [...]
+        with torch.no_grad():
+            ca_rmsd, tm_score = self._aligned_rmsd_and_tm(
+                pred_coordinate,
+                gt_coordinate_aug,
+                coordinate_mask,
+                eval_ca_atom_mask,
+                compute_tm=True,
+            )
+            bb_rmsd, _ = self._aligned_rmsd_and_tm(
+                pred_coordinate,
+                gt_coordinate_aug,
+                coordinate_mask,
+                eval_backbone_atom_mask,
+                compute_tm=False,
+            )
 
         # --- Smooth LDDT (gated) ---
         # SmoothLDDTLoss takes [..., N_sample, N_atom, 3] and returns per-sample lddt loss;
@@ -436,6 +521,9 @@ class PXDesignLoss(nn.Module):
         return {
             "loss": total.mean(),
             "mse": mse.mean().detach(),
+            "ca_rmsd": ca_rmsd,
+            "bb_rmsd": bb_rmsd,
+            "tm_score": tm_score,
             "lddt": lddt.mean().detach(),
             "distogram": disto.mean().detach(),
             "sigma_low_frac": sigma_low.mean().detach(),

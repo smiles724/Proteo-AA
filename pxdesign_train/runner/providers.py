@@ -51,6 +51,45 @@ def select_chain_by_id(chain_id: str) -> BinderSelectorFn:
     return _sel
 
 
+def _clean_chain_id(chain_id: Any) -> Optional[str]:
+    """Normalize pandas/CSV missing values from Protenix index rows."""
+    if chain_id is None:
+        return None
+    try:
+        if bool(np.isnan(chain_id)):
+            return None
+    except TypeError:
+        pass
+    s = str(chain_id)
+    if s == "" or s.lower() == "nan":
+        return None
+    return s
+
+
+def select_protenix_chain_1() -> BinderSelectorFn:
+    """Pick the first reference chain from a Protenix index row.
+
+    This is the correct selector for monomer `type == "chain"` rows, where
+    `chain_1_id` is the protein chain and `chain_2_id` is missing.
+    """
+
+    def _sel(data, _atom_array):
+        chain_pair = data.get("__binder_chain_pair__")
+        if chain_pair is None:
+            raise RuntimeError(
+                "select_protenix_chain_1 needs `__binder_chain_pair__` in data — "
+                "make sure ProtenixComplexProvider was constructed with "
+                "expose_sample_indice=True."
+            )
+        chain_1, _chain_2 = chain_pair
+        chain_1 = _clean_chain_id(chain_1)
+        if chain_1 is None:
+            raise ValueError("Protenix sample has no chain_1_id")
+        return chain_1
+
+    return _sel
+
+
 def select_protenix_chain_2() -> BinderSelectorFn:
     """For PPI interface samples in Protenix's `BaseSingleDataset`, pick the
     second reference chain (`sample_indice.chain_2_id`).
@@ -71,6 +110,8 @@ def select_protenix_chain_2() -> BinderSelectorFn:
                 "default `expose_sample_indice=True`."
             )
         chain_1, chain_2 = chain_pair
+        chain_1 = _clean_chain_id(chain_1)
+        chain_2 = _clean_chain_id(chain_2)
         return chain_2 if chain_2 is not None else chain_1
 
     return _sel
@@ -145,7 +186,10 @@ class ProtenixComplexProvider:
             indice = self.base_dataset._get_sample_indice(idx)
             chain_1 = indice.get("chain_1_id") if hasattr(indice, "get") else None
             chain_2 = indice.get("chain_2_id") if hasattr(indice, "get") else None
-            data["__binder_chain_pair__"] = (chain_1, chain_2)
+            data["__binder_chain_pair__"] = (
+                _clean_chain_id(chain_1),
+                _clean_chain_id(chain_2),
+            )
 
         # Capture data + selector_fn in a closure that has the signature
         # DesignSourceDataset expects from a BinderSelector.

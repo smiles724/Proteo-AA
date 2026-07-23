@@ -87,6 +87,7 @@ def build(args, device):
         # and predicted_frame=True.
         configs.sidechain.per_sigma = False
         configs.sidechain.predicted_frame = False
+        configs.sidechain.force_gt_type_logits = True
     apply_sidechain_ablation_arm(configs, getattr(args, "sc_ablation_arm", "default"))
     if getattr(args, "mismatch_loss", ""):
         configs.sidechain.mismatch_loss = args.mismatch_loss

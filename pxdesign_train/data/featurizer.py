@@ -202,6 +202,7 @@ class DesignFeaturizer:
         )
         feature_dict["design_token_mask"] = token_is_design.long()
         feature_dict["condition_token_mask"] = (~token_is_design).long()
+        feature_dict.update(self._eval_atom_masks(atom_array, label_dict))
         feature_dict["aa_clean"] = aa_clean
         feature_dict["aa_corrupted"] = feature_dict["restype"].argmax(dim=-1).long()
         feature_dict["aa_corruption_mask"] = aa_corruption_mask.long()
@@ -360,6 +361,23 @@ class DesignFeaturizer:
                 f"Expected {rep_count} rep-atom restypes, got {len(restype_strs)}"
             )
         return restype_onehot_encoded(restype_strs)  # [N_token, 36]
+
+    @staticmethod
+    def _eval_atom_masks(atom_array, label_dict: dict) -> dict[str, torch.Tensor]:
+        """Atom masks for evaluation-only backbone structural metrics."""
+        n_atom = int(label_dict["coordinate"].shape[-2])
+        atom_name = np.asarray(atom_array.atom_name)[:n_atom]
+        mol_type = np.asarray(getattr(atom_array, "mol_type", np.array([""] * len(atom_array))))[:n_atom]
+        is_protein = mol_type == "protein"
+        # Synthetic/unit-test AtomArrays may not carry a useful mol_type annotation.
+        if not is_protein.any():
+            is_protein = np.ones_like(atom_name, dtype=bool)
+        ca = is_protein & (atom_name == "CA")
+        bb = is_protein & np.isin(atom_name, np.asarray(XPB_BACKBONE_ATOM_NAMES))
+        return {
+            "eval_ca_atom_mask": torch.from_numpy(ca.astype(bool)),
+            "eval_backbone_atom_mask": torch.from_numpy(bb.astype(bool)),
+        }
 
     def _compute_sidechain_targets(
         self, atom_array, feature_dict: dict, binder_atom_mask: np.ndarray

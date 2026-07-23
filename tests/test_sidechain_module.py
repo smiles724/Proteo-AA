@@ -58,6 +58,19 @@ def test_cross_residue_attention_runs():
     assert h_res.grad is not None and torch.count_nonzero(h_res.grad) > 0
 
 
+def test_multiple_cross_residue_blocks_run():
+    _, atom_mask, atom_ids, h_res, logits, noisy, t = _toy_batch()
+    ca = torch.randn(1, 3, 3)
+    mod = SideChainModule(
+        c_res=C_RES, c_atom=32, c_time=16, n_blocks=2, n_heads=4, n_cross_blocks=3
+    )
+    y0, feats = mod.forward(h_res, logits, atom_ids, atom_mask, noisy, t, ca_coords=ca)
+    assert len(mod.cross_res_blocks) == 3
+    assert y0.shape == (1, 3, MAX_SC, 3)
+    assert feats.shape == (1, 3, MAX_SC, 32)
+    assert torch.isfinite(y0).all()
+
+
 def test_gly_no_nan():
     restypes = ["GLY"]  # zero side-chain atoms -> fully padded residue
     atom_mask = sidechain_mask(restypes)[None]

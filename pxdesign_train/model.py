@@ -249,6 +249,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             # post_aa_logits — an identity->identity shortcut. Default False keeps
             # the leak closed by simply not supervising post_aa in that regime.
             self.sc_predicted_mask = bool(getattr(sc_cfg, "predicted_mask", False)) if sc_cfg is not None else False
+            self.sc_force_gt_type_logits = bool(getattr(sc_cfg, "force_gt_type_logits", False)) if sc_cfg is not None else False
             # Per-sigma alignment: S_phi reads per-sigma h_res/aa_logits/sigma
             # (flattened [B*N_sample, L, C]) rather than a reduced h_res. Warmup
             # can turn this off for the single-baseline path.
@@ -259,10 +260,35 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_predicted_frame = bool(getattr(sc_cfg, "predicted_frame", True)) if sc_cfg is not None else True
             self.sc_weight_global = float(getattr(sc_cfg, "weight_sc_global", 0.5)) if sc_cfg is not None else 0.5
             sc_grad_scale = float(getattr(sc_cfg, "trunk_grad_scale", 1.0)) if sc_cfg is not None else 1.0
-            c_atom = int(getattr(sc_cfg, "c_atom", 128)) if sc_cfg is not None else 128
+            sc_arch = str(getattr(sc_cfg, "architecture", "light")) if sc_cfg is not None else "light"
+            dm_cfg = getattr(getattr(configs, "model", None), "diffusion_module", None)
+            dm_tr = getattr(dm_cfg, "transformer", None)
+            if sc_arch == "diffusion_config":
+                c_atom_default = int(getattr(dm_cfg, "c_token", 768)) if dm_cfg is not None else 768
+                n_blocks_default = int(getattr(dm_tr, "n_blocks", 16)) if dm_tr is not None else 16
+                n_heads_default = int(getattr(dm_tr, "n_heads", 16)) if dm_tr is not None else 16
+                c_atom = int(getattr(sc_cfg, "c_atom", c_atom_default))
+                n_blocks = int(getattr(sc_cfg, "n_blocks", n_blocks_default))
+                n_heads = int(getattr(sc_cfg, "n_heads", n_heads_default))
+                n_cross_blocks = int(getattr(sc_cfg, "n_cross_blocks", n_blocks))
+            elif sc_arch == "light":
+                c_atom = int(getattr(sc_cfg, "c_atom", 128)) if sc_cfg is not None else 128
+                n_blocks = int(getattr(sc_cfg, "n_blocks", 2)) if sc_cfg is not None else 2
+                n_heads = int(getattr(sc_cfg, "n_heads", 4)) if sc_cfg is not None else 4
+                n_cross_blocks = int(getattr(sc_cfg, "n_cross_blocks", 1)) if sc_cfg is not None else 1
+            else:
+                raise ValueError(
+                    f"sidechain.architecture={sc_arch!r} must be 'diffusion_config' or 'light'"
+                )
+            ff_mult = int(getattr(sc_cfg, "ff_mult", 2)) if sc_cfg is not None else 2
+            self.sc_architecture = sc_arch
+            self.sc_n_blocks = n_blocks
+            self.sc_n_heads = n_heads
+            self.sc_n_cross_blocks = n_cross_blocks
             self.sidechain_module = SideChainModule(
                 c_res=self.sc_c_res, c_atom=c_atom, n_type=vocab_size,
-                trunk_grad_scale=sc_grad_scale,
+                n_blocks=n_blocks, n_heads=n_heads, n_cross_blocks=n_cross_blocks,
+                ff_mult=ff_mult, trunk_grad_scale=sc_grad_scale,
             )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
 
@@ -953,6 +979,17 @@ class ProtenixDesignTrain(ProtenixDesign):
             sc_mask = sc_mask.to(h_res.device).bool()
             if sc_type_idx is not None:
                 sc_type_idx = sc_type_idx.to(h_res.device).long()
+            if getattr(self, "sc_force_gt_type_logits", False) and sc_type_idx is not None:
+                n_type = aa_logits.shape[-1]
+                valid_type = (sc_type_idx >= 0) & (sc_type_idx < n_type)
+                gt_logits = torch.full(
+                    (*sc_type_idx.shape, n_type),
+                    -20.0,
+                    device=h_res.device,
+                    dtype=aa_logits.dtype,
+                )
+                gt_logits.scatter_(-1, sc_type_idx.clamp(0, n_type - 1)[..., None], 20.0)
+                aa_logits = torch.where(valid_type[..., None], gt_logits, aa_logits)
             B = h_res.shape[0]
             # Overleaf paragraph 221: y_T = mu_ideal[a_i, j] + sigma_T eps  (the
             # x_T = F_hat y_T half is the to_global(...) call below). sc_type_idx and
@@ -1341,13 +1378,24 @@ class ProtenixDesignTrain(ProtenixDesign):
                 # other is a frame bug, not a conservative approximation. So warmup keeps
                 # the binder's own backbone as context, now MASKED (this is where the
                 # phantom atoms used to enter).
-                B_, L_, K_ = bb.shape[0], bb.shape[1], bb.shape[2]
-                if bb_valid.shape[0] != B_:
-                    bb_valid = bb_valid.expand(B_, -1, -1)
+                bb_ctx = bb.unsqueeze(0) if bb.dim() == 3 else bb
+                bb_valid_ctx = bb_valid.unsqueeze(0) if bb_valid.dim() == 2 else bb_valid
+                B_, L_, K_ = bb_ctx.shape[0], bb_ctx.shape[1], bb_ctx.shape[2]
+                y_B = y_g.shape[0]
+                if B_ != y_B:
+                    if B_ != 1:
+                        raise ValueError(
+                            f"cannot align side-chain context batch {B_} with predictions {y_B}"
+                        )
+                    bb_ctx = bb_ctx.expand(y_B, -1, -1, -1)
+                    bb_valid_ctx = bb_valid_ctx.expand(y_B, -1, -1)
+                    B_ = y_B
+                if bb_valid_ctx.shape[0] != B_:
+                    bb_valid_ctx = bb_valid_ctx.expand(B_, -1, -1)
                 _g = torch.arange(L_, device=y_g.device)[:, None].expand(L_, K_)
                 ctx_atoms = (
-                    bb.reshape(B_, L_ * K_, 3).detach(),
-                    bb_valid.reshape(B_, L_ * K_),
+                    bb_ctx.reshape(B_, L_ * K_, 3).detach(),
+                    bb_valid_ctx.reshape(B_, L_ * K_),
                     _g.reshape(1, L_ * K_).expand(B_, -1),
                 )
             # Stage III/IV type routing: coord loss only where predicted AA == GT

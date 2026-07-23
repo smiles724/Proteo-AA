@@ -143,6 +143,16 @@ def apply_sidechain_ablation_arm(configs, arm: str):
 # Side-Chain Module knobs (consumed by ProtenixDesignTrain when
 # enable_sidechain=True). Kept off by default; finetune scripts opt in.
 training_configs["sidechain"] = {
+    # S_phi architecture. The main line now matches the backbone diffusion
+    # transformer's width/depth configuration, because this is a full-atom model
+    # rather than a small side-chain probe. Keep mechanism ablations at the same
+    # capacity; future capacity runs should change the numeric fields below.
+    "architecture": "diffusion_config",
+    "c_atom": 768,
+    "n_blocks": 16,
+    "n_heads": 16,
+    "n_cross_blocks": 16,
+    "ff_mult": 2,
     "init_sigma": 1.0,
     # Receptor / motif / ligand context. Spec (Overleaf requires it in 6 places), not an
     # option; a switch only so Stage II-A warmup (GT frames) can skip it. See
@@ -168,7 +178,6 @@ training_configs["sidechain"] = {
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
     # template anisotropy that carries the orientation.
     "init_sigma_T": 0.3,
-    "c_atom": 128,
     "trunk_grad_scale": 1.0,
     "detach_feedback": False,
     "route_by_type": False,
@@ -226,6 +235,10 @@ training_configs["sidechain"] = {
     # teacher-forcing (the current default) GT atom composition would leak
     # residue identity into post_aa via h_res', so we do NOT supervise it.
     "predicted_mask": False,
+    # Stage II-A side-chain-only warm-up: S_phi should condition on GT residue
+    # identity/type masks, not a frozen/untrained AA head. Joint stages keep this
+    # False so S_phi consumes predicted residue-type logits.
+    "force_gt_type_logits": False,
     # DIRECT a-level side-chain -> backbone feedback:
     #     a'_bb = a_bb + MLP(concat(a_bb, a_sc))
     # The default (indirect) path projects h_res' into s_trunk and lets the

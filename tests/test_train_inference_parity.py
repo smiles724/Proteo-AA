@@ -40,10 +40,16 @@ TRAIN_ONLY = {
                      "the input distribution S_phi is fed and so must be mirrored.",
     "predicted_mask": "gates whether post_aa is SUPERVISED; sampling always uses "
                       "the predicted type anyway",
+    "force_gt_type_logits": "Stage II-A warmup teacher-forcing; sampling has no GT type",
     "predicted_frame": "training-side choice between GT and predicted frames; "
                        "sampling only ever has the predicted backbone",
     "per_sigma": "consulted at sampling — see sc_per_sigma in the sampler",
+    "architecture": "architecture preset, not a behavioural switch",
     "c_atom": "architecture dim, not a behavioural switch",
+    "n_blocks": "architecture depth, not a behavioural switch",
+    "n_heads": "architecture attention width, not a behavioural switch",
+    "n_cross_blocks": "architecture depth, not a behavioural switch",
+    "ff_mult": "architecture FFN width, not a behavioural switch",
     "init_sigma": "consulted at sampling (the Gaussian fallback)",
     "q_direct_zero_init": "initialisation-time only",
     "a_direct_zero_init": "initialisation-time only",

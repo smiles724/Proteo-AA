@@ -269,6 +269,11 @@ def test_config_defaults():
     from pxdesign_train.configs.configs_train import training_configs
 
     sc = training_configs["sidechain"]
+    assert sc["architecture"] == "diffusion_config"
+    assert sc["c_atom"] == 768
+    assert sc["n_blocks"] == 16
+    assert sc["n_heads"] == 16
+    assert sc["n_cross_blocks"] == 16
     # ON since 2026-07-14: par.221 specifies the formula and the 0714 appendix specifies
     # how mu_ideal is built (backbone-dependent rotamer library). It was held OFF only
     # while the CCD table's arbitrary chi was the best mu_ideal available; that is fixed.

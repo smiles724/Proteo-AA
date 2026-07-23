@@ -38,6 +38,7 @@ def train_from_components(
     world_size: int = 1,
     checkpoint_dir: str | None = None,
     load_checkpoint_path: str | None = None,
+    checkpoint_params_only: bool = True,
     max_steps: int | None = None,
 ) -> PXDesignTrainer:
     """Construct a trainer and run the loop. Returns the trainer for callers
@@ -55,6 +56,7 @@ def train_from_components(
         world_size=world_size,
         checkpoint_dir=checkpoint_dir,
         load_checkpoint_path=load_checkpoint_path,
+        checkpoint_params_only=checkpoint_params_only,
     )
     trainer.run(max_steps=max_steps)
     return trainer

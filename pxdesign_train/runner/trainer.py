@@ -108,6 +108,7 @@ class PXDesignTrainer:
         world_size: int = 1,
         checkpoint_dir: Optional[str] = None,
         load_checkpoint_path: Optional[str] = None,
+        checkpoint_params_only: bool = True,
     ) -> None:
         self.configs = configs
         self.components = components
@@ -130,12 +131,13 @@ class PXDesignTrainer:
         self._init_dataloader()
 
         if load_checkpoint_path:
-            self.load_checkpoint(load_checkpoint_path, params_only=True)
+            self.load_checkpoint(load_checkpoint_path, params_only=checkpoint_params_only)
 
     # ----- init helpers -----
 
     def _init_model(self) -> None:
         self.raw_model = ProtenixDesignTrain(self.configs).to(self.device)
+        self._apply_trainable_filter()
         if self.use_ddp:
             self.model = DDP(
                 self.raw_model,
@@ -147,7 +149,8 @@ class PXDesignTrainer:
             self.model = self.raw_model
 
         n_params = sum(p.numel() for p in self.model.parameters()) / 1e6
-        self._log(f"Model has {n_params:.2f}M parameters")
+        n_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad) / 1e6
+        self._log(f"Model has {n_params:.2f}M parameters ({n_trainable:.2f}M trainable)")
 
         ema_decay = float(getattr(self.configs.training, "ema_decay", 0.0))
         if ema_decay > 0:
@@ -158,6 +161,26 @@ class PXDesignTrainer:
             self.ema_wrapper.register()
         else:
             self.ema_wrapper = None
+
+    def _apply_trainable_filter(self) -> None:
+        keywords = list(getattr(self.configs.training, "trainable_param_keywords", []) or [])
+        if not keywords:
+            return
+        n_trainable = 0
+        for name, param in self.raw_model.named_parameters():
+            keep = any(str(k) in name for k in keywords)
+            param.requires_grad_(keep)
+            if keep:
+                n_trainable += param.numel()
+        if n_trainable == 0:
+            raise ValueError(
+                "trainable_param_keywords matched no parameters: "
+                + ", ".join(map(str, keywords))
+            )
+        self._log(
+            "Trainable parameter filter: "
+            + ", ".join(map(str, keywords))
+        )
 
     def _init_loss(self) -> None:
         loss_cfg = self.configs.loss
@@ -191,8 +214,11 @@ class PXDesignTrainer:
 
     def _init_optimizer(self) -> None:
         cfg = self.configs.training
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        if not params:
+            raise ValueError("No trainable parameters")
         self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
+            params,
             lr=float(cfg.lr),
             betas=(0.9, 0.95),
             weight_decay=float(getattr(cfg, "weight_decay", 0.0)),
@@ -303,6 +329,8 @@ class PXDesignTrainer:
             post_pred_coordinate=out.get("post_pred_coordinate"),
             post_gt_coordinate_aug=out.get("post_gt_coordinate_aug"),
             post_aa_logits=out.get("post_aa_logits"),
+            eval_ca_atom_mask=batch["input_feature_dict"].get("eval_ca_atom_mask"),
+            eval_backbone_atom_mask=batch["input_feature_dict"].get("eval_backbone_atom_mask"),
             weight_bb_post=getattr(self, "_weight_bb_post", 1.0),
             weight_aa_post=getattr(self, "_weight_aa_post", 1.0),
             backbone_atom_mask=batch["input_feature_dict"].get("backbone_loss_mask"),
@@ -381,7 +409,10 @@ class PXDesignTrainer:
                 if eval_int > 0 and self.step > 0 and self.step % eval_int == 0:
                     metrics = self.evaluate()
                     if metrics:
-                        self._log(f"step={self.step} eval: {metrics}")
+                        self._log(
+                            f"step={self.step} "
+                            + " ".join(f"val_{k}={v:.4g}" for k, v in metrics.items())
+                        )
                 if ckpt_int > 0 and self.step > 0 and self.step % ckpt_int == 0:
                     self.save_checkpoint()
 

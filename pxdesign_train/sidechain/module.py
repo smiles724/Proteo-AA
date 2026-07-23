@@ -1,7 +1,9 @@
 """Side-Chain Module S_phi: one-step, global-coordinate atom denoiser.
 
-Follows the SideCraft Overleaf appendix ("Side-Chain Module"): a light atom
-transformer with local (intra-residue) attention. Atom features are initialised
+Follows the SideCraft Overleaf appendix ("Side-Chain Module"): a configurable
+atom transformer with local (intra-residue) attention. The training config sizes
+it from the backbone diffusion transformer by default; small CPU tests can still
+instantiate the light setting directly. Atom features are initialised
 as
 
     u_ij = Embed_atom(name_ij) + W_res h_res_i + W_aa softmax(p(a_i))
@@ -70,13 +72,14 @@ class _CrossResBlock(nn.Module):
 class _AtomBlock(nn.Module):
     """Pre-norm masked self-attention + FFN over the atoms of one residue."""
 
-    def __init__(self, c_atom: int, n_heads: int) -> None:
+    def __init__(self, c_atom: int, n_heads: int, ff_mult: int = 2) -> None:
         super().__init__()
+        hidden = int(ff_mult) * c_atom
         self.ln1 = nn.LayerNorm(c_atom)
         self.attn = nn.MultiheadAttention(c_atom, n_heads, batch_first=True)
         self.ln2 = nn.LayerNorm(c_atom)
         self.ff = nn.Sequential(
-            nn.Linear(c_atom, 2 * c_atom), nn.ReLU(), nn.Linear(2 * c_atom, c_atom)
+            nn.Linear(c_atom, hidden), nn.ReLU(), nn.Linear(hidden, c_atom)
         )
 
     def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor) -> torch.Tensor:
@@ -96,9 +99,17 @@ class SideChainModule(nn.Module):
         c_time: int = 128,
         n_blocks: int = 2,
         n_heads: int = 4,
+        n_cross_blocks: int = 1,
+        ff_mult: int = 2,
         trunk_grad_scale: float = 1.0,
     ) -> None:
         super().__init__()
+        if c_atom % n_heads != 0:
+            raise ValueError(f"c_atom={c_atom} must be divisible by n_heads={n_heads}")
+        if n_blocks < 1:
+            raise ValueError("n_blocks must be >= 1")
+        if n_cross_blocks < 1:
+            raise ValueError("n_cross_blocks must be >= 1")
         self.c_atom = c_atom
         self.c_time = c_time
         self.trunk_grad_scale = float(trunk_grad_scale)
@@ -109,8 +120,14 @@ class SideChainModule(nn.Module):
         self.w_t = nn.Sequential(nn.Linear(c_time, c_atom), nn.ReLU(), nn.Linear(c_atom, c_atom))
         self.w_xyz = nn.Linear(3, c_atom)
 
-        self.blocks = nn.ModuleList([_AtomBlock(c_atom, n_heads) for _ in range(n_blocks)])
-        self.cross_res = _CrossResBlock(c_atom)
+        self.blocks = nn.ModuleList([
+            _AtomBlock(c_atom, n_heads, ff_mult=ff_mult) for _ in range(n_blocks)
+        ])
+        self.cross_res_blocks = nn.ModuleList([
+            _CrossResBlock(c_atom) for _ in range(n_cross_blocks)
+        ])
+        # Backwards-compatible debug/test handle for the first cross-residue block.
+        self.cross_res = self.cross_res_blocks[0]
         self.out_ln = nn.LayerNorm(c_atom)
         self.out = nn.Linear(c_atom, 3)
 
@@ -225,8 +242,9 @@ class SideChainModule(nn.Module):
                 ctx_mask = ctx_mask.to(has_sc.device).bool()
                 pooled = torch.where(has_sc[..., None], pooled, h_proj.to(pooled.dtype))
                 keys_mask = has_sc | ctx_mask
-            res_ctx = self.cross_res(pooled, ca_coords, keys_mask)    # [B,L,c]
-            atom_feats = atom_feats + res_ctx[:, :, None, :]          # broadcast back
+            for cross_block in self.cross_res_blocks:
+                pooled = cross_block(pooled, ca_coords, keys_mask)    # [B,L,c]
+            atom_feats = atom_feats + pooled[:, :, None, :]           # broadcast back
 
         # Split the 14 slots back apart. Coordinates are decoded for the 10
         # SIDE-CHAIN slots only — backbone slots never produce coordinates and so

@@ -176,6 +176,63 @@ def test_select_protenix_chain_2_uses_sample_indice():
     assert sel_fn(None) == "B"
 
 
+def test_select_protenix_chain_1_handles_monomer_rows():
+    from pxdesign_train.runner.providers import (
+        ProtenixComplexProvider,
+        select_protenix_chain_1,
+    )
+
+    base = _MockBaseSingleDataset(n_items=1, chain_pairs=[("A", None)])
+    provider = ProtenixComplexProvider(base, binder_selector_fn=select_protenix_chain_1())
+    _, _, _, _, sel_fn = provider[0]
+    assert sel_fn(None) == "A"
+
+
+def test_design_source_dataset_allows_whole_monomer_binder():
+    from pxdesign_train.runner import DesignSourceDataset
+
+    class _OneMonomerProvider:
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            aa, ta, _n_res, n_atom = _make_synthetic_complex_bundle()
+            # Keep only chain C, making the selected binder the whole sample.
+            keep = aa.chain_id == "C"
+            centre_atom_idx = ta.get_annotation("centre_atom_index")
+            token_keep = np.where(keep[centre_atom_idx])[0]
+            from protenix.utils.cropping import CropData
+
+            ta2, aa2 = CropData.select_by_token_indices(
+                token_array=ta,
+                atom_array=aa,
+                selected_token_indices=torch.tensor(token_keep, dtype=torch.long),
+            )
+            feat = {
+                "distogram_rep_atom_mask": torch.from_numpy(
+                    aa2.distogram_rep_atom_mask.astype(np.int64)
+                ).long(),
+                "restype": torch.zeros(len(ta2), 32),
+                "deletion_mean": torch.ones(len(ta2)),
+                "profile": torch.ones(len(ta2), 32),
+                "msa": torch.ones(1, len(ta2)),
+            }
+            label = {
+                "coordinate": torch.from_numpy(aa2.coord),
+                "coordinate_mask": torch.ones(len(aa2), dtype=torch.long),
+            }
+            return aa2, ta2, feat, label, lambda _aa: "C"
+
+    ds = DesignSourceDataset(
+        _OneMonomerProvider(),
+        source_name="mono",
+        crop_size=8,
+        max_binder_fraction=1.0,
+    )
+    batch = ds[0]
+    assert int(batch["input_feature_dict"]["design_token_mask"].sum()) == 6
+
+
 def test_select_smallest_protein_chain():
     from pxdesign_train.runner.providers import (
         ProtenixComplexProvider,

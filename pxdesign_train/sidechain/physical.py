@@ -83,6 +83,7 @@ def build_sidechain_context(
     ca: Optional[torch.Tensor] = None,  # [B, L, 3] existing binder CA (frame origin)
     radius: float = 10.0,
     max_atoms: int = 4096,
+    exclude_atom_mask: Optional[torch.Tensor] = None,  # [B, N_atom] bool — atoms to DROP
 ):
     """Assemble everything S_phi needs to see the receptor / motif / ligand.
 
@@ -99,6 +100,15 @@ def build_sidechain_context(
 
     A token is the binder's iff it has a resolved N/CA/C frame; every other real
     token is context.
+
+    ``exclude_atom_mask`` (True = drop) removes atoms from the candidate context set
+    BEFORE the radius/topk selection. Pass ``design_sidechain_atom_mask`` here: the
+    binder's own side-chain atom rows are KEPT as tokens in ``xyz`` but their
+    coordinates are scrubbed to the residue Cα (see featurizer ``_scrub_design_
+    sidechain_coords``). Without this, those phantom rows — all piled on the Cα —
+    get selected as context, polluting the mismatch clash/contact atom set with atoms
+    that do not exist. The real side-chain geometry comes from S_phi, never from these
+    scrubbed backbone rows.
     """
     L = center_idx.shape[-1]
     is_binder = (bb_atom_idx[..., :3] >= 0).all(dim=-1)                 # [B, L]
@@ -111,6 +121,10 @@ def build_sidechain_context(
         ca_out = torch.where(is_binder[..., None], ca, center_xyz.detach())
 
     atom_valid = (atom_to_token >= 0) & (atom_to_token < L)
+    if exclude_atom_mask is not None:
+        atom_valid = atom_valid & ~exclude_atom_mask.to(
+            device=atom_valid.device, dtype=torch.bool
+        )
     ctx_atoms = select_context_atoms(
         ref_xyz=center_xyz,
         ref_mask=is_binder,

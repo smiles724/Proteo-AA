@@ -1204,6 +1204,18 @@ class ProtenixDesignTrain(ProtenixDesign):
                     ca=ca_for_module,
                     radius=float(getattr(self, "sc_context_radius", 10.0)),
                     max_atoms=int(getattr(self, "sc_context_max_atoms", 4096)),
+                    # Drop the binder's own scrubbed side-chain rows (coords pinned to
+                    # Cα by the featurizer) so they cannot be selected as context —
+                    # otherwise phantom Cα-piled atoms pollute the mismatch
+                    # clash/contact context set.
+                    exclude_atom_mask=(
+                        _tile_per_sigma(
+                            input_feature_dict["design_sidechain_atom_mask"].to(h_res.device),
+                            trailing_ndim=1,
+                        )
+                        if input_feature_dict.get("design_sidechain_atom_mask") is not None
+                        else None
+                    ),
                 )
 
             # Frame-aware head (sidechain.frame_aware_head): hand S_phi the SAME stop-grad

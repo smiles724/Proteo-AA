@@ -69,6 +69,32 @@ def test_build_sidechain_context_separates_binder_from_receptor():
     assert not cxyz.requires_grad
 
 
+def test_scrubbed_binder_sidechain_rows_are_excluded_from_context():
+    """The binder's own side-chain rows survive as tokens with coordinates pinned to
+    the residue Cα (featurizer `_scrub_design_sidechain_coords`). Passing
+    `design_sidechain_atom_mask` as `exclude_atom_mask` must drop them, so those
+    phantom Cα-piled atoms never reach the mismatch clash/contact context set.
+    The real side-chain geometry comes from S_phi."""
+    # token 0 = binder (N/CA/C at atoms 0,1,2) with a scrubbed side-chain row at atom 3;
+    # token 1 = receptor with atom 4. All 5 atoms sit within the radius of the binder Cα.
+    bb = torch.tensor([[[0, 1, 2, -1], [-1, -1, -1, -1]]])
+    center = torch.tensor([[1, 4]])                       # Cα of token 0, rep atom of token 1
+    a2t = torch.tensor([[0, 0, 0, 0, 1]])                 # atom 3 belongs to binder token 0
+    xyz = torch.zeros(1, 5, 3)
+    xyz[0, :3, 0] = torch.tensor([0.0, 1.0, 2.0])         # binder N/CA/C along x
+    xyz[0, 3] = xyz[0, 1]                                 # atom 3 scrubbed ONTO the Cα (atom 1)
+    xyz[0, 4, 0] = 3.0                                    # receptor atom, within radius
+    kw = dict(xyz=xyz, center_idx=center, atom_to_token=a2t, bb_atom_idx=bb,
+              ca=torch.zeros(1, 2, 3), radius=10.0, max_atoms=16)
+
+    _, _, (_, m_no, _) = build_sidechain_context(**kw)
+    assert int(m_no.sum()) == 5, "precondition: all 5 atoms are in-radius candidates"
+
+    excl = torch.tensor([[False, False, False, True, False]])   # design_sidechain_atom_mask
+    _, _, (_, m_ex, _) = build_sidechain_context(**kw, exclude_atom_mask=excl)
+    assert int(m_ex.sum()) == 4, "the scrubbed binder side-chain row must be dropped"
+
+
 # ------------------------------------------------------------------ contact (bug 2)
 
 def test_phantom_context_rows_do_not_zero_the_runaway_penalty():

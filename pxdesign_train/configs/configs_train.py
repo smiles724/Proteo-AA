@@ -111,17 +111,21 @@ training_configs["loss"] = {
 
 SC_ABLATION_ARMS = {
     # true control: refinement pass runs, no side-chain info reaches the backbone
-    "no":            dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False),
+    "no":            dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
     # current/default indirect channel: h_res' -> s_trunk -> a_token recomputed
-    "a-indirect":    dict(hres_inject=True,  a_direct=False, bb_context=False, q_direct=False),
+    "a-indirect":    dict(hres_inject=True,  a_direct=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
     # token-level concat/fusion: a'_bb = a_bb + MLP([a_bb, a_sc])
-    "a-direct":      dict(hres_inject=False, a_direct=True,  bb_context=False, q_direct=False),
+    "a-direct":      dict(hres_inject=False, a_direct=True,  bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
     # q control: S_phi sees 4 backbone context atoms, but no q feedback is written back
-    "bbctx":         dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False),
+    "bbctx":         dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=False),
     # atom-level concat/fusion: q'_bb = q_bb + MLP([q_bb, q_sc_bb])
-    "q":             dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=True),
+    "q":             dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
     # both explicit concat/fusion channels
-    "a-direct+q":    dict(hres_inject=False, a_direct=True,  bb_context=True,  q_direct=True),
+    "a-direct+q":    dict(hres_inject=False, a_direct=True,  bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
+    # B→S residue-level a concat (point 2)
+    "a-bs":          dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
+    # B→S atom-level q into side-chain (point 3)
+    "q-bs":          dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
 }
 
 
@@ -276,6 +280,8 @@ training_configs["sidechain"] = {
     "bb_context": False,
     "q_direct": False,
     "q_direct_zero_init": True,
+    "a_bs_concat": False,   # point 2: B→S residue concat (side-chain pooled + backbone a_token)
+    "q_bs": False,          # point 3: B→S atom fusion (backbone q -> side-chain backbone slots)
     "weight_bb_post": 1.0,
     "weight_aa_post": 1.0,
 }

@@ -37,7 +37,7 @@ def _sc_cfg(**overrides):
 
 
 def test_all_six_arms_are_defined():
-    assert set(ARMS) == {"no", "a-indirect", "a-direct", "bbctx", "q", "a-direct+q"}
+    assert set(ARMS) == {"no", "a-indirect", "a-direct", "bbctx", "q", "a-direct+q", "a-bs", "q-bs"}
 
 
 def test_arms_are_pairwise_distinct():
@@ -59,7 +59,7 @@ def test_defaults_reproduce_the_a_indirect_arm():
     assert d["a_direct"] is False
     assert d["bb_context"] is False
     assert d["q_direct"] is False
-    assert dict(hres_inject=True, a_direct=False, bb_context=False, q_direct=False) == ARMS["a-indirect"]
+    assert dict(hres_inject=True, a_direct=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False) == ARMS["a-indirect"]
 
 
 @pytest.mark.parametrize("arm", list(ARMS))
@@ -126,5 +126,13 @@ def test_model_attributes_match_the_arm(arm):
     assert q_d == ARMS[arm]["q_direct"]
     if q_d:
         assert bb, "q_direct must imply bb_context"
-    # Every feedback channel off <=> this is the control arm.
-    assert (not hres and not a_d and not q_d) == (arm in ("no", "bbctx"))
+    # Every old feedback channel off <=> this has no old feedback (but may have new B->S channels).
+    assert (not hres and not a_d and not q_d) == (arm in ("no", "bbctx", "a-bs", "q-bs"))
+
+
+def test_bs_arms_present_and_default_off():
+    from pxdesign_train.configs.configs_train import SC_ABLATION_ARMS, training_configs
+    assert training_configs["sidechain"]["a_bs_concat"] is False
+    assert training_configs["sidechain"]["q_bs"] is False
+    assert "a-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["a-bs"]["a_bs_concat"] is True
+    assert "q-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["q-bs"]["q_bs"] is True

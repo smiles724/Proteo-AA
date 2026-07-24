@@ -285,10 +285,25 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_n_blocks = n_blocks
             self.sc_n_heads = n_heads
             self.sc_n_cross_blocks = n_cross_blocks
+            # ---- B<->S interconnection (sidechain.a_bs_concat / q_bs) ----
+            # Read-only forward-input fusions: S_phi consumes the Backbone
+            # Module's features going INTO this round's call. Independent of
+            # the feedback channels (a_direct / q_direct) below, which instead
+            # write B's features FROM S_phi's output in the coevolution
+            # refinement pass. c_q (the Backbone Module's per-atom width) is
+            # needed here — a SideChainModule constructor arg — computed the
+            # same way the q_direct branch below computes its own copy.
+            self.sc_a_bs_concat = bool(getattr(sc_cfg, "a_bs_concat", False)) if sc_cfg is not None else False
+            self.sc_q_bs = bool(getattr(sc_cfg, "q_bs", False)) if sc_cfg is not None else False
+            c_q = int(
+                getattr(self.diffusion_module.atom_attention_encoder, "c_atom", None)
+                or 128
+            )
             self.sidechain_module = SideChainModule(
                 c_res=self.sc_c_res, c_atom=c_atom, n_type=vocab_size,
                 n_blocks=n_blocks, n_heads=n_heads, n_cross_blocks=n_cross_blocks,
                 ff_mult=ff_mult, trunk_grad_scale=sc_grad_scale,
+                a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
             )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
 
@@ -360,6 +375,13 @@ class ProtenixDesignTrain(ProtenixDesign):
                     "14-slot axis to produce backbone-atom features); enabling it."
                 )
                 self.sc_bb_context = True
+            if self.sc_q_bs and not self.sc_bb_context:
+                logging.getLogger(__name__).info(
+                    "sidechain.q_bs=True implies bb_context=True (S_phi needs the "
+                    "14-slot axis to receive the Backbone Module's q for those "
+                    "atoms); enabling it."
+                )
+                self.sc_bb_context = True
             if self.sc_q_direct and not self.enable_coevolution:
                 logging.getLogger(__name__).warning(
                     "sidechain.q_direct=True but enable_coevolution=False; there is "
@@ -380,6 +402,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.enable_coevolution = False
             self.sc_a_direct = False
             self.sc_q_direct = False
+            self.sc_a_bs_concat = False
+            self.sc_q_bs = False
 
         # One hook, two jobs (capture for the AA head, replace for a_direct).
         # A forward hook that returns non-None REPLACES the module's output, which
@@ -391,11 +415,15 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.diffusion_module.layernorm_a.register_forward_hook(
                 self._a_token_forward_hook
             )
-        if self.sc_q_direct:
-            # READ side: q_skip is the AtomAttentionEncoder's 2nd output.
+        if self.sc_q_direct or self.sc_q_bs:
+            # READ side: q_skip is the AtomAttentionEncoder's 2nd output. Shared by
+            # q_direct (S->B feedback, consumed in the refinement pass's decoder
+            # pre-hook below) and q_bs (B->S forward input, gathered at the
+            # side-chain forward call site into bb_q).
             self.diffusion_module.atom_attention_encoder.register_forward_hook(
                 self._q_skip_encoder_hook
             )
+        if self.sc_q_direct:
             # WRITE side: a forward-PRE-hook with_kwargs=True may return a replaced
             # (args, kwargs), which is how q'_bb becomes the q_skip the atom decoder
             # actually consumes. No submodule edit anywhere.
@@ -1237,12 +1265,16 @@ class ProtenixDesignTrain(ProtenixDesign):
             # rule; NO GT side-chain coordinate enters. Both the coords and the frame are
             # stop-grad, so the side-chain objective cannot nudge the backbone through
             # this new path (it reaches the backbone only through q'_bb, on purpose).
-            # We deliberately do NOT feed q_bb (the Backbone Module's own atom features)
-            # into S_phi: it would need a new S_phi input channel (module.py), and the
-            # backbone signal already reaches S_phi through h_res. `_q_skip_cache` is the
-            # read-side handle if we later want that arm.
+            # By default we do NOT feed q_bb (the Backbone Module's own atom
+            # features) into S_phi — the backbone signal already reaches S_phi
+            # through h_res. `sidechain.q_bs` opts into that extra arm: it
+            # gathers this round's q_skip (cached read-side by
+            # `_q_skip_encoder_hook`) at the SAME four backbone-atom indices and
+            # feeds it in as `bb_q` below, ablation-gated and independent of
+            # q_direct's S->B write-back.
             bb_local = sc_res_mask = None
             q_bb_idx = None
+            bb_q = None
             if getattr(self, "sc_bb_context", False) and fR is not None and ft is not None:
                 idx4 = input_feature_dict.get("sc_bb_atom_idx")
                 if idx4 is not None:
@@ -1288,9 +1320,39 @@ class ProtenixDesignTrain(ProtenixDesign):
                         bb_local = (bb_local * v4).to(h_res.dtype)
                         sc_res_mask = valid4[..., :3].all(dim=-1)   # frame atoms present
 
+                    # ---- B->S gather (sidechain.q_bs): bb_q from this round's cached
+                    # encoder q_skip, at the SAME (N, CA, C, O) atom indices used for
+                    # bb_local above. Read-only — no scatter-back (that is q_direct's
+                    # job, in the LATER refinement pass's decoder pre-hook). Mirrors
+                    # the gather portion of `_fuse_q_backbone_atoms`: gather rows by
+                    # bb_idx.clamp_min(0), zero out where bb_idx < 0. `idx4` here is
+                    # already tiled to THIS round's flattened batch B (same tiling
+                    # `_fuse_q_backbone_atoms` does per-sigma via its own broadcast),
+                    # so no separate re-tiling from `q_bb_idx` is needed.
+                    if getattr(self, "sc_q_bs", False) and self._q_skip_cache is not None:
+                        q_skip_c = self._q_skip_cache
+                        n_atom_q, c_q_ = q_skip_c.shape[-2], q_skip_c.shape[-1]
+                        q_flat = q_skip_c.reshape(-1, n_atom_q, c_q_).to(h_res.device)
+                        if q_flat.shape[0] == B:
+                            idxq = idx4.reshape(B, L4 * 4)
+                            validq = idxq >= 0
+                            gather_idx = idxq.clamp_min(0).unsqueeze(-1).expand(-1, -1, c_q_)
+                            bb_q = q_flat.gather(1, gather_idx) * validq.unsqueeze(-1).to(q_flat.dtype)
+                            bb_q = bb_q.reshape(B, L4, 4, c_q_).to(h_res.dtype)
+                        elif not getattr(self, "_warned_q_bs_shape", False):
+                            logging.getLogger(__name__).warning(
+                                "sidechain.q_bs=True but q_skip_cache batch %d != "
+                                "side-chain batch %d (likely sc_per_sigma=False) — "
+                                "skipping the bb_q gather for this call.",
+                                q_flat.shape[0], B,
+                            )
+                            self._warned_q_bs_shape = True
+
             sc_kwargs = {}
             if bb_local is not None:
                 sc_kwargs = {"bb_local": bb_local, "res_mask": sc_res_mask}
+            if bb_q is not None:
+                sc_kwargs["bb_q"] = bb_q
             sc_out = self.sidechain_module(
                 h_res, aa_logits, sc_ids, sc_mask, noisy, t, ca_coords=ca_for_module,
                 frame_R=(fR.detach() if _fa else None),

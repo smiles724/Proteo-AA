@@ -89,3 +89,20 @@ def test_q_bs_backbone_q_reaches_slots_and_off_is_baseline():
         y_a, *_ = off(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_local=bb_local, bb_q=bb_q_near)
         y_b, *_ = off(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_local=bb_local, bb_q=bb_q_far)
     assert torch.allclose(y_a, y_b, atol=1e-6), "q_bs off must ignore bb_q entirely"
+
+
+def test_model_exposes_bs_flags_default_off():
+    import copy
+    from protenix.config.config import parse_configs
+    from pxdesign_train.configs.configs_train import training_configs
+    from pxdesign_train.model import ProtenixDesignTrain
+
+    t = copy.deepcopy(training_configs)
+    t["enable_sidechain"] = True
+    t["sidechain"]["q_bs"] = True
+    t["sidechain"]["a_bs_concat"] = True
+    cfg = parse_configs(t, arg_str="")
+    cfg.load_strict = False
+    m = ProtenixDesignTrain(cfg)
+    assert m.sc_a_bs_concat is True and m.sc_q_bs is True
+    assert m.sc_bb_context is True, "q_bs must imply bb_context (14-slot)"

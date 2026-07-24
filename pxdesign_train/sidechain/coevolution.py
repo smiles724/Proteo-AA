@@ -214,3 +214,36 @@ class QAtomFusion(nn.Module):
         s = self.sc_proj(q_sc_bb.to(q_bb.dtype))
         delta = self.mlp(self.ln(torch.cat([q_bb, s], dim=-1)))
         return q_bb + delta
+
+
+class QAtomBSFusion(nn.Module):
+    """B->S atom-level fusion (point 3): seed the side-chain's 4 backbone slots
+    with the Backbone Module's q for those same 4 atoms, symmetric to QAtomFusion.
+
+        bb_slot' = bb_slot + MLP(LayerNorm(concat(bb_slot, W . bb_q)))
+
+    W projects the backbone q dim (c_q, ~128) to the side-chain c_atom (768).
+    Zero-init output layer -> identity at step 0. Causally free: the backbone runs
+    before the side chain, so bb_q (first-pass q_skip) is available -- no
+    "after first-round" constraint (unlike the S->B QAtomFusion).
+    """
+
+    def __init__(self, c_atom: int, c_q: int, c_hidden: Optional[int] = None, zero_init: bool = True) -> None:
+        super().__init__()
+        c_hidden = c_hidden or c_atom
+        self.bb_proj = nn.Linear(c_q, c_atom)
+        self.ln = nn.LayerNorm(2 * c_atom)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * c_atom, c_hidden),
+            nn.ReLU(),
+            nn.Linear(c_hidden, c_atom),
+        )
+        if zero_init:
+            nn.init.zeros_(self.mlp[-1].weight)
+            nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, bb_slot: torch.Tensor, bb_q: torch.Tensor) -> torch.Tensor:
+        """bb_slot [..., L, 4, c_atom], bb_q [..., L, 4, c_q] -> [..., L, 4, c_atom]."""
+        s = self.bb_proj(bb_q.to(bb_slot.dtype))
+        delta = self.mlp(self.ln(torch.cat([bb_slot, s], dim=-1)))
+        return bb_slot + delta

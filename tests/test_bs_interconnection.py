@@ -53,3 +53,17 @@ def test_a_bs_concat_changes_output_when_armed():
         on.a_bs_concat = False
         y_off, _ = on(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca)
     assert not torch.allclose(y_on, y_off, atol=1e-6), "armed a_bs_concat must change the output"
+
+
+from pxdesign_train.sidechain.coevolution import QAtomBSFusion
+
+
+def test_qatombsfusion_zero_init_identity_then_reaches_output():
+    m = QAtomBSFusion(c_atom=16, c_q=8)
+    bb_slot = torch.randn(1, 3, 4, 16)
+    bb_q = torch.randn(1, 3, 4, 8)
+    assert torch.allclose(m(bb_slot, bb_q), bb_slot, atol=1e-6), "zero-init identity"
+    torch.nn.init.normal_(m.mlp[-1].weight, std=0.1)
+    out_a = m(bb_slot, torch.zeros(1, 3, 4, 8))
+    out_b = m(bb_slot, torch.ones(1, 3, 4, 8))
+    assert not torch.allclose(out_a, out_b), "backbone q must influence the slots when armed"

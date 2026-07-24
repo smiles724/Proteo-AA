@@ -118,6 +118,38 @@ class ATokenFusion(nn.Module):
         return a_bb + delta
 
 
+class AResBSConcat(nn.Module):
+    """B->S residue-level fusion (point 2): combine the side-chain's all-atom
+    residue representation (pooled over the 14-atom axis) with the backbone's
+    projected a_token, symmetric to ATokenFusion.
+
+        pooled' = pooled + MLP(LayerNorm(concat(pooled, a_token)))
+
+    Both operands are already c_atom-wide (pooled is the side-chain atom features
+    pooled per residue; a_token is w_res(h_res)), so no projection is needed. The
+    output layer is zero-initialised: at step 0 this is an exact identity, so
+    enabling the arm cannot perturb a pretrained model.
+    """
+
+    def __init__(self, c_atom: int, c_hidden: Optional[int] = None, zero_init: bool = True) -> None:
+        super().__init__()
+        c_hidden = c_hidden or c_atom
+        self.ln = nn.LayerNorm(2 * c_atom)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * c_atom, c_hidden),
+            nn.ReLU(),
+            nn.Linear(c_hidden, c_atom),
+        )
+        if zero_init:
+            nn.init.zeros_(self.mlp[-1].weight)
+            nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, pooled: torch.Tensor, a_token: torch.Tensor) -> torch.Tensor:
+        """pooled, a_token: [..., L, c_atom] -> [..., L, c_atom]. Pure function."""
+        delta = self.mlp(self.ln(torch.cat([pooled, a_token.to(pooled.dtype)], dim=-1)))
+        return pooled + delta
+
+
 class QAtomFusion(nn.Module):
     """DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
 

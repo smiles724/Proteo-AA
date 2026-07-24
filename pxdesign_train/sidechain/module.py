@@ -31,7 +31,7 @@ from pxdesign_train.sidechain.frames import to_global
 import torch.nn.functional as F
 
 from pxdesign_train.heads import sinusoidal_time_embedding
-from pxdesign_train.sidechain.coevolution import AResBSConcat
+from pxdesign_train.sidechain.coevolution import AResBSConcat, QAtomBSFusion
 from pxdesign_train.sidechain.instantiate import (
     ATOM_VOCAB_SIZE,
     BACKBONE_ATOM_NAME_IDS,
@@ -104,6 +104,8 @@ class SideChainModule(nn.Module):
         ff_mult: int = 2,
         trunk_grad_scale: float = 1.0,
         a_bs_concat: bool = False,
+        q_bs: bool = False,
+        c_q: int = 128,
     ) -> None:
         super().__init__()
         if c_atom % n_heads != 0:
@@ -132,6 +134,8 @@ class SideChainModule(nn.Module):
         self.cross_res = self.cross_res_blocks[0]
         self.a_bs_concat = bool(a_bs_concat)
         self.a_bs_concat_fusion = AResBSConcat(c_atom) if self.a_bs_concat else None
+        self.q_bs = bool(q_bs)
+        self.q_bs_fusion = QAtomBSFusion(c_atom, c_q) if self.q_bs else None
         self.out_ln = nn.LayerNorm(c_atom)
         self.out = nn.Linear(c_atom, 3)
 
@@ -155,6 +159,7 @@ class SideChainModule(nn.Module):
         bb_local: Optional[torch.Tensor] = None,   # [B, L, 4, 3] N,CA,C,O in the LOCAL frame
         res_mask: Optional[torch.Tensor] = None,   # [B, L] bool — residue exists
         ctx_mask: Optional[torch.Tensor] = None,   # [B, L] bool — context (receptor/motif) token
+        bb_q: Optional[torch.Tensor] = None,       # [B, L, 4, c_q] backbone q from Backbone Module
     ):
         """One-step side-chain denoise.
 
@@ -211,6 +216,12 @@ class SideChainModule(nn.Module):
         atom_feat = self.atom_embed(ids)                   # [B, L, A, c_atom]
         xyz_feat = self.w_xyz(coords)                      # [B, L, A, c_atom]
         u = atom_feat + res_feat + type_feat + xyz_feat + te[:, None, None, :]
+
+        if self.q_bs and self.q_bs_fusion is not None and bb_q is not None and n_bb > 0:
+            # point 3: seed the backbone slots with the Backbone Module's q for those atoms.
+            bb_slot = u[:, :, :n_bb, :]
+            fused = self.q_bs_fusion(bb_slot, bb_q.to(u.dtype))
+            u = torch.cat([fused, u[:, :, n_bb:, :]], dim=2)
 
         # Intra-residue attention: flatten (B*L) as the batch, A as sequence.
         # With backbone slots present GLY (0 side-chain atoms) still has 4 valid

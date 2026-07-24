@@ -1,4 +1,7 @@
 import torch
+import torch.nn as nn
+from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
+
 from pxdesign_train.sidechain.coevolution import AResBSConcat
 from pxdesign_train.sidechain.module import SideChainModule
 
@@ -106,3 +109,141 @@ def test_model_exposes_bs_flags_default_off():
     m = ProtenixDesignTrain(cfg)
     assert m.sc_a_bs_concat is True and m.sc_q_bs is True
     assert m.sc_bb_context is True, "q_bs must imply bb_context (14-slot)"
+
+
+# ----------------------------------------------------------------------
+# q_bs READ-path cache must survive activation-checkpoint recomputation.
+#
+# `_q_skip_encoder_hook` is a plain forward hook (not a pre-hook, not gated on
+# a flag): it just caches `out[1]` unconditionally every time the atom
+# attention encoder runs, and returns None so the encoder's output is never
+# replaced. Unlike the q_direct WRITE path (test_q_checkpoint_recompute.py),
+# this hook does not inject anything into the checkpointed call, so it cannot
+# desync the checkpoint's saved-tensor count. What it must still get right:
+# the backbone is wrapped in `torch.utils.checkpoint`, whose backward RE-RUNS
+# the encoder — re-firing this hook — so `_q_skip_cache` gets overwritten a
+# second time, AFTER the side-chain module has already consumed it during the
+# forward. That overwrite must reproduce the same value the forward produced
+# (deterministic recompute), not silently diverge, or leave the cache in an
+# inconsistent state for whatever later reads it.
+# ----------------------------------------------------------------------
+
+from pxdesign_train.model import ProtenixDesignTrain
+
+
+class _Encoder(nn.Module):
+    """Stand-in for Protenix's AtomAttentionEncoder: returns
+    (a_token, q_skip, c_skip, p_skip), the tuple `_q_skip_encoder_hook` reads.
+    """
+
+    def __init__(self, c: int) -> None:
+        super().__init__()
+        self.lin = nn.Linear(c, c)
+
+    def forward(self, x):
+        q_skip = self.lin(x)
+        a_token = q_skip.sum(dim=-2)
+        c_skip = torch.zeros_like(q_skip)
+        p_skip = torch.zeros_like(q_skip)
+        return a_token, q_skip, c_skip, p_skip
+
+
+class _CacheModel:
+    """Minimal carrier for the real encoder hook (no Protenix weights needed)."""
+
+    _q_skip_encoder_hook = ProtenixDesignTrain._q_skip_encoder_hook
+
+    def __init__(self) -> None:
+        self._q_skip_cache = None
+
+
+def test_q_skip_cache_populated_by_checkpointed_forward():
+    """Under PXDesign's actual default checkpoint settings
+    (`use_reentrant=False`, early-stop ON — see the next test for why that
+    matters), the side-chain gather reads `_q_skip_cache` synchronously
+    during the forward. Confirm it is populated with exactly that forward's
+    q_skip, and that running backward afterwards (whatever it does to the
+    cache) never leaves it diverged from what was already consumed."""
+    m = _CacheModel()
+    enc = _Encoder(6)
+    enc.register_forward_hook(m._q_skip_encoder_hook)
+
+    x = torch.randn(2, 4, 6, requires_grad=True)
+    out = checkpoint(enc, x, use_reentrant=False)
+    a_token, q_skip, _c_skip, _p_skip = out
+
+    # This is the moment the side-chain gather (point-3 READ path) would
+    # consume `model._q_skip_cache` — synchronously, during the forward.
+    forward_cache = m._q_skip_cache
+    assert forward_cache is not None, "encoder hook never populated the cache"
+    assert torch.equal(forward_cache, q_skip), (
+        "cache read during the forward must be exactly the forward's q_skip"
+    )
+    forward_snapshot = forward_cache.clone()
+
+    (a_token.sum() + q_skip.sum()).backward()  # must not raise
+
+    assert m._q_skip_cache is not None
+    assert torch.allclose(m._q_skip_cache, forward_snapshot, atol=1e-6), (
+        "backward left the cache diverged from the value the side-chain "
+        "gather actually consumed during the forward"
+    )
+
+
+def test_q_skip_cache_matches_forward_even_when_recompute_genuinely_refires():
+    """Guard the guard, and the real point of this file.
+
+    `_q_skip_encoder_hook` is a plain forward POST-hook. Empirically (verified
+    above by construction), PyTorch's non-reentrant checkpoint's default
+    "early stop" optimization means backward often does NOT re-run the
+    encoder all the way to its `return` — so `register_forward_hook`
+    callbacks frequently do *not* fire a second time, unlike the q_direct
+    WRITE path's forward PRE-hook (`test_q_checkpoint_recompute.py`), which
+    always fires because pre-hooks run before any op (hence before early-stop
+    can possibly trigger). That makes the previous test structurally unable
+    to prove the cache survives a genuine second write.
+
+    `torch.utils.checkpoint.set_checkpoint_early_stop(False)` forces the
+    backward recompute to run the encoder to completion, guaranteeing the
+    post-hook fires again. We use it here to prove: IF the hook ever does
+    refire on recompute (this setting, a future encoder shape, or a future
+    torch version), the value it writes is byte-identical to the forward's
+    (deterministic recompute) — so `_q_skip_cache` can never end up holding
+    something the side-chain gather never actually saw.
+    """
+    calls = []
+    m = _CacheModel()
+    enc = _Encoder(6)
+    enc.register_forward_hook(lambda *_a, **_k: calls.append(1))
+    enc.register_forward_hook(m._q_skip_encoder_hook)
+
+    x = torch.randn(2, 4, 6, requires_grad=True)
+    with set_checkpoint_early_stop(False):
+        out = checkpoint(enc, x, use_reentrant=False)
+    a_token, q_skip, _c_skip, _p_skip = out
+    assert len(calls) == 1, "checkpoint must defer recomputation to backward"
+    forward_snapshot = m._q_skip_cache.clone()
+
+    (a_token.sum() + q_skip.sum()).backward()
+
+    assert len(calls) == 2, (
+        "recompute did not actually re-run the encoder -- this test is "
+        "vacuous and not exercising what it claims to"
+    )
+    assert torch.allclose(m._q_skip_cache, forward_snapshot, atol=1e-6), (
+        "recompute re-fired the hook with a q_skip that diverges from the "
+        "forward pass -- the cache would silently corrupt for a later reader"
+    )
+
+
+def test_q_skip_cache_unaffected_when_encoder_output_not_tuple():
+    """Defensive: the hook only touches the cache for the (a, q, c, p) shape it
+    documents; anything else must leave a pre-existing cache alone (not crash,
+    not clobber it with garbage)."""
+    m = _CacheModel()
+    m._q_skip_cache = torch.ones(1)
+    result = m._q_skip_encoder_hook(None, None, torch.zeros(3))
+    assert result is None
+    assert torch.equal(m._q_skip_cache, torch.ones(1)), (
+        "a non-tuple encoder output must not disturb the existing cache"
+    )

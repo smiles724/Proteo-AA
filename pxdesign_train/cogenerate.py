@@ -432,6 +432,31 @@ def cogenerate(
                     bb4 = bb4 * v4[..., None].to(bb4.dtype)
                     bb_local = to_local(bb4, R.float(), t.float()) * v4[..., None]
                     sc_kwargs = {"bb_local": bb_local[None].to(dtype)}
+                    # B->S gather (sidechain.q_bs): bb_q from THIS ROUND's cached
+                    # encoder q_skip (model._q_skip_cache, populated by the
+                    # `_q_skip_encoder_hook` during the `model.diffusion_module(...)`
+                    # call above), at the SAME (N, CA, C, O) atom indices as bb_local.
+                    # Mirrors the training gather in model.py (the sc_q_bs block,
+                    # ~line 1332): gather rows by q_idx_c.clamp_min(0), zero out
+                    # where q_idx_c < 0. Read-only — no scatter-back (that is
+                    # q_direct's job, via the decoder pre-hook on the NEXT step's
+                    # refinement pass).
+                    if getattr(model, "sc_q_bs", False) and model._q_skip_cache is not None:
+                        q_skip_c = model._q_skip_cache
+                        n_atom_q, c_q_ = q_skip_c.shape[-2], q_skip_c.shape[-1]
+                        q_flat = q_skip_c.reshape(-1, n_atom_q, c_q_).to(device)
+                        if q_flat.shape[0] == 1 and int(q_idx_c.max()) < n_atom_q:
+                            bb_q = q_flat[0][q_idx_c.clamp_min(0)].float()  # [Nc, 4, c_q]
+                            bb_q = bb_q * v4[..., None].to(bb_q.dtype)
+                            sc_kwargs["bb_q"] = bb_q[None].to(dtype)
+                        elif not getattr(model, "_warned_q_bs_shape", False):
+                            logging.getLogger(__name__).warning(
+                                "cogenerate: sidechain.q_bs=True but q_skip_cache "
+                                "batch %d != 1 (or atom index out of range) — "
+                                "skipping the bb_q gather for this step.",
+                                q_flat.shape[0],
+                            )
+                            model._warned_q_bs_shape = True
                 # CONTEXT (sidechain.context_aware): training lets S_phi's cross-residue
                 # attention key on the receptor / motif / ligand tokens. Sampling MUST do
                 # the same or the trained module runs blind to the thing it packs against.
@@ -475,6 +500,15 @@ def cogenerate(
                             # Without res_mask the padded rows would get 4 VALID backbone
                             # slots, making them look like real side-chain residues.
                             sc_kwargs["res_mask"] = ctx_e.logical_not()
+                        if "bb_q" in sc_kwargs:
+                            # bb_q is consumed over the FULL L axis (module.py's
+                            # `u[:, :, :n_bb, :]`), so it needs the same context-row
+                            # padding as bb_local above, or the two tensors' L axes
+                            # would disagree.
+                            _bq = sc_kwargs["bb_q"][0]
+                            sc_kwargs["bb_q"] = torch.cat(
+                                [_bq, _bq.new_zeros(Nx, _bq.shape[-2], _bq.shape[-1])], 0
+                            )[None]
                 sc_out = model.sidechain_module(
                     h_e, l_e, ids_e, m_e, noisy_e,
                     sc_t, ca_coords=ca_e,

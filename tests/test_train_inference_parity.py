@@ -59,6 +59,7 @@ TRAIN_ONLY = {
     # changes S_phi's forward — are not radius-filtered in either path.
     "context_radius": "loss-side only: bounds the clash/contact atom set, no loss at inference",
     "context_max_atoms": "loss-side only: memory cap on the clash/contact atom set",
+    "a_bs_concat": "internal to SideChainModule.forward (pooled + h_proj); no new sampler input",
 }
 
 

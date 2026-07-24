@@ -31,6 +31,7 @@ from pxdesign_train.sidechain.frames import to_global
 import torch.nn.functional as F
 
 from pxdesign_train.heads import sinusoidal_time_embedding
+from pxdesign_train.sidechain.coevolution import AResBSConcat
 from pxdesign_train.sidechain.instantiate import (
     ATOM_VOCAB_SIZE,
     BACKBONE_ATOM_NAME_IDS,
@@ -102,6 +103,7 @@ class SideChainModule(nn.Module):
         n_cross_blocks: int = 1,
         ff_mult: int = 2,
         trunk_grad_scale: float = 1.0,
+        a_bs_concat: bool = False,
     ) -> None:
         super().__init__()
         if c_atom % n_heads != 0:
@@ -128,6 +130,8 @@ class SideChainModule(nn.Module):
         ])
         # Backwards-compatible debug/test handle for the first cross-residue block.
         self.cross_res = self.cross_res_blocks[0]
+        self.a_bs_concat = bool(a_bs_concat)
+        self.a_bs_concat_fusion = AResBSConcat(c_atom) if self.a_bs_concat else None
         self.out_ln = nn.LayerNorm(c_atom)
         self.out = nn.Linear(c_atom, 3)
 
@@ -242,6 +246,10 @@ class SideChainModule(nn.Module):
                 ctx_mask = ctx_mask.to(has_sc.device).bool()
                 pooled = torch.where(has_sc[..., None], pooled, h_proj.to(pooled.dtype))
                 keys_mask = has_sc | ctx_mask
+            if self.a_bs_concat and self.a_bs_concat_fusion is not None:
+                # point 2: fuse the backbone a_token (h_proj) into the side-chain's all-atom
+                # residue representation (pooled), symmetric to a-direct on the S→B side.
+                pooled = self.a_bs_concat_fusion(pooled, h_proj.to(pooled.dtype))
             for cross_block in self.cross_res_blocks:
                 pooled = cross_block(pooled, ca_coords, keys_mask)    # [B,L,c]
             atom_feats = atom_feats + pooled[:, :, None, :]           # broadcast back

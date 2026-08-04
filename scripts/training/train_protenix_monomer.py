@@ -326,9 +326,8 @@ def build_source_components(
         aa_mask_max_prob=float(args.aa_mask_max_prob),
         compute_sidechain=not args.disable_sidechain,
         # Keep the design/binder region backbone-only for every backbone or AA
-        # objective. This is independent of whether the side-chain module is
-        # enabled: otherwise diffusion_internal a_token can see noisy GT
-        # side-chain coordinates when the AA head is trained.
+        # objective. This remains useful for the coordinate trunk even though
+        # the default AA encoder itself gathers only N/CA/C/O predictions.
         backbone_only_binder=True,
         max_crop_retries=int(args.max_crop_retries),
         seed=int(args.seed),
@@ -627,9 +626,8 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_aa_post = 0.0
     elif args.training_stage == "aa_head_warmup":
         # Train a structure-conditioned AA predictor on top of a frozen
-        # stage-1 backbone.  The coordinate forward pass is still required to
-        # produce diffusion_internal token features, but only the residue-type
-        # head receives optimizer updates.
+        # stage-1 backbone. The coordinate forward pass produces predicted
+        # N/CA/C/O geometry; only the geometry encoder and AA head are updated.
         configs.loss.weight_mse = 0.0
         configs.loss.weight_lddt = 0.0
         configs.loss.weight_disto = 0.0
@@ -643,6 +641,7 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_sc_global = 0.0
         configs.residue_type.trunk_grad_scale = 0.0
         configs.training.trainable_param_keywords = [
+            "backbone_aa_encoder.",
             "design_residue_type_head.",
         ]
         configs.training.ema_decay = 0.0
@@ -827,8 +826,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--aa-mask-max-prob", type=float, default=1.0)
     p.add_argument(
         "--aa-input-source",
-        default="diffusion_internal",
-        choices=["s_inputs", "diffusion_internal"],
+        default="backbone_geometry",
+        choices=["backbone_geometry", "s_inputs", "diffusion_internal"],
     )
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
     p.add_argument(

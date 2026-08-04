@@ -66,9 +66,9 @@ class _SpySideChain(nn.Module):
 class _FakeModel(nn.Module):
     def __init__(self, template_init=True, sigma_T=0.3,
                  local_coord_input=True, frame_aware_head=True,
-                 context_aware=False):
+                 context_aware=False, aa_input_source="diffusion_internal"):
         super().__init__()
-        self.aa_input_source = "diffusion_internal"
+        self.aa_input_source = aa_input_source
         self.enable_sidechain = True
         self.enable_coevolution = True
         self.sc_init_sigma = 1.0
@@ -80,6 +80,7 @@ class _FakeModel(nn.Module):
         self.diffusion_module = _FakeDiffusion()
         self.sidechain_module = _SpySideChain()
         self._a_token_cache = torch.randn(1, N_TOKEN, C)
+        self.geometry_calls = []
 
     def get_condition_embedding(self, feat, chunk_size=None):
         s = torch.zeros(1, N_TOKEN, C)
@@ -92,6 +93,10 @@ class _FakeModel(nn.Module):
 
     def _reduce_a_token(self, a, sigma):
         return a
+
+    def _backbone_geometry_repr(self, coordinates, feat, sigma):
+        self.geometry_calls.append((coordinates.detach().clone(), sigma.detach().clone()))
+        return self._a_token_cache
 
     def design_residue_type_head(self, a_red, aa_t=None):
         logits = torch.zeros(N_TOKEN, 20)
@@ -162,6 +167,15 @@ def _run(monkeypatch, with_bb_index=False, **model_kw):
     out = cogenerate(model, _feat(with_bb_index), N_step=2,
                      sidechain_cycle=True, sc_start_frac=0.5)
     return model, calls, out
+
+
+def test_sampler_uses_restricted_geometry_source(monkeypatch):
+    import protenix.model.protenix as pxm
+    monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
+    model = _FakeModel(aa_input_source="backbone_geometry")
+    out = cogenerate(model, _feat(), N_step=2, sidechain_cycle=False)
+    assert model.geometry_calls, "geometry AA representation was never evaluated"
+    assert torch.isfinite(out["coordinate"]).all()
 
 
 def test_sampler_gives_sphi_the_receptor_as_context_keys(monkeypatch):

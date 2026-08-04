@@ -20,6 +20,7 @@ import torch
 from pxdesign.model.pxdesign import ProtenixDesign
 from protenix.model.protenix import update_input_feature_dict
 
+from pxdesign_train.backbone_aa import BackboneGeometryEncoder
 from pxdesign_train.generator import TrainingNoiseSampler, sample_diffusion_training
 from pxdesign_train.heads import (
     DesignDiffusionDistogramHead,
@@ -120,11 +121,14 @@ class ProtenixDesignTrain(ProtenixDesign):
             vocab_size = getattr(res_cfg, "vocab_size", 20) if res_cfg is not None else 20
             use_time = bool(getattr(res_cfg, "use_time_embedding", True)) if res_cfg is not None else True
             # input_source selects which per-token representation the AA head reads:
-            #   "s_inputs"          — outer conditioning embedding (449), structure-blind, sigma-free (default)
+            #   "backbone_geometry" — rigid-invariant predicted N/CA/C/O geometry
+            #                         only; no atom/reference/token metadata (default)
+            #   "s_inputs"          — outer conditioning embedding (449), structure-blind, sigma-free
             #   "diffusion_internal"— a_token captured from DiffusionModule.layernorm_a
-            #                         (c_token), structure- and sigma-aware
+            #                         (c_token), retained as a leakage-prone ablation
             self.aa_input_source = (
-                getattr(res_cfg, "input_source", "s_inputs") if res_cfg is not None else "s_inputs"
+                getattr(res_cfg, "input_source", "backbone_geometry")
+                if res_cfg is not None else "backbone_geometry"
             )
             # diffusion_internal hardening knobs:
             #   trunk_grad_scale: scale AA-loss gradient flowing into the coord
@@ -143,10 +147,23 @@ class ProtenixDesignTrain(ProtenixDesign):
                 c_in = getattr(self.diffusion_module, "c_token", None) or getattr(
                     configs, "c_token", 768
                 )
-            else:
+            elif self.aa_input_source == "backbone_geometry":
+                c_in = int(getattr(res_cfg, "geometry_dim", 384))
+                self.backbone_aa_encoder = BackboneGeometryEncoder(
+                    c_out=c_in,
+                    c_hidden=int(getattr(res_cfg, "geometry_hidden_dim", 384)),
+                    n_blocks=int(getattr(res_cfg, "geometry_n_blocks", 3)),
+                    sigma_dim=int(getattr(res_cfg, "geometry_sigma_dim", 16)),
+                    spatial_neighbors=int(
+                        getattr(res_cfg, "geometry_spatial_neighbors", 32)
+                    ),
+                )
+            elif self.aa_input_source == "s_inputs":
                 c_in = getattr(configs, "c_s_inputs", None)
                 if c_in is None:
                     c_in = getattr(getattr(configs, "model", object()), "c_s_inputs", 449)
+            else:
+                raise ValueError(f"Unknown residue_type.input_source={self.aa_input_source!r}")
             self.design_residue_type_head = DesignResidueTypeHead(
                 c_s=c_in, no_bins=vocab_size, use_time=use_time,
             )
@@ -192,8 +209,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 "on the residue-type logits and reads the same h_res=a_token)."
             )
             sc_cfg = getattr(configs, "sidechain", None)
-            # h_res dim == the representation the AA head reads (a_token c_token
-            # for diffusion_internal, else s_inputs dim).
+            # h_res dim == the representation the AA head reads.
             self.sc_c_res = c_in
             self.sc_init_sigma = float(getattr(sc_cfg, "init_sigma", 1.0)) if sc_cfg is not None else 1.0
             # Overleaf paragraph 221: template-anchored init. y_T = mu_ideal[a] + sigma_T eps,
@@ -639,6 +655,27 @@ class ProtenixDesignTrain(ProtenixDesign):
             return a.gather(dim=-3, index=idx_e).squeeze(-3)
         return a.mean(dim=-3)
 
+    def _backbone_geometry_repr(
+        self,
+        coordinates: torch.Tensor,
+        input_feature_dict: dict[str, Any],
+        sigma: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Encode the AA head's deliberately restricted coordinate interface."""
+        bb_idx = input_feature_dict.get("aa_bb_atom_idx")
+        if bb_idx is None:
+            raise KeyError(
+                "aa_input_source='backbone_geometry' requires aa_bb_atom_idx "
+                "(per-token N/CA/C/O gather indices from DesignFeaturizer)"
+            )
+        return self.backbone_aa_encoder(
+            coordinates,
+            bb_idx,
+            asym_id=input_feature_dict.get("asym_id"),
+            residue_index=input_feature_dict.get("residue_index"),
+            sigma=sigma,
+        )
+
     def _template_phi_psi(
         self, input_feature_dict, out, n_rows: int, n_token: int, use_predicted: bool
     ):
@@ -821,8 +858,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             "sigma": sigma,
             # h_res candidate for the future side-chain / h_res interface.
             # Overwritten below with the actual representation the AA head reads
-            # (structure-aware a_token under diffusion_internal); s_inputs is only
-            # the fallback when the residue-type head is disabled.
+            # (restricted backbone geometry by default); s_inputs is only the
+            # fallback when the residue-type head is disabled.
             "h_res_candidate": s_inputs,
             "z_pair_candidate": z,
         }
@@ -864,13 +901,28 @@ class ProtenixDesignTrain(ProtenixDesign):
                     # row with out["sigma"] [.., N_sample] and out["aa_logits"].
                     out["h_res_sigma"] = a_full
                     out["a_token_shape"] = torch.tensor(list(a.shape))
+            elif self.aa_input_source == "backbone_geometry":
+                # Scale only the gradient entering the frozen/shared coordinate
+                # trunk. The geometry encoder itself remains trainable at g=0.
+                g = self.aa_trunk_grad_scale
+                x_for_aa = (
+                    x_denoised
+                    if g == 1.0
+                    else g * x_denoised + (1.0 - g) * x_denoised.detach()
+                )
+                a_full = self._backbone_geometry_repr(
+                    x_for_aa, input_feature_dict, sigma
+                ).to(s_inputs.dtype)
+                token_repr = self._reduce_a_token(a_full, sigma)
+                out["h_res_sigma"] = a_full
+                out["backbone_geometry_shape"] = torch.tensor(list(a_full.shape))
             # The representation h_res / S_phi read (one coherent state). For the
             # s_inputs baseline this is just s_inputs (no per-sample axis exists).
             out["h_res_candidate"] = token_repr
             # Reduced logits for S_phi / type routing (single [..., N_token, 20]).
             out["aa_logits_reduced"] = self.design_residue_type_head(token_repr, aa_t=aa_t)
-            # AA-loss logits: per-sample under diffusion_internal ([..., N_sample,
-            # N_token, 20]); the reduced logits for the sigma-free s_inputs baseline.
+            # AA-loss logits: per-sample for coordinate-derived sources
+            # ([..., N_sample, N_token, 20]); reduced for sigma-free s_inputs.
             out["aa_logits"] = (
                 self.design_residue_type_head(a_full, aa_t=aa_t)
                 if a_full is not None else out["aa_logits_reduced"]
@@ -1549,13 +1601,25 @@ class ProtenixDesignTrain(ProtenixDesign):
                     )
                     self._warned_post_aa_skip = True
             if self.enable_residue_type_head and self.sc_predicted_mask:
-                a_post = self._a_token_cache
+                if self.aa_input_source == "backbone_geometry":
+                    g = self.aa_trunk_grad_scale
+                    x_post_for_aa = (
+                        x_denoised_post
+                        if g == 1.0
+                        else g * x_denoised_post
+                        + (1.0 - g) * x_denoised_post.detach()
+                    )
+                    a_post = self._backbone_geometry_repr(
+                        x_post_for_aa, input_feature_dict, sigma_post
+                    ).to(s_inputs.dtype)
+                else:
+                    a_post = self._a_token_cache
                 if a_post is not None:
                     g = self.aa_trunk_grad_scale
                     # Per-sample (per-sigma) refined logits, same treatment as the
                     # primary AA loss; the loss averages over the N_sample axis.
                     a_post = a_post.to(s_inputs.dtype)
-                    if g != 1.0:
+                    if g != 1.0 and self.aa_input_source != "backbone_geometry":
                         a_post = g * a_post + (1.0 - g) * a_post.detach()
                     out["post_aa_logits"] = self.design_residue_type_head(
                         a_post, aa_t=input_feature_dict.get("aa_t")
@@ -1574,10 +1638,11 @@ class ProtenixDesignTrain(ProtenixDesign):
         ``aa_logits`` of shape ``[..., N_token, no_bins]``.
         """
         assert self.enable_residue_type_head, "residue_type head is not enabled"
-        if getattr(self, "aa_input_source", "s_inputs") == "diffusion_internal":
+        source = getattr(self, "aa_input_source", "s_inputs")
+        if source in ("diffusion_internal", "backbone_geometry"):
             raise NotImplementedError(
                 "predict_aa (AA-only sampler path) requires input_source='s_inputs'; "
-                "diffusion_internal needs a coordinate forward to populate a_token."
+                f"{source} needs a coordinate forward."
             )
         input_feature_dict = self.diffusion_module.diffusion_conditioning.relpe.generate_relp(
             input_feature_dict

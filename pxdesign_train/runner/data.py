@@ -281,7 +281,7 @@ def _slice_feature_dict(
     # (e.g. a cached/pre-featurized feature dict) — without it that path is a silent
     # wrong-atom gather. Rows whose atom was dropped by the crop become -1, which is
     # exactly what every downstream consumer already treats as "invalid".
-    for _key in ("sc_bb_atom_idx", "sc_token_center_idx"):
+    for _key in ("aa_bb_atom_idx", "sc_bb_atom_idx", "sc_token_center_idx"):
         if _key in feat and isinstance(feat[_key], torch.Tensor):
             v = feat[_key]
             if v.shape[0] == n_token_orig:

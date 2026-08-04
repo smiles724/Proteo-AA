@@ -2,12 +2,10 @@
 Joint sequence-structure co-generation.
 
 Merges PXDesign-d (structure) and the ProteinMPNN stage (sequence) into ONE
-reverse process: at every denoising step we run the DiffusionModule once (which
-denoises coordinates AND, via the forward hook, exposes the structure-aware
-`a_token`), take an EDM step on the coordinates, and use `a_token` to predict
-residue identities. Because the AA head reads the SAME a_token that sees the
-binder's own noisy backbone, sequence is generated conditioned on the structure
-being generated — the co-design the author asked for.
+reverse process: at every denoising step we run the DiffusionModule once, take
+an EDM step on the coordinates, and predict residue identities from the current
+denoised backbone. The default AA representation is a dedicated geometry encoder
+that can see only predicted N/CA/C/O coordinates, chain adjacency, and sigma.
 
 By default (`seq_mode="complete_unmask"`) the design region is kept fully masked
 and re-predicted in full every step, with the final sequence read out at the last
@@ -47,7 +45,8 @@ def cogenerate(
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
-    Requires model.aa_input_source == "diffusion_internal" (needs a_token).
+    Supports the leakage-resistant ``backbone_geometry`` source (default) and
+    the legacy ``diffusion_internal`` ablation.
     `input_feature_dict` must be a real featurized input (for N_atom,
     atom_to_token_idx, design_token_mask, restype template, ...); its GT
     coordinates are NOT used — structure starts from noise.
@@ -74,8 +73,9 @@ def cogenerate(
     """
     from protenix.model.protenix import update_input_feature_dict
 
-    assert model.aa_input_source == "diffusion_internal", (
-        "cogenerate needs input_source='diffusion_internal' (a_token)."
+    assert model.aa_input_source in ("backbone_geometry", "diffusion_internal"), (
+        "cogenerate needs input_source='backbone_geometry' or "
+        "'diffusion_internal'."
     )
     if seq_mode not in ("complete_unmask", "sequential"):
         raise ValueError(
@@ -259,8 +259,12 @@ def cogenerate(
         d = (x - x_denoised) / sig_t
         x = x + (sig_next - sig_t) * d
 
-        # Structure-aware sequence step from the captured a_token.
-        a = model._a_token_cache
+        # Structure-aware sequence step. The default path has a narrow, auditable
+        # input contract; diffusion_internal is retained only as an ablation.
+        if model.aa_input_source == "backbone_geometry":
+            a = model._backbone_geometry_repr(x_denoised, feat, sigma).to(dtype)
+        else:
+            a = model._a_token_cache
         if a is None:
             continue
         a_red = model._reduce_a_token(a, sigma).to(dtype)  # [.., N_token, c_token]

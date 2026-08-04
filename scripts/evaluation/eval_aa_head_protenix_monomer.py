@@ -481,8 +481,8 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument(
         "--aa-input-source",
-        default="diffusion_internal",
-        choices=["s_inputs", "diffusion_internal"],
+        default="backbone_geometry",
+        choices=["backbone_geometry", "s_inputs", "diffusion_internal"],
     )
     p.add_argument("--use-msa", action="store_true")
     p.add_argument("--use-template", action="store_true")

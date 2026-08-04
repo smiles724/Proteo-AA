@@ -65,7 +65,7 @@ def main():
                         help="After training, run the iterative-unmask AA sampler on one batch")
     parser.add_argument("--sample_steps", type=int, default=8)
     parser.add_argument("--aa_input_source", default="s_inputs",
-                        choices=["s_inputs", "diffusion_internal"],
+                        choices=["backbone_geometry", "s_inputs", "diffusion_internal"],
                         help="Representation the AA head reads")
     parser.add_argument("--grad_probe", action="store_true",
                         help="One forward+backward, report a_token capture / shapes / grads")

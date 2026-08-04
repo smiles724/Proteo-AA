@@ -222,11 +222,15 @@ def test_cropper_then_featurizer_end_to_end():
     # distogram_rep_atom_mask and the sequence-side keys it may mask.
     n_atom_post = len(cropped.atom_array)
     n_token_post = len(cropped.token_array)
+    atom_to_token_idx = torch.empty(n_atom_post, dtype=torch.long)
+    for token_idx, token in enumerate(cropped.token_array):
+        atom_to_token_idx[torch.as_tensor(token.atom_indices).long()] = token_idx
     feature_dict = {
         "distogram_rep_atom_mask": torch.from_numpy(
             cropped.atom_array.distogram_rep_atom_mask.astype(np.int64),
         ).long(),
         "restype": torch.zeros(n_token_post, 32),  # widened by featurizer
+        "atom_to_token_idx": atom_to_token_idx,
         "deletion_mean": torch.ones(n_token_post),
         "profile": torch.ones(n_token_post, 32),
         "msa": torch.ones(1, n_token_post),

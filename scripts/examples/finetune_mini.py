@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mini fine-tune experiment from the official PXDesign-d checkpoint.
+"""Run a mini fine-tuning experiment from the official PXDesign-d checkpoint.
 
 Loads pxdesign_v0.1.0.pt (load_strict=False; AA head is new), evaluates on a
 fixed batch BEFORE and AFTER a short s_inputs fine-tune, and reports:

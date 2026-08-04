@@ -34,9 +34,9 @@ keeps the ring intact. PRO therefore keeps its CCD conformer (see buildsc.py).
 
 Usage
 -----
-    python scripts/build_chi_constants.py PXDesign/release_data/ccd_cache/components.v20240608.cif
-    python scripts/build_chi_constants.py <ccd.cif> --check
-    python scripts/build_chi_constants.py <ccd.cif> -o pxdesign_train/sidechain/chi_constants.py
+    python scripts/sidechain/build_chi_constants.py PXDesign/release_data/ccd_cache/components.v20240608.cif
+    python scripts/sidechain/build_chi_constants.py <ccd.cif> --check
+    python scripts/sidechain/build_chi_constants.py <ccd.cif> -o pxdesign_train/sidechain/chi_constants.py
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from typing import Dict, List, Set, Tuple
 
 import torch
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[2]
 for _p in (_REPO, _REPO / "Protenix", _REPO / "PXDesign"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -205,8 +205,8 @@ def render(chi_atom_idx, chi_mask, chi_rotatable, chi_downstream, ideal_bb) -> s
     A("")
     A("Regenerate with::")
     A("")
-    A("    python scripts/build_chi_constants.py <components.cif> -o pxdesign_train/sidechain/chi_constants.py")
-    A("    python scripts/build_chi_constants.py <components.cif> --check")
+    A("    python scripts/sidechain/build_chi_constants.py <components.cif> -o pxdesign_train/sidechain/chi_constants.py")
+    A("    python scripts/sidechain/build_chi_constants.py <components.cif> --check")
     A("")
     A("Overleaf 0714 Appendix, Step 1 (`a_hat -> (A_sc, K_i, G_ideal)`). Do not hand-edit.")
     A("")

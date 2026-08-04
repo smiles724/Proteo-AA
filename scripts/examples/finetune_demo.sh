@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-export PXDESIGN_TRAIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PXDESIGN_TRAIN_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 export REPO_ROOT="$(cd "$PXDESIGN_TRAIN_ROOT/.." && pwd)"
 export PYTHONPATH="$REPO_ROOT/Protenix:$REPO_ROOT/PXDesign:$PXDESIGN_TRAIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export LAYERNORM_TYPE="${LAYERNORM_TYPE:-fast_layernorm}"   # use fused kernels in prod

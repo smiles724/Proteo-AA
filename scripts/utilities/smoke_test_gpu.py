@@ -11,7 +11,7 @@ Usage:
     # From the repo root (proteo-r15/):
     LAYERNORM_TYPE=torch \
     PYTHONPATH="Protenix:PXDesign:PXDesign-train" \
-    python PXDesign-train/scripts/smoke_test_gpu.py \
+    python PXDesign-train/scripts/utilities/smoke_test_gpu.py \
         --cif ./PXDesign/examples/5o45.cif \
         --binder_chain B \
         --crop_size 200 \
@@ -20,7 +20,7 @@ Usage:
     # CPU (slow but works; good for verifying wiring without a GPU):
     LAYERNORM_TYPE=torch \
     PYTHONPATH="Protenix:PXDesign:PXDesign-train" \
-    python PXDesign-train/scripts/smoke_test_gpu.py \
+    python PXDesign-train/scripts/utilities/smoke_test_gpu.py \
         --cif ./PXDesign/examples/5o45.cif \
         --binder_chain B \
         --crop_size 100 \

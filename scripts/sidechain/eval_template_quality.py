@@ -33,8 +33,8 @@ Reported per method: RMSD (A) over side-chain heavy atoms, and chi1 recovery
 
 Usage
 -----
-    python scripts/eval_template_quality.py                 # default 30-chain set
-    python scripts/eval_template_quality.py --pdb 1ubq 3nir --draws 8
+    python scripts/sidechain/eval_template_quality.py                 # default 30-chain set
+    python scripts/sidechain/eval_template_quality.py --pdb 1ubq 3nir --draws 8
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from pathlib import Path
 
 import torch
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[2]
 for _p in (_REPO, _REPO / "Protenix", _REPO / "PXDesign"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -135,7 +135,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not rotamers.available():
-        print("rotamer library missing: run scripts/build_rotamer_library.py --download")
+        print("rotamer library missing: run scripts/sidechain/build_rotamer_library.py --download")
         return 1
 
     T, MU, PHI, PSI = [], [], [], []

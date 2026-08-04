@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Check the official PXDesign-d checkpoint loads into ProtenixDesignTrain with
-strict=False (our residue-type head is new, so missing keys are expected)."""
+"""Check that an official PXDesign-d checkpoint loads with ``strict=False``.
+
+The residue-type head is new, so its missing keys are expected.
+"""
 import argparse
 import torch
 

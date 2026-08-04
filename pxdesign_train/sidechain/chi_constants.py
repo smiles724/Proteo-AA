@@ -2,8 +2,8 @@
 
 Regenerate with::
 
-    python scripts/build_chi_constants.py <components.cif> -o pxdesign_train/sidechain/chi_constants.py
-    python scripts/build_chi_constants.py <components.cif> --check
+    python scripts/sidechain/build_chi_constants.py <components.cif> -o pxdesign_train/sidechain/chi_constants.py
+    python scripts/sidechain/build_chi_constants.py <components.cif> --check
 
 Overleaf 0714 Appendix, Step 1 (`a_hat -> (A_sc, K_i, G_ideal)`). Do not hand-edit.
 
@@ -239,4 +239,3 @@ IDEAL_BB_LOCAL = torch.tensor([
     [[ -0.4896,   1.3848,   0.0000], [  0.0000,   0.0000,   0.0000], [  1.5072,   0.0000,   0.0000]],  # TYR
     [[ -0.4894,   1.3849,   0.0000], [  0.0000,   0.0000,   0.0000], [  1.5059,   0.0000,   0.0000]],  # VAL
 ], dtype=torch.float32)
-

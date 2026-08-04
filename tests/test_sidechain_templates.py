@@ -34,7 +34,7 @@ mirroring the three ways the table can silently go wrong:
                         atoms(restype)
     flip_z              mirrored chirality (D-amino acids)        check_chirality
 
-Provenance / drift-safety: ``scripts/build_sidechain_templates.py`` regenerates the
+Provenance / drift-safety: ``scripts/sidechain/build_sidechain_templates.py`` regenerates the
 literal from a CCD ``components.cif`` using ``frames.build_frame`` / ``frames.to_local``
 themselves, so the extraction convention cannot drift from the runtime convention.
 
@@ -615,8 +615,13 @@ def test_extraction_generator_exists_and_uses_frames_py():
     and it must build the frame with frames.py rather than re-deriving Gram-Schmidt."""
     from pathlib import Path
 
-    gen = Path(__file__).resolve().parent.parent / "scripts" / "build_sidechain_templates.py"
-    assert gen.is_file(), "scripts/build_sidechain_templates.py is missing"
+    gen = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "sidechain"
+        / "build_sidechain_templates.py"
+    )
+    assert gen.is_file(), "scripts/sidechain/build_sidechain_templates.py is missing"
     src = gen.read_text()
     assert "from pxdesign_train.sidechain.frames import build_frame, to_local" in src
     assert "sidechain_atoms(restype)" in src, "generator must use instantiate's column order"

@@ -129,6 +129,7 @@ def cogenerate(
     counts = counts + [0] * (max(0, len(noise_schedule) - 1 - len(counts)))
 
     trajectory = []
+    final_aa_probs = None
 
     # --- inference-side cycle setup (Overleaf iterative co-evolution) ---
     sc_enabled = (sidechain_cycle and getattr(model, "enable_sidechain", False)
@@ -275,6 +276,7 @@ def cogenerate(
         if logits.dim() == 3:
             logits = logits.squeeze(0)  # [N_token, 20]
         probs = torch.softmax(logits, dim=-1)
+        final_aa_probs = probs
         conf, pred = probs.max(dim=-1)
 
         if seq_mode == "sequential":
@@ -550,6 +552,10 @@ def cogenerate(
     return {
         "coordinate": x.squeeze(0),
         "sequence": sampled,
+        # Final-step probabilities are exposed for leakage-free inference
+        # evaluation. They come from the same generated-backbone state as the
+        # returned sequence; no label/GT coordinates enter cogenerate().
+        "aa_probs": final_aa_probs,
         "trajectory": trajectory,
         "sidechain": sidechain_out,
         "has_full_atom_sidechain": bool(sidechain_out),

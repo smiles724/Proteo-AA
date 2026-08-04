@@ -6,7 +6,7 @@
     r_i ~ Categorical(p_{i,1}, ..., p_{i,R_i})   ("sampled")
 
 The library is the Dunbrack BBDEP2010 table built by
-``scripts/build_rotamer_library.py`` into ``data/dunbrack2010_bbdep.npz``
+``scripts/sidechain/build_rotamer_library.py`` into ``data/dunbrack2010_bbdep.npz``
 (ODC-By; cite Shapovalov & Dunbrack 2011, Structure 19:844-858). It is stored
 full-fidelity: every rotamer of every (residue, phi, psi) cell on the source's
 10-degree grid, nothing truncated.
@@ -58,7 +58,7 @@ def _load(path: Path = DATA):
         _LOAD_FAILED = True
         logger.warning(
             "rotamer library not found at %s — build it with "
-            "`python scripts/build_rotamer_library.py --download`. "
+            "`python scripts/sidechain/build_rotamer_library.py --download`. "
             "Falling back to the static CCD template.",
             path,
         )

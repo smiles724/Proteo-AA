@@ -1,0 +1,1586 @@
+{
+  "chi_positive_control": {
+    "local_input=false,frame_aware_head=false": {
+      "atom_feature_change": {
+        "cos_mean": 0.994152307510376,
+        "cos_min": 0.9766098260879517,
+        "relative_frobenius": 0.05291192978620529
+      },
+      "available": true,
+      "batch_index": 0,
+      "input_change_rmsd": 1.480031967163086,
+      "prediction_change_rmsd": 0.11680006235837936,
+      "residue_index": 0,
+      "xyz_feature_change": {
+        "cos_mean": 0.9721944332122803,
+        "cos_min": 0.8887779712677002,
+        "relative_frobenius": 0.07924897968769073
+      }
+    },
+    "local_input=false,frame_aware_head=true": {
+      "atom_feature_change": {
+        "cos_mean": 0.994152307510376,
+        "cos_min": 0.9766098260879517,
+        "relative_frobenius": 0.05291192978620529
+      },
+      "available": true,
+      "batch_index": 0,
+      "input_change_rmsd": 1.480031967163086,
+      "prediction_change_rmsd": 0.11680005490779877,
+      "residue_index": 0,
+      "xyz_feature_change": {
+        "cos_mean": 0.9721944332122803,
+        "cos_min": 0.8887779712677002,
+        "relative_frobenius": 0.07924897968769073
+      }
+    },
+    "local_input=true,frame_aware_head=false": {
+      "atom_feature_change": {
+        "cos_mean": 0.9950850009918213,
+        "cos_min": 0.9803412556648254,
+        "relative_frobenius": 0.10379105061292648
+      },
+      "available": true,
+      "batch_index": 0,
+      "input_change_rmsd": 1.480031967163086,
+      "prediction_change_rmsd": 0.08744287490844727,
+      "residue_index": 0,
+      "xyz_feature_change": {
+        "cos_mean": 0.9755291938781738,
+        "cos_min": 0.9021167755126953,
+        "relative_frobenius": 0.21060700714588165
+      }
+    },
+    "local_input=true,frame_aware_head=true": {
+      "atom_feature_change": {
+        "cos_mean": 0.9950850009918213,
+        "cos_min": 0.9803412556648254,
+        "relative_frobenius": 0.10379105061292648
+      },
+      "available": true,
+      "batch_index": 0,
+      "input_change_rmsd": 1.480031967163086,
+      "prediction_change_rmsd": 0.08744288235902786,
+      "residue_index": 0,
+      "xyz_feature_change": {
+        "cos_mean": 0.9755291938781738,
+        "cos_min": 0.9021167755126953,
+        "relative_frobenius": 0.21060700714588165
+      }
+    }
+  },
+  "has_recomputed_h_res_pair": false,
+  "metadata": {
+    "checkpoint": null,
+    "random_weight_seed": 0,
+    "sequence": [
+      "LYS",
+      "PHE",
+      "ARG",
+      "GLU"
+    ],
+    "source": "deterministic synthetic same-protein fixture"
+  },
+  "n_rotations": 20,
+  "paired_abcd": null,
+  "reference_quality": {
+    "local_input=false,frame_aware_head=false": {
+      "chi1_accuracy_20deg": 0.0,
+      "chi2_accuracy_20deg": 0.0,
+      "global_sc_rmsd": 3.0814096927642822,
+      "local_sc_rmsd": 3.0814096927642822
+    },
+    "local_input=false,frame_aware_head=true": {
+      "chi1_accuracy_20deg": 0.0,
+      "chi2_accuracy_20deg": 0.0,
+      "global_sc_rmsd": 2.785593032836914,
+      "local_sc_rmsd": 2.785593032836914
+    },
+    "local_input=true,frame_aware_head=false": {
+      "chi1_accuracy_20deg": 0.5,
+      "chi2_accuracy_20deg": 0.0,
+      "global_sc_rmsd": 3.060451030731201,
+      "local_sc_rmsd": 3.0604512691497803
+    },
+    "local_input=true,frame_aware_head=true": {
+      "chi1_accuracy_20deg": 0.0,
+      "chi2_accuracy_20deg": 0.0,
+      "global_sc_rmsd": 2.808619499206543,
+      "local_sc_rmsd": 2.808619499206543
+    }
+  },
+  "rotation_summary": {
+    "local_input=false,frame_aware_head=false": {
+      "B_end_to_end": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "canonical_rmsd": {
+            "max": 2.337887763977051,
+            "mean": 1.553867554664612
+          },
+          "eq_rmsd": {
+            "max": 2.33788800239563,
+            "mean": 1.553867569565773
+          },
+          "raw_rmsd": {
+            "max": 1.8258966207504272,
+            "mean": 1.2633880853652955
+          }
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": {
+              "max": 0.9707877039909363,
+              "mean": 0.23943031057715417
+            },
+            "cos_min": {
+              "max": 0.9420671463012695,
+              "mean": -0.11500918231904507
+            },
+            "relative_frobenius": {
+              "max": 1.8296678066253662,
+              "mean": 1.2126815870404244
+            }
+          },
+          "aa_logits_input": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "aa_projected": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_embedding": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_feats": {
+            "cos_mean": {
+              "max": 0.9723434448242188,
+              "mean": 0.26751983165740967
+            },
+            "cos_min": {
+              "max": 0.9429395198822021,
+              "mean": -0.08518699780106545
+            },
+            "relative_frobenius": {
+              "max": 1.8038756847381592,
+              "mean": 1.2008426189422607
+            }
+          },
+          "cross_block_00": {
+            "cos_mean": {
+              "max": 0.9735621213912964,
+              "mean": 0.24023802690207957
+            },
+            "cos_min": {
+              "max": 0.9455997943878174,
+              "mean": -0.11080787181854249
+            },
+            "relative_frobenius": {
+              "max": 1.8310229778289795,
+              "mean": 1.199356810003519
+            }
+          },
+          "cross_block_01": {
+            "cos_mean": {
+              "max": 0.9717262983322144,
+              "mean": 0.24038721956312656
+            },
+            "cos_min": {
+              "max": 0.9431632161140442,
+              "mean": -0.11127871423959732
+            },
+            "relative_frobenius": {
+              "max": 1.8273693323135376,
+              "mean": 1.212302778661251
+            }
+          },
+          "delta_h_res": {
+            "cos_mean": {
+              "max": 0.9890413880348206,
+              "mean": 0.5738378256559372
+            },
+            "cos_min": {
+              "max": 0.9753588438034058,
+              "mean": 0.38388897115364673
+            },
+            "relative_frobenius": {
+              "max": 1.2991540431976318,
+              "mean": 0.8637744277715683
+            }
+          },
+          "g": {
+            "cos_mean": {
+              "max": 0.9761872291564941,
+              "mean": 0.22526561990380287
+            },
+            "cos_min": {
+              "max": 0.9480371475219727,
+              "mean": -0.12383945621550083
+            },
+            "relative_frobenius": {
+              "max": 1.77001953125,
+              "mean": 1.151413131505251
+            }
+          },
+          "h_res_input": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "h_res_prime": {
+            "cos_mean": {
+              "max": 0.9993321299552917,
+              "mean": 0.9697808742523193
+            },
+            "cos_min": {
+              "max": 0.9987419843673706,
+              "mean": 0.944550535082817
+            },
+            "relative_frobenius": {
+              "max": 0.33049795031547546,
+              "mean": 0.21973968837410213
+            }
+          },
+          "h_res_projected": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999998211860657,
+              "mean": 0.9999998211860657
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "initial_atom_feature": {
+            "cos_mean": {
+              "max": 0.971956729888916,
+              "mean": 0.3164925120770931
+            },
+            "cos_min": {
+              "max": 0.9432793855667114,
+              "mean": -0.013778169453144074
+            },
+            "relative_frobenius": {
+              "max": 1.7244983911514282,
+              "mean": 1.1510368511080742
+            }
+          },
+          "intra_block_00": {
+            "relative_frobenius": {
+              "max": 1.8007557392120361,
+              "mean": 1.1753682434558868
+            }
+          },
+          "intra_block_01": {
+            "relative_frobenius": {
+              "max": 1.7939642667770386,
+              "mean": 1.1836508527398109
+            }
+          },
+          "time_projected": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "xyz_projected": {
+            "cos_mean": {
+              "max": 0.9532387852668762,
+              "mean": 0.10103685297071933
+            },
+            "cos_min": {
+              "max": 0.9043596982955933,
+              "mean": -0.17931690905243158
+            },
+            "relative_frobenius": {
+              "max": 1.9310649633407593,
+              "mean": 1.288912157714367
+            }
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": {
+            "max": 2.337888717651367,
+            "mean": 1.5538675099611283
+          },
+          "eq_rmsd": {
+            "max": 2.337887763977051,
+            "mean": 1.5538675218820572
+          }
+        }
+      },
+      "D_h_res_only": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      }
+    },
+    "local_input=false,frame_aware_head=true": {
+      "B_end_to_end": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "cos_mean": {
+            "max": 0.9602806568145752,
+            "mean": 0.2734619976952672
+          },
+          "cos_min": {
+            "max": 0.9046134352684021,
+            "mean": -0.2648286396637559
+          },
+          "relative_frobenius": {
+            "max": 1.656617283821106,
+            "mean": 1.1462590031325817
+          },
+          "rmsd": {
+            "max": 1.8258966207504272,
+            "mean": 1.2633880853652955
+          }
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": {
+              "max": 0.9707877039909363,
+              "mean": 0.23943031057715417
+            },
+            "cos_min": {
+              "max": 0.9420671463012695,
+              "mean": -0.11500918231904507
+            },
+            "relative_frobenius": {
+              "max": 1.8296678066253662,
+              "mean": 1.2126815870404244
+            }
+          },
+          "aa_logits_input": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "aa_projected": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_embedding": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_feats": {
+            "cos_mean": {
+              "max": 0.9723434448242188,
+              "mean": 0.26751983165740967
+            },
+            "cos_min": {
+              "max": 0.9429395198822021,
+              "mean": -0.08518699780106545
+            },
+            "relative_frobenius": {
+              "max": 1.8038756847381592,
+              "mean": 1.2008426189422607
+            }
+          },
+          "cross_block_00": {
+            "cos_mean": {
+              "max": 0.9735621213912964,
+              "mean": 0.24023802690207957
+            },
+            "cos_min": {
+              "max": 0.9455997943878174,
+              "mean": -0.11080787181854249
+            },
+            "relative_frobenius": {
+              "max": 1.8310229778289795,
+              "mean": 1.199356810003519
+            }
+          },
+          "cross_block_01": {
+            "cos_mean": {
+              "max": 0.9717262983322144,
+              "mean": 0.24038721956312656
+            },
+            "cos_min": {
+              "max": 0.9431632161140442,
+              "mean": -0.11127871423959732
+            },
+            "relative_frobenius": {
+              "max": 1.8273693323135376,
+              "mean": 1.212302778661251
+            }
+          },
+          "delta_h_res": {
+            "cos_mean": {
+              "max": 0.9890413880348206,
+              "mean": 0.5738378256559372
+            },
+            "cos_min": {
+              "max": 0.9753588438034058,
+              "mean": 0.38388897115364673
+            },
+            "relative_frobenius": {
+              "max": 1.2991540431976318,
+              "mean": 0.8637744277715683
+            }
+          },
+          "g": {
+            "cos_mean": {
+              "max": 0.9761872291564941,
+              "mean": 0.22526561990380287
+            },
+            "cos_min": {
+              "max": 0.9480371475219727,
+              "mean": -0.12383945621550083
+            },
+            "relative_frobenius": {
+              "max": 1.77001953125,
+              "mean": 1.151413131505251
+            }
+          },
+          "h_res_input": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "h_res_prime": {
+            "cos_mean": {
+              "max": 0.9993321299552917,
+              "mean": 0.9697808742523193
+            },
+            "cos_min": {
+              "max": 0.9987419843673706,
+              "mean": 0.944550535082817
+            },
+            "relative_frobenius": {
+              "max": 0.33049795031547546,
+              "mean": 0.21973968837410213
+            }
+          },
+          "h_res_projected": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999998211860657,
+              "mean": 0.9999998211860657
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "initial_atom_feature": {
+            "cos_mean": {
+              "max": 0.971956729888916,
+              "mean": 0.3164925120770931
+            },
+            "cos_min": {
+              "max": 0.9432793855667114,
+              "mean": -0.013778169453144074
+            },
+            "relative_frobenius": {
+              "max": 1.7244983911514282,
+              "mean": 1.1510368511080742
+            }
+          },
+          "intra_block_00": {
+            "relative_frobenius": {
+              "max": 1.8007557392120361,
+              "mean": 1.1753682434558868
+            }
+          },
+          "intra_block_01": {
+            "relative_frobenius": {
+              "max": 1.7939642667770386,
+              "mean": 1.1836508527398109
+            }
+          },
+          "time_projected": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "xyz_projected": {
+            "cos_mean": {
+              "max": 0.9532387852668762,
+              "mean": 0.10103685297071933
+            },
+            "cos_min": {
+              "max": 0.9043596982955933,
+              "mean": -0.17931690905243158
+            },
+            "relative_frobenius": {
+              "max": 1.9310649633407593,
+              "mean": 1.288912157714367
+            }
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": {
+            "max": 1.8258965015411377,
+            "mean": 1.2633881822228432
+          },
+          "eq_rmsd": {
+            "max": 1.8258965015411377,
+            "mean": 1.2633881106972695
+          }
+        }
+      },
+      "D_h_res_only": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      }
+    },
+    "local_input=true,frame_aware_head=false": {
+      "B_end_to_end": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "canonical_rmsd": {
+            "max": 1.877436876296997,
+            "mean": 1.4587677121162415
+          },
+          "eq_rmsd": {
+            "max": 1.8774369955062866,
+            "mean": 1.4587677121162415
+          },
+          "raw_rmsd": {
+            "max": 1.3387742114900902e-07,
+            "mean": 9.255678250497112e-08
+          }
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 5.797174296162666e-08,
+              "mean": 3.9346828728525904e-08
+            }
+          },
+          "aa_logits_input": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "aa_projected": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_embedding": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_feats": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999642372132
+            },
+            "relative_frobenius": {
+              "max": 4.1926686122906176e-08,
+              "mean": 2.979399242875047e-08
+            }
+          },
+          "cross_block_00": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 0.9999999314546585
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 4.589932345311354e-08,
+              "mean": 2.6963868027252147e-08
+            }
+          },
+          "cross_block_01": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999433755875
+            },
+            "relative_frobenius": {
+              "max": 6.791322704202685e-08,
+              "mean": 4.731014495718e-08
+            }
+          },
+          "delta_h_res": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 0.9999999761581421
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999225139617
+            },
+            "relative_frobenius": {
+              "max": 1.7471118951561948e-07,
+              "mean": 1.4635005456398177e-07
+            }
+          },
+          "g": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999105930328
+            },
+            "relative_frobenius": {
+              "max": 9.8854179952923e-08,
+              "mean": 6.725306409549602e-08
+            }
+          },
+          "h_res_input": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "h_res_prime": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999910593033
+            },
+            "relative_frobenius": {
+              "max": 5.859611817982113e-08,
+              "mean": 4.861895082086676e-08
+            }
+          },
+          "h_res_projected": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999998211860657,
+              "mean": 0.9999998211860657
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "initial_atom_feature": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "intra_block_00": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "intra_block_01": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "time_projected": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "xyz_projected": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": {
+            "max": 1.8774371147155762,
+            "mean": 1.4587676972150803
+          },
+          "eq_rmsd": {
+            "max": 1.8774369955062866,
+            "mean": 1.4587677270174026
+          }
+        }
+      },
+      "D_h_res_only": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      }
+    },
+    "local_input=true,frame_aware_head=true": {
+      "B_end_to_end": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "cos_mean": {
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "cos_min": {
+            "max": 1.0,
+            "mean": 0.9999999701976776
+          },
+          "relative_frobenius": {
+            "max": 1.3183539238070807e-07,
+            "mean": 9.11450193541441e-08
+          },
+          "rmsd": {
+            "max": 1.3387742114900902e-07,
+            "mean": 9.255678250497112e-08
+          }
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 5.797174296162666e-08,
+              "mean": 3.9346828728525904e-08
+            }
+          },
+          "aa_logits_input": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "aa_projected": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_embedding": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "atom_feats": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999642372132
+            },
+            "relative_frobenius": {
+              "max": 4.1926686122906176e-08,
+              "mean": 2.979399242875047e-08
+            }
+          },
+          "cross_block_00": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 0.9999999314546585
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 4.589932345311354e-08,
+              "mean": 2.6963868027252147e-08
+            }
+          },
+          "cross_block_01": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999433755875
+            },
+            "relative_frobenius": {
+              "max": 6.791322704202685e-08,
+              "mean": 4.731014495718e-08
+            }
+          },
+          "delta_h_res": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 0.9999999761581421
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999225139617
+            },
+            "relative_frobenius": {
+              "max": 1.7471118951561948e-07,
+              "mean": 1.4635005456398177e-07
+            }
+          },
+          "g": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999105930328
+            },
+            "relative_frobenius": {
+              "max": 9.8854179952923e-08,
+              "mean": 6.725306409549602e-08
+            }
+          },
+          "h_res_input": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999998807907104,
+              "mean": 0.9999998807907104
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "h_res_prime": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 1.0,
+              "mean": 0.9999999910593033
+            },
+            "relative_frobenius": {
+              "max": 5.859611817982113e-08,
+              "mean": 4.861895082086676e-08
+            }
+          },
+          "h_res_projected": {
+            "cos_mean": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "cos_min": {
+              "max": 0.9999998211860657,
+              "mean": 0.9999998211860657
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "initial_atom_feature": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "intra_block_00": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "intra_block_01": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "time_projected": {
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          },
+          "xyz_projected": {
+            "cos_mean": {
+              "max": 1.0,
+              "mean": 1.0
+            },
+            "cos_min": {
+              "max": 0.9999999403953552,
+              "mean": 0.9999999403953552
+            },
+            "relative_frobenius": {
+              "max": 0.0,
+              "mean": 0.0
+            }
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": {
+            "max": 3.2849952731339727e-06,
+            "mean": 1.1278401913727976e-06
+          },
+          "eq_rmsd": {
+            "max": 6.554433866767795e-07,
+            "mean": 4.6929152688335305e-07
+          }
+        }
+      },
+      "D_h_res_only": {
+        "available": {
+          "max": 0.0,
+          "mean": 0.0
+        }
+      }
+    }
+  },
+  "schema_version": 1,
+  "seed": 0,
+  "tolerances": {
+    "coordinate_angstrom": 0.001,
+    "invariant": 0.0001
+  },
+  "translation_only": {
+    "local_input=false,frame_aware_head=false": {
+      "B_end_to_end": {
+        "available": false
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "canonical_rmsd": 1.4156620502471924,
+          "eq_rmsd": 1.4156620502471924,
+          "raw_rmsd": 1.4156620502471924,
+          "semantics": "global offset vector"
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": -0.1920674592256546,
+            "cos_min": -0.28543680906295776,
+            "relative_frobenius": 1.5144295692443848
+          },
+          "aa_logits_input": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          },
+          "aa_projected": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_embedding": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_feats": {
+            "cos_mean": -0.15683914721012115,
+            "cos_min": -0.1983361542224884,
+            "relative_frobenius": 1.4802988767623901
+          },
+          "cross_block_00": {
+            "cos_mean": -0.19708949327468872,
+            "cos_min": -0.30884596705436707,
+            "relative_frobenius": 1.4969947338104248
+          },
+          "cross_block_01": {
+            "cos_mean": -0.17547361552715302,
+            "cos_min": -0.26591891050338745,
+            "relative_frobenius": 1.5014808177947998
+          },
+          "delta_h_res": {
+            "cos_mean": 0.3887588381767273,
+            "cos_min": 0.21501269936561584,
+            "relative_frobenius": 1.0126311779022217
+          },
+          "g": {
+            "cos_mean": -0.3181056082248688,
+            "cos_min": -0.42816340923309326,
+            "relative_frobenius": 1.4904310703277588
+          },
+          "h_res_input": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "h_res_prime": {
+            "cos_mean": 0.9625967144966125,
+            "cos_min": 0.9309647083282471,
+            "relative_frobenius": 0.2576080560684204
+          },
+          "h_res_projected": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999998211860657,
+            "relative_frobenius": 0.0
+          },
+          "initial_atom_feature": {
+            "cos_mean": -0.03066648170351982,
+            "cos_min": -0.11117882281541824,
+            "relative_frobenius": 1.3838086128234863
+          },
+          "intra_block_00": {
+            "relative_frobenius": 1.4419000148773193
+          },
+          "intra_block_01": {
+            "relative_frobenius": 1.4654603004455566
+          },
+          "time_projected": {
+            "relative_frobenius": 0.0
+          },
+          "xyz_projected": {
+            "cos_mean": -0.24566753208637238,
+            "cos_min": -0.2913975417613983,
+            "relative_frobenius": 1.5495661497116089
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": 1.4156620502471924,
+          "eq_rmsd": 1.4156620502471924
+        }
+      },
+      "D_h_res_only": {
+        "available": false
+      },
+      "diagnosis": "coordinate-path C intervention"
+    },
+    "local_input=false,frame_aware_head=true": {
+      "B_end_to_end": {
+        "available": false
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "cos_mean": -0.18053248524665833,
+          "cos_min": -0.7679357528686523,
+          "relative_frobenius": 1.284415602684021,
+          "rmsd": 1.4156620502471924,
+          "semantics": "local invariant coordinates"
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": -0.1920674592256546,
+            "cos_min": -0.28543680906295776,
+            "relative_frobenius": 1.5144295692443848
+          },
+          "aa_logits_input": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          },
+          "aa_projected": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_embedding": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_feats": {
+            "cos_mean": -0.15683914721012115,
+            "cos_min": -0.1983361542224884,
+            "relative_frobenius": 1.4802988767623901
+          },
+          "cross_block_00": {
+            "cos_mean": -0.19708949327468872,
+            "cos_min": -0.30884596705436707,
+            "relative_frobenius": 1.4969947338104248
+          },
+          "cross_block_01": {
+            "cos_mean": -0.17547361552715302,
+            "cos_min": -0.26591891050338745,
+            "relative_frobenius": 1.5014808177947998
+          },
+          "delta_h_res": {
+            "cos_mean": 0.3887588381767273,
+            "cos_min": 0.21501269936561584,
+            "relative_frobenius": 1.0126311779022217
+          },
+          "g": {
+            "cos_mean": -0.3181056082248688,
+            "cos_min": -0.42816340923309326,
+            "relative_frobenius": 1.4904310703277588
+          },
+          "h_res_input": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "h_res_prime": {
+            "cos_mean": 0.9625967144966125,
+            "cos_min": 0.9309647083282471,
+            "relative_frobenius": 0.2576080560684204
+          },
+          "h_res_projected": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999998211860657,
+            "relative_frobenius": 0.0
+          },
+          "initial_atom_feature": {
+            "cos_mean": -0.03066648170351982,
+            "cos_min": -0.11117882281541824,
+            "relative_frobenius": 1.3838086128234863
+          },
+          "intra_block_00": {
+            "relative_frobenius": 1.4419000148773193
+          },
+          "intra_block_01": {
+            "relative_frobenius": 1.4654603004455566
+          },
+          "time_projected": {
+            "relative_frobenius": 0.0
+          },
+          "xyz_projected": {
+            "cos_mean": -0.24566753208637238,
+            "cos_min": -0.2913975417613983,
+            "relative_frobenius": 1.5495661497116089
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": 1.4156620502471924,
+          "eq_rmsd": 1.4156620502471924
+        }
+      },
+      "D_h_res_only": {
+        "available": false
+      },
+      "diagnosis": "coordinate-path C intervention"
+    },
+    "local_input=true,frame_aware_head=false": {
+      "B_end_to_end": {
+        "available": false
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "canonical_rmsd": 7.33954692577754e-08,
+          "eq_rmsd": 7.33954692577754e-08,
+          "raw_rmsd": 7.33954692577754e-08,
+          "semantics": "global offset vector"
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 2.5106473344749247e-08
+          },
+          "aa_logits_input": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          },
+          "aa_projected": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_embedding": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_feats": {
+            "cos_mean": 1.0,
+            "cos_min": 1.0,
+            "relative_frobenius": 2.7423020299011114e-08
+          },
+          "cross_block_00": {
+            "cos_mean": 0.9999998807907104,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 2.188473402497948e-08
+          },
+          "cross_block_01": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 3.995675967871648e-08
+          },
+          "delta_h_res": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 1.2966579276962875e-07
+          },
+          "g": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 4.742578241234696e-08
+          },
+          "h_res_input": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "h_res_prime": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 4.205738335372189e-08
+          },
+          "h_res_projected": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999998211860657,
+            "relative_frobenius": 0.0
+          },
+          "initial_atom_feature": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          },
+          "intra_block_00": {
+            "relative_frobenius": 0.0
+          },
+          "intra_block_01": {
+            "relative_frobenius": 0.0
+          },
+          "time_projected": {
+            "relative_frobenius": 0.0
+          },
+          "xyz_projected": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": 2.7023551751881314e-07,
+          "eq_rmsd": 3.2644064162923314e-07
+        }
+      },
+      "D_h_res_only": {
+        "available": false
+      },
+      "diagnosis": "coordinate-path C intervention"
+    },
+    "local_input=true,frame_aware_head=true": {
+      "B_end_to_end": {
+        "available": false
+      },
+      "C_coordinate_only": {
+        "coordinate_head": {
+          "cos_mean": 1.0,
+          "cos_min": 1.0,
+          "relative_frobenius": 7.227596654502122e-08,
+          "rmsd": 7.33954692577754e-08,
+          "semantics": "local invariant coordinates"
+        },
+        "invariant": {
+          "a_sc": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 2.5106473344749247e-08
+          },
+          "aa_logits_input": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          },
+          "aa_projected": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_embedding": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "atom_feats": {
+            "cos_mean": 1.0,
+            "cos_min": 1.0,
+            "relative_frobenius": 2.7423020299011114e-08
+          },
+          "cross_block_00": {
+            "cos_mean": 0.9999998807907104,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 2.188473402497948e-08
+          },
+          "cross_block_01": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 3.995675967871648e-08
+          },
+          "delta_h_res": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 1.2966579276962875e-07
+          },
+          "g": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 4.742578241234696e-08
+          },
+          "h_res_input": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999998807907104,
+            "relative_frobenius": 0.0
+          },
+          "h_res_prime": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 4.205738335372189e-08
+          },
+          "h_res_projected": {
+            "cos_mean": 0.9999999403953552,
+            "cos_min": 0.9999998211860657,
+            "relative_frobenius": 0.0
+          },
+          "initial_atom_feature": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          },
+          "intra_block_00": {
+            "relative_frobenius": 0.0
+          },
+          "intra_block_01": {
+            "relative_frobenius": 0.0
+          },
+          "time_projected": {
+            "relative_frobenius": 0.0
+          },
+          "xyz_projected": {
+            "cos_mean": 1.0,
+            "cos_min": 0.9999999403953552,
+            "relative_frobenius": 0.0
+          }
+        },
+        "prediction_global": {
+          "canonical_rmsd": 3.463251232460607e-07,
+          "eq_rmsd": 4.690637069870718e-07
+        }
+      },
+      "D_h_res_only": {
+        "available": false
+      },
+      "diagnosis": "coordinate-path C intervention"
+    }
+  },
+  "verdicts": {
+    "local_input=false,frame_aware_head=false": {
+      "max_atom_feature_relative_error": 1.8038756847381592,
+      "max_coordinate_equivariance_rmsd": 2.337887763977051,
+      "rotation_sensitive": true
+    },
+    "local_input=false,frame_aware_head=true": {
+      "max_atom_feature_relative_error": 1.8038756847381592,
+      "max_coordinate_equivariance_rmsd": 1.8258965015411377,
+      "rotation_sensitive": true
+    },
+    "local_input=true,frame_aware_head=false": {
+      "max_atom_feature_relative_error": 4.1926686122906176e-08,
+      "max_coordinate_equivariance_rmsd": 1.8774369955062866,
+      "rotation_sensitive": true
+    },
+    "local_input=true,frame_aware_head=true": {
+      "max_atom_feature_relative_error": 4.1926686122906176e-08,
+      "max_coordinate_equivariance_rmsd": 6.554433866767795e-07,
+      "rotation_sensitive": false
+    }
+  }
+}

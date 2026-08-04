@@ -15,21 +15,21 @@
 # Usage:
 #   git clone --recursive https://github.com/guanlueli/PXDesign-train.git
 #   cd PXDesign-train
-#   bash scripts/setup.sh
+#   bash scripts/utilities/setup.sh
 #
 # If you forgot --recursive on the clone:
 #   git submodule update --init --recursive
-#   bash scripts/setup.sh
+#   bash scripts/utilities/setup.sh
 #
 # Then run the smoke test:
 #   LAYERNORM_TYPE=torch PYTHONPATH="Protenix:PXDesign:." \
-#     python scripts/smoke_test_gpu.py \
+#     python scripts/utilities/smoke_test_gpu.py \
 #       --cif PXDesign/examples/5o45.cif --binder_chain B --crop_size 200 --device cuda
 
 set -euo pipefail
 
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$THIS_DIR/.." && pwd)"
+ROOT="$(cd "$THIS_DIR/../.." && pwd)"
 cd "$ROOT"
 
 # ---- initialize submodules if needed ----
@@ -56,5 +56,5 @@ echo ""
 echo "Setup complete. Try:"
 echo "  cd $ROOT"
 echo "  LAYERNORM_TYPE=torch PYTHONPATH=\"Protenix:PXDesign:.\" \\"
-echo "    python scripts/smoke_test_gpu.py \\"
+echo "    python scripts/utilities/smoke_test_gpu.py \\"
 echo "      --cif PXDesign/examples/5o45.cif --binder_chain B --crop_size 200 --device cuda"

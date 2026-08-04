@@ -15,7 +15,7 @@ Detail behind the one-line comments in `pxdesign_train/configs/configs_train.py`
 | `a_direct`, `q_direct` | `False` | Direct feedback channels are enabled by named ablation arms, not by default. |
 
 Named feedback arms are `no`, `a-indirect`, `a-direct`, `bbctx`, `q`, and
-`a-direct+q`. They are selected with `scripts/finetune_mini.py --sc_ablation_arm ...`.
+`a-direct+q`. They are selected with `scripts/examples/finetune_mini.py --sc_ablation_arm ...`.
 The mechanism is smoke-tested; real-data ranking of these arms is still pending.
 
 ## `context_aware` (default `True`) — spec, not an option
@@ -67,7 +67,7 @@ Set `False` to restore the isotropic Gaussian A/B baseline.
 - `"ccd"` — static one-conformer CCD table (pre-0714 baseline)
 
 Mean local-frame RMSD of the template from the true side chain, on 2790 residues of 33
-real chains (`scripts/eval_template_quality.py` regenerates it):
+real chains (`scripts/sidechain/eval_template_quality.py` regenerates it):
 
 | provider | RMSD (Å) | chi1 recovery |
 |---|---|---|

@@ -73,7 +73,7 @@ class TrainerComponents:
         schedule: the curriculum schedule (per-source stage1/stage2 weights).
         train_samples_per_epoch: how many samples one `__iter__` draws.
         eval_dataloader: optional, can be a plain DataLoader over a small
-            held-out set. Trainer only reads `loss` from eval — no metrics yet.
+            held-out set. Trainer averages every scalar returned by `PXDesignLoss`.
     """
 
     train_dataset: CurriculumMultiDataset
@@ -478,6 +478,42 @@ class PXDesignTrainer:
         if not self.use_ddp and any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
         state = self._migrate_atom_name_vocab(state)
+        if params_only and not load_strict:
+            include_prefixes = getattr(
+                getattr(self.configs, "training", object()),
+                "checkpoint_include_prefixes",
+                None,
+            )
+            if include_prefixes:
+                include_prefixes = tuple(str(p) for p in include_prefixes)
+                before = len(state)
+                state = {
+                    k: v for k, v in state.items()
+                    if k.startswith(include_prefixes)
+                }
+                self._log(
+                    "Filtered params-only checkpoint to prefixes "
+                    f"{include_prefixes}: kept {len(state)}/{before} tensors"
+                )
+            model_state = self.model.state_dict()
+            skipped = []
+            filtered = {}
+            for k, v in state.items():
+                cur = model_state.get(k)
+                if cur is not None and torch.is_tensor(v) and cur.shape != v.shape:
+                    skipped.append((k, tuple(v.shape), tuple(cur.shape)))
+                    continue
+                filtered[k] = v
+            if skipped:
+                preview = ", ".join(
+                    f"{k}: {old}->{new}" for k, old, new in skipped[:5]
+                )
+                more = "" if len(skipped) <= 5 else f", ... +{len(skipped) - 5} more"
+                self._log(
+                    "Skipped shape-incompatible checkpoint tensors during "
+                    f"params-only warm start ({len(skipped)}): {preview}{more}"
+                )
+            state = filtered
         missing, unexpected = self.model.load_state_dict(state, strict=load_strict)
         self._log(f"Loaded {path} (missing={len(missing)}, unexpected={len(unexpected)})")
         if not params_only:

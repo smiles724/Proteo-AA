@@ -17,7 +17,7 @@ set -euo pipefail
 
 # Where Protenix and PXDesign live on this machine. Both must be on PYTHONPATH
 # because we re-use their model components.
-export PXDESIGN_TRAIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PXDESIGN_TRAIN_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 export REPO_ROOT="$(cd "$PXDESIGN_TRAIN_ROOT/.." && pwd)"
 export PYTHONPATH="$REPO_ROOT/Protenix:$REPO_ROOT/PXDesign:$PXDESIGN_TRAIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 

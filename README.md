@@ -16,15 +16,15 @@ validation is still pending. Details and caveats live in [`docs/`](docs/).
 | **New framing loss** — predicted-frame-aligned side-chain coordinate supervision | [`pxdesign_train/sidechain/losses.py`](pxdesign_train/sidechain/losses.py), [`pxdesign_train/loss.py`](pxdesign_train/loss.py), [`tests/test_sidechain_losses.py`](tests/test_sidechain_losses.py) |
 | **Add ideal-template init** — `mu_ideal` + Dunbrack/BuildSC instead of pure Gaussian init | [`pxdesign_train/sidechain/init.py`](pxdesign_train/sidechain/init.py), [`templates.py`](pxdesign_train/sidechain/templates.py), [`rotamers.py`](pxdesign_train/sidechain/rotamers.py), [`buildsc.py`](pxdesign_train/sidechain/buildsc.py) |
 | **Add a/q interconnection** — side-chain feedback into backbone token/atom streams | [`pxdesign_train/sidechain/coevolution.py`](pxdesign_train/sidechain/coevolution.py), [`pxdesign_train/sidechain/module.py`](pxdesign_train/sidechain/module.py), [`pxdesign_train/model.py`](pxdesign_train/model.py) |
-| **Add ablation arms** — `no`, `a-indirect`, `a-direct`, `bbctx`, `q`, `a-direct+q` | [`pxdesign_train/configs/configs_train.py`](pxdesign_train/configs/configs_train.py), [`scripts/finetune_mini.py`](scripts/finetune_mini.py), [`tests/test_ablation_arms.py`](tests/test_ablation_arms.py) |
+| **Add ablation arms** — `no`, `a-indirect`, `a-direct`, `bbctx`, `q`, `a-direct+q` | [`pxdesign_train/configs/configs_train.py`](pxdesign_train/configs/configs_train.py), [`scripts/examples/finetune_mini.py`](scripts/examples/finetune_mini.py), [`tests/test_ablation_arms.py`](tests/test_ablation_arms.py) |
 
 ## Setup
 
 ```bash
 git clone --recursive <this-repo-url>          # Protenix + PXDesign submodules
 pip install -e . && pip install -r Protenix/requirements.txt -r PXDesign/requirements.txt
-bash scripts/setup.sh                          # PXDesign↔Protenix embedders patch (required)
-python scripts/build_rotamer_library.py --download   # Dunbrack table for the side-chain template
+bash scripts/utilities/setup.sh                          # PXDesign↔Protenix embedders patch (required)
+python scripts/sidechain/build_rotamer_library.py --download   # Dunbrack table for the side-chain template
 ```
 
 ## Usage
@@ -34,12 +34,12 @@ python scripts/build_rotamer_library.py --download   # Dunbrack table for the si
 LAYERNORM_TYPE=torch PYTHONPATH="Protenix:PXDesign:." python -m pytest tests/ -q
 
 # Side-chain warmup / co-evolution / joint co-generation
-python scripts/finetune_mini.py --sidechain_warmup --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
-python scripts/finetune_mini.py --coevolution      --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
-python scripts/finetune_mini.py --cogenerate --sc_cycle --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
+python scripts/examples/finetune_mini.py --sidechain_warmup --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
+python scripts/examples/finetune_mini.py --coevolution      --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
+python scripts/examples/finetune_mini.py --cogenerate --sc_cycle --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
 
 # Ablation arms: no | a-indirect | a-direct | bbctx | q | a-direct+q
-python scripts/finetune_mini.py --coevolution --sc_ablation_arm q --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
+python scripts/examples/finetune_mini.py --coevolution --sc_ablation_arm q --cif <x.cif> --binder_chain B --ckpt <ckpt.pt>
 ```
 
 ## Attribution & license

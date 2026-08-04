@@ -10,3 +10,7 @@ build/
 
 # rotamer-library build cache (regenerable)
 .pdb_cache/
+
+# Local scheduler output and generated experiment caches
+logs/
+runs/

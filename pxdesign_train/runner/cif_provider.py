@@ -66,6 +66,7 @@ class CifFileProvider:
         cif_paths: list[Union[str, Path]],
         binder_chain_ids: Optional[list[str]] = None,
         cache: bool = True,
+        dataset: str = "WeightedPDB",
     ) -> None:
         self.cif_paths = [str(p) for p in cif_paths]
         self.binder_chain_ids = binder_chain_ids
@@ -76,6 +77,7 @@ class CifFileProvider:
             )
         self._cache_enabled = cache
         self._cache: dict[int, tuple] = {}
+        self.dataset = dataset
 
     def __len__(self) -> int:
         return len(self.cif_paths)
@@ -89,7 +91,7 @@ class CifFileProvider:
 
         # 1. Parse CIF → bioassembly_dict with atom_array + token_array.
         indices_list, bioassembly_dict = DataPipeline.get_data_from_mmcif(
-            mmcif=cif_path, pdb_cluster_file=None,
+            mmcif=cif_path, pdb_cluster_file=None, dataset=self.dataset,
         )
         if "atom_array" not in bioassembly_dict or "token_array" not in bioassembly_dict:
             raise RuntimeError(f"Failed to parse CIF: {cif_path}")

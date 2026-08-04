@@ -205,27 +205,33 @@ def _slice_feature_dict(
     n_token_new = len(crop.token_array)
     n_atom_new = len(crop.atom_array)
 
-    # Build token-index and atom-index masks from the cropped data.
-    # The cropper kept tokens by global token index; for atoms it kept those
-    # tokens' atoms. We rederive selection masks by matching residue (chain_id,
-    # res_id) keys — robust to any reordering inside `select_by_token_indices`.
-    kept_token_keys = set(
-        (cid, rid) for cid, rid in zip(
-            crop.atom_array.chain_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
-            crop.atom_array.res_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
+    # Prefer the exact index mapping returned by the cropper. Matching on
+    # (chain_id, res_id) is unsafe for PDB assemblies with duplicate residue ids
+    # or insertion-code-like ambiguity; it can overselect atoms and desynchronize
+    # feature tensors from the cropped AtomArray.
+    if hasattr(crop, "original_token_indices"):
+        token_indexer = np.asarray(crop.original_token_indices, dtype=np.int64)
+    else:
+        kept_token_keys = set(
+            (cid, rid) for cid, rid in zip(
+                crop.atom_array.chain_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
+                crop.atom_array.res_id[crop.atom_array.distogram_rep_atom_mask.astype(bool)],
+            )
         )
-    )
-    orig_rep_mask = orig_atom_array.distogram_rep_atom_mask.astype(bool)
-    orig_token_keys = list(zip(
-        orig_atom_array.chain_id[orig_rep_mask],
-        orig_atom_array.res_id[orig_rep_mask],
-    ))
-    token_keep_mask = np.array([k in kept_token_keys for k in orig_token_keys])
+        orig_rep_mask = orig_atom_array.distogram_rep_atom_mask.astype(bool)
+        orig_token_keys = list(zip(
+            orig_atom_array.chain_id[orig_rep_mask],
+            orig_atom_array.res_id[orig_rep_mask],
+        ))
+        token_indexer = np.nonzero([k in kept_token_keys for k in orig_token_keys])[0]
 
-    atom_keep_mask = np.array([
-        (cid, rid) in kept_token_keys
-        for cid, rid in zip(orig_atom_array.chain_id, orig_atom_array.res_id)
-    ])
+    if hasattr(crop, "original_atom_indices"):
+        atom_indexer = np.asarray(crop.original_atom_indices, dtype=np.int64)
+    else:
+        atom_indexer = np.nonzero([
+            (cid, rid) in kept_token_keys
+            for cid, rid in zip(orig_atom_array.chain_id, orig_atom_array.res_id)
+        ])[0]
 
     sliced: dict[str, torch.Tensor] = {}
     for k, v in feat.items():
@@ -238,8 +244,8 @@ def _slice_feature_dict(
         # Crop EVERY axis whose length matches an original axis — not just the first.
         # The if/elif form stopped after axis 0, so a pair tensor [N_token, N_token, C]
         # kept its second token axis uncropped (that is the bug this test pins).
-        tok_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0])
-        atm_idx = torch.from_numpy(np.nonzero(atom_keep_mask)[0])
+        tok_idx = torch.from_numpy(token_indexer)
+        atm_idx = torch.from_numpy(atom_indexer)
         for dim in range(v.dim()):
             if v.shape[dim] == n_token_orig:
                 v = torch.index_select(v, dim, tok_idx.to(v.device))
@@ -279,10 +285,10 @@ def _slice_feature_dict(
         if _key in feat and isinstance(feat[_key], torch.Tensor):
             v = feat[_key]
             if v.shape[0] == n_token_orig:
-                tok_idx = torch.from_numpy(np.nonzero(token_keep_mask)[0]).to(v.device)
+                tok_idx = torch.from_numpy(token_indexer).to(v.device)
                 v = torch.index_select(v, 0, tok_idx)
                 atom_old_to_new = _old_to_new_indexer(
-                    np.nonzero(atom_keep_mask)[0], n_atom_orig,
+                    atom_indexer, n_atom_orig,
                 )
                 sliced[_key] = _remap_index_values(v, atom_old_to_new)
 

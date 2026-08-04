@@ -421,7 +421,7 @@ def dunbrack_mode_provider(type_idx, *, generator=None, backbone=None, phi=None,
 
 # The default is the spec's construction, not the static table. Deterministic
 # selection: measured against 2790 real residues it beats sampling on every residue
-# type (see scripts/eval_template_quality.py) -- 1.28 A vs 1.49 A mean local-frame
+# type (see scripts/sidechain/eval_template_quality.py) -- 1.28 A vs 1.49 A mean local-frame
 # RMSD, 68.7% vs 61.0% chi1 recovery. Sampling is available and the appendix permits
 # it, but as an INITIALIZATION it is strictly worse, and on the high-entropy residues
 # (GLN, GLU, LYS, ARG) it is worse than even the old static table.

@@ -8,9 +8,11 @@ from pxdesign_train.runner.finetune import (
     make_finetune_configs,
 )
 from pxdesign_train.runner.cif_provider import CifFileProvider
+from pxdesign_train.runner.pinder_provider import PinderPdbProvider
 from pxdesign_train.runner.providers import (
     ProtenixComplexProvider,
     select_chain_by_id,
+    select_protenix_chain_1,
     select_protenix_chain_2,
     select_random_protein_chain,
     select_smallest_protein_chain,
@@ -25,10 +27,12 @@ __all__ = [
     "TrainerComponents",
     "ProtenixComplexProvider",
     "select_chain_by_id",
+    "select_protenix_chain_1",
     "select_protenix_chain_2",
     "select_random_protein_chain",
     "select_smallest_protein_chain",
     "CifFileProvider",
+    "PinderPdbProvider",
     "finetune_from_components",
     "make_finetune_configs",
 ]

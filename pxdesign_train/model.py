@@ -221,7 +221,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 if name.startswith("dunbrack") and not rotamers.available():
                     logging.getLogger(__name__).warning(
                         "sidechain.template_provider=%s but the rotamer library is not "
-                        "built; run `python scripts/build_rotamer_library.py --download`. "
+                        "built; run `python scripts/sidechain/build_rotamer_library.py --download`. "
                         "Falling back to the static CCD template.",
                         name,
                     )

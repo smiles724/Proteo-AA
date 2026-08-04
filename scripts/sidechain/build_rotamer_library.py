@@ -47,9 +47,9 @@ stored but not applied by buildsc.
 
 Usage
 -----
-    python scripts/build_rotamer_library.py --download
-    python scripts/build_rotamer_library.py dunbrack-2010.lib.csv
-    python scripts/build_rotamer_library.py dunbrack-2010.lib.csv --check
+    python scripts/sidechain/build_rotamer_library.py --download
+    python scripts/sidechain/build_rotamer_library.py dunbrack-2010.lib.csv
+    python scripts/sidechain/build_rotamer_library.py dunbrack-2010.lib.csv --check
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[2]
 for _p in (_REPO, _REPO / "Protenix", _REPO / "PXDesign"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))

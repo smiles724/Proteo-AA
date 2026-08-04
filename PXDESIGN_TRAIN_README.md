@@ -34,14 +34,14 @@ One-shot setup:
 ```bash
 git clone --recursive https://github.com/guanlueli/PXDesign-train.git
 cd PXDesign-train
-bash scripts/setup.sh        # applies the PXDesign patch
+bash scripts/utilities/setup.sh        # applies the PXDesign patch
 ```
 
 If you forgot `--recursive` on clone:
 
 ```bash
 git submodule update --init --recursive
-bash scripts/setup.sh
+bash scripts/utilities/setup.sh
 ```
 
 ## Quick start: fine-tune on your own CIF files
@@ -50,14 +50,14 @@ bash scripts/setup.sh
 cd PXDesign-train/
 LAYERNORM_TYPE=torch \
 PYTHONPATH="Protenix:PXDesign:." \
-python scripts/smoke_test_gpu.py \
+python scripts/utilities/smoke_test_gpu.py \
     --cif PXDesign/examples/5o45.cif \
     --binder_chain B \
     --crop_size 200 \
     --device cuda        # or "cpu" for a slow test
 ```
 
-For a custom fine-tuning driver, see the example in [`scripts/finetune_demo.sh`](scripts/finetune_demo.sh).
+For a custom fine-tuning driver, see the example in [`scripts/examples/finetune_demo.sh`](scripts/examples/finetune_demo.sh).
 
 ## Training recipe (from PXDesign technical report Appendix C)
 

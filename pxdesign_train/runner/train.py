@@ -14,7 +14,7 @@ it, write a small Python driver that:
   5. Calls `train_from_components(configs, components)`.
 
 The CLI here is a thin wrapper that just parses configs and dispatches to
-your driver — see `scripts/train_demo.sh` for an example invocation against
+your driver — see `scripts/examples/train_demo.sh` for an example invocation against
 the synthetic test data.
 
 Test commit
@@ -106,7 +106,7 @@ def main() -> None:
     raise SystemExit(
         "pxdesign_train.runner.train: this module is a library. Write a driver "
         "that builds your ComplexProviders and calls `train_from_components()`. "
-        "See `scripts/train_demo.sh` for an example."
+        "See `scripts/examples/train_demo.sh` for an example."
     )
 
 

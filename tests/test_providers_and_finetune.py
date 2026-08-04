@@ -383,3 +383,69 @@ def test_finetune_load_strict_false_tolerates_missing_keys(monkeypatch, tmp_path
     fresh = _make_finetune_trainer(monkeypatch, tmp_path)
     # Should not raise.
     fresh.load_checkpoint(path, params_only=True)
+
+
+def test_finetune_params_only_skips_shape_mismatches(monkeypatch, tmp_path):
+    """Params-only warm starts should tolerate architecture changes.
+
+    `strict=False` still raises on same-key shape mismatches, so the trainer
+    filters those tensors out before loading when this is a warm start rather
+    than an exact resume.
+    """
+    trainer = _make_finetune_trainer(monkeypatch, tmp_path)
+    state = trainer.model.state_dict()
+    target_bias = torch.ones_like(state["bias"])
+    bad_dist_weight = torch.zeros(1, 1)
+    path = str(tmp_path / "shape_mismatch.pt")
+    torch.save(
+        {
+            "model": {
+                "bias": target_bias,
+                "dist_proj.weight": bad_dist_weight,
+                "dist_proj.bias": state["dist_proj.bias"],
+                "aa_proj.weight": state["aa_proj.weight"],
+                "aa_proj.bias": state["aa_proj.bias"],
+            },
+            "optimizer": {},
+            "scheduler": {},
+            "step": 0,
+            "global_step": 0,
+        },
+        path,
+    )
+
+    fresh = _make_finetune_trainer(monkeypatch, tmp_path)
+    original_dist_weight = fresh.model.dist_proj.weight.detach().clone()
+    fresh.load_checkpoint(path, params_only=True)
+    assert torch.allclose(fresh.model.bias.detach(), target_bias)
+    assert torch.allclose(fresh.model.dist_proj.weight.detach(), original_dist_weight)
+
+
+def test_finetune_params_only_can_filter_checkpoint_prefixes(monkeypatch, tmp_path):
+    """A warm-start stage can choose which module prefixes are initialized."""
+    trainer = _make_finetune_trainer(monkeypatch, tmp_path)
+    state = trainer.model.state_dict()
+    target_bias = torch.ones_like(state["bias"])
+    target_dist_bias = torch.ones_like(state["dist_proj.bias"])
+    path = str(tmp_path / "prefix_filter.pt")
+    torch.save(
+        {
+            "model": {
+                "bias": target_bias,
+                "dist_proj.weight": state["dist_proj.weight"],
+                "dist_proj.bias": target_dist_bias,
+            },
+            "optimizer": {},
+            "scheduler": {},
+            "step": 0,
+            "global_step": 0,
+        },
+        path,
+    )
+
+    fresh = _make_finetune_trainer(monkeypatch, tmp_path)
+    fresh.configs.training.checkpoint_include_prefixes = ["dist_proj."]
+    original_bias = fresh.model.bias.detach().clone()
+    fresh.load_checkpoint(path, params_only=True)
+    assert torch.allclose(fresh.model.bias.detach(), original_bias)
+    assert torch.allclose(fresh.model.dist_proj.bias.detach(), target_dist_bias)

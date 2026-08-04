@@ -63,7 +63,6 @@ echo "AA-head run: ${RUN_ROOT}"
   --output-dir "${RUN_ROOT}" \
   --load-checkpoint "${BEST_MONOMER_CKPT}" \
   --warm-start-params-only \
-  --aa-input-source "${AA_INPUT_SOURCE:-backbone_geometry}" \
   --crop-size "${CROP_SIZE:-640}" \
   --max-n-token "${MAX_N_TOKEN:-640}" \
   --max-steps "${MAX_STEPS:-20000}" \

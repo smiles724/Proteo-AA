@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--aa-mask-max-prob", type=float, default=1.0)
     p.add_argument(
         "--aa-input-source",
-        default="backbone_geometry",
-        choices=["backbone_geometry", "s_inputs", "diffusion_internal"],
+        default="diffusion_internal",
+        choices=["s_inputs", "diffusion_internal"],
     )
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
     p.add_argument("--disable-aa-loss", action="store_true")

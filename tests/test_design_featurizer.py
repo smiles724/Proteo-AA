@@ -91,9 +91,6 @@ def synthetic_complex():
         # A stand-in `restype` of the right shape; DesignFeaturizer will replace
         # it with the 36-channel design one-hot computed from atom_array.
         "restype": torch.zeros((n_a + n_b, 32)),
-        "atom_to_token_idx": torch.arange(n_a + n_b).repeat_interleave(
-            atoms_per_res
-        ),
         # Sequence-side features that the leakage-masker may touch. PXDesign's
         # `json_to_feature.py:353-361` multiplies `msa`/`has_deletion`/
         # `deletion_value` by `condi[None, :]`, so those are `[N_msa, N_token]`
@@ -143,9 +140,6 @@ def test_featurizer_basic_shapes(synthetic_complex):
     assert new_feat["aa_corruption_mask"].shape == (n_token,)
     assert new_feat["aa_t"].shape == ()
     assert new_feat["aa_mask_prob"].shape == ()
-    assert new_feat["aa_bb_atom_idx"].shape == (n_token, 4)
-    gathered_names = np.asarray(new_aa.atom_name)[new_feat["aa_bb_atom_idx"].numpy()]
-    assert np.all(gathered_names == np.asarray(("N", "CA", "C", "O")))
 
 
 def test_featurizer_conditional_templ(synthetic_complex):

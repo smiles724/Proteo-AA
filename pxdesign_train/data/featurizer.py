@@ -206,19 +206,9 @@ class DesignFeaturizer:
         feature_dict["aa_clean"] = aa_clean
         feature_dict["aa_corrupted"] = feature_dict["restype"].argmax(dim=-1).long()
         feature_dict["aa_corruption_mask"] = aa_corruption_mask.long()
+        feature_dict["aa_loss_mask"] = aa_corruption_mask.long()
         feature_dict["aa_t"] = aa_t
         feature_dict["aa_mask_prob"] = aa_mask_prob
-        # Geometry-only AA representation: these values are gather indices, not
-        # learned features.  They resolve the same four atoms (N, CA, C, O) for
-        # every token and therefore expose neither side-chain topology nor atom
-        # metadata to the AA head.
-        feature_dict["aa_bb_atom_idx"] = self._backbone_atom_indices(
-            atom_array, feature_dict
-        )
-        feature_dict["aa_loss_mask"] = (
-            aa_corruption_mask
-            & (feature_dict["aa_bb_atom_idx"] >= 0).all(dim=-1)
-        ).long()
 
         # 5. Conditional template (binned pair distances on target residues, GT).
         templ_feats = get_condition_template_feature(
@@ -295,26 +285,6 @@ class DesignFeaturizer:
                 idx = AA_IGNORE_INDEX
             labels.append(idx)
         return torch.tensor(labels, dtype=torch.long)
-
-    @staticmethod
-    def _backbone_atom_indices(atom_array, feature_dict: dict) -> torch.Tensor:
-        """Return per-token atom indices in fixed ``(N, CA, C, O)`` order.
-
-        Missing atoms are ``-1``.  The output is safe as an indexing map only;
-        downstream code must never embed the integer values themselves.
-        """
-        atom_to_token = feature_dict["atom_to_token_idx"].detach().cpu().long()
-        n_token = int(feature_dict["restype"].shape[-2])
-        out = torch.full((n_token, 4), -1, dtype=torch.long)
-        names = np.asarray(atom_array.atom_name)
-        n_atom = min(len(names), int(atom_to_token.numel()))
-        name_to_col = {name: col for col, name in enumerate(XPB_BACKBONE_ATOM_NAMES)}
-        for atom_idx in range(n_atom):
-            col = name_to_col.get(str(names[atom_idx]))
-            token_idx = int(atom_to_token[atom_idx])
-            if col is not None and 0 <= token_idx < n_token:
-                out[token_idx, col] = atom_idx
-        return out
 
     def _sample_aa_corruption_mask(
         self,

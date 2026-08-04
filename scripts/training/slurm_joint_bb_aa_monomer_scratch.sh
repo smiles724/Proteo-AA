@@ -43,7 +43,6 @@ echo "Warm-start checkpoint: none"
   --protenix-code-dir "${PROTENIX_CODE_DIR}" \
   --pxdesign-code-dir "${PXDESIGN_CODE_DIR}" \
   --output-dir "${RUN_ROOT}" \
-  --aa-input-source "${AA_INPUT_SOURCE:-backbone_geometry}" \
   --crop-size "${CROP_SIZE:-640}" \
   --max-n-token "${MAX_N_TOKEN:-640}" \
   --max-crop-retries "${MAX_CROP_RETRIES:-64}" \

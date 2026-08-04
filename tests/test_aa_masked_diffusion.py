@@ -107,18 +107,19 @@ def test_unmask_counts_sum_to_n():
     assert _unmask_counts(0, 4) == []
 
 
-# ---------- restricted default representation ----------
+# ---------- input_source switch (s_inputs vs diffusion_internal) ----------
 
-def test_config_default_input_source_is_backbone_geometry():
-    # Atom-aware a_token is now a leakage diagnostic/ablation only.
+def test_config_default_input_source_is_diffusion_internal():
+    # The structure-aware a_token (diffusion_internal) is the default;
+    # s_inputs is a baseline/ablation only.
     from pxdesign_train.configs.configs_train import training_configs
-    assert training_configs["residue_type"]["input_source"] == "backbone_geometry"
+    assert training_configs["residue_type"]["input_source"] == "diffusion_internal"
     assert training_configs["residue_type"]["trunk_grad_scale"] == 1.0
 
 
 def test_head_builds_and_runs_at_both_input_dims():
     # A path reads s_inputs (449); B path reads a_token (c_token=768).
-    for c_in in (384, 449, 768):
+    for c_in in (449, 768):
         head = DesignResidueTypeHead(c_s=c_in, no_bins=20, use_time=True).eval()
         x = torch.randn(1, 6, c_in)
         with torch.no_grad():

@@ -34,17 +34,13 @@ training_configs["residue_type"] = {
     "mask_max_prob": 1.0,
     # Feed the discrete masked-diffusion time aa_t into the AA head.
     "use_time_embedding": True,
-    # Representation the AA head reads. DEFAULT = "backbone_geometry": a
-    # dedicated rigid-invariant encoder whose complete input is predicted
-    # N/CA/C/O coordinates, chain/residue adjacency, and sigma. It cannot read
-    # atom topology/metadata, restype, MSA, or diffusion_internal a_token.
-    # "diffusion_internal" and "s_inputs" remain explicit ablations only.
-    "input_source": "backbone_geometry",
-    "geometry_dim": 384,
-    "geometry_hidden_dim": 384,
-    "geometry_n_blocks": 3,
-    "geometry_sigma_dim": 16,
-    "geometry_spatial_neighbors": 32,
+    # Representation the AA head reads. DEFAULT = "diffusion_internal": the
+    # a_token AFTER DiffusionModule's full token self-attention (layernorm_a) —
+    # it has cross-token context AND is conditioned on the binder's own noisy
+    # backbone (r_noisy) + target, which is required for structure-aware residue
+    # prediction. "s_inputs" is kept as a structure-blind,
+    # cross-token-free baseline/ablation only.
+    "input_source": "diffusion_internal",
     # diffusion_internal controls:
     #   trunk_grad_scale: AA-loss gradient into the coord trunk. 1.0 = full
     #     co-design coupling (backbone becomes sequence-aware); lower it only

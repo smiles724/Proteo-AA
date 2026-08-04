@@ -269,7 +269,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--aa-mask-prob", type=float, default=0.0)
     p.add_argument("--aa-mask-min-prob", type=float, default=0.0)
     p.add_argument("--aa-mask-max-prob", type=float, default=0.0)
-    p.add_argument("--aa-input-source", default="backbone_geometry")
+    p.add_argument("--aa-input-source", default="diffusion_internal")
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
     p.add_argument("--disable-aa-loss", action="store_true", default=True)
     p.add_argument("--disable-sidechain", action="store_true", default=True)

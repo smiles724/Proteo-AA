@@ -55,7 +55,6 @@ echo "AA-head checkpoint: ${AA_HEAD_CKPT}"
   --output-dir "${RUN_ROOT}" \
   --load-checkpoint "${AA_HEAD_CKPT}" \
   --warm-start-params-only \
-  --aa-input-source "${AA_INPUT_SOURCE:-backbone_geometry}" \
   --crop-size "${CROP_SIZE:-640}" \
   --max-n-token "${MAX_N_TOKEN:-640}" \
   --max-crop-retries "${MAX_CROP_RETRIES:-64}" \

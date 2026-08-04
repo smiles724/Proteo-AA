@@ -364,7 +364,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--aa-mask-prob", type=float, default=1.0)
     p.add_argument("--aa-mask-min-prob", type=float, default=1.0)
     p.add_argument("--aa-mask-max-prob", type=float, default=1.0)
-    p.add_argument("--aa-input-source", default="backbone_geometry")
+    p.add_argument("--aa-input-source", default="diffusion_internal")
     p.add_argument("--trunk-grad-scale", type=float, default=0.0)
     p.add_argument("--disable-aa-loss", action="store_true", default=False)
     p.add_argument("--disable-sidechain", action="store_true", default=True)
@@ -461,10 +461,6 @@ def main() -> None:
         print(f"strict_tokens={strict_tokens.numel()}")
         print(f"n_atoms={strict_label['coordinate'].shape[-2]}")
         print(f"atoms_per_token={torch.bincount(clean['atom_to_token_idx']).unique().tolist()}")
-        bb_idx = clean["aa_bb_atom_idx"]
-        if bb_idx.shape != (strict_tokens.numel(), len(BACKBONE)) or not (bb_idx >= 0).all():
-            raise AssertionError(f"invalid strict aa_bb_atom_idx: shape={tuple(bb_idx.shape)}")
-        print(f"aa_backbone_index_shape={tuple(bb_idx.shape)}")
         print(f"model_has_aa_clean={'aa_clean' in clean}")
         return
 

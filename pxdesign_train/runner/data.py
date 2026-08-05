@@ -99,6 +99,11 @@ class DesignSourceDataset(Dataset):
     aa_mask_max_prob: float = 1.0
     compute_sidechain: bool = False
     backbone_only_binder: bool = False
+    # Rebuild the cropped complex with a uniform four-atom (N/CA/C/O) binder
+    # before Protenix featurization.  This is the train/inference parity switch:
+    # native binder side-chain rows, atom counts, names and reference metadata
+    # must never reach B_theta/a_token/AA head.  Target/receptor atoms are kept.
+    inference_safe_binder: bool = True
     # NOTE: no prior default existed anywhere for this; 8 is a chosen value.
     # Override at construction if a different retry budget is wanted.
     max_crop_retries: int = 8
@@ -132,7 +137,7 @@ class DesignSourceDataset(Dataset):
             try:
                 return self._get_one(local_idx)
             except ValueError as exc:
-                if "DesignCropper:" not in str(exc):
+                if not str(exc).startswith(("DesignCropper:", "InferenceSafeBinder:")):
                     raise
                 last_crop_error = exc
 
@@ -156,10 +161,56 @@ class DesignSourceDataset(Dataset):
         feat = _slice_feature_dict(feat, atom_array, token_array, crop)
         label = _slice_label_dict(label, atom_array, token_array, crop)
 
+        # Capture supervision before the strict input path removes/canonicalises
+        # the binder identity.  These tensors stay outside the model-input
+        # feature construction: aa_clean is a loss label; native side-chain
+        # geometry is consumed only by S_phi's supervised loss.
+        native_aa = DesignFeaturizer._compute_clean_aa_labels(crop.atom_array, feat)
+        native_sc = None
+        if self.compute_sidechain:
+            native_sc = DesignFeaturizer(
+                DesignSelection(binder_atom_mask=crop.binder_atom_mask)
+            )._compute_sidechain_targets(crop.atom_array, feat, crop.binder_atom_mask)
+
+        model_atom_array = crop.atom_array
+        model_binder_mask = crop.binder_atom_mask
+        # A real Protenix AtomArray has the reference/entity annotations needed
+        # for a second featurization pass.  Minimal synthetic providers used by
+        # unit tests (and some legacy adapters) may only carry backbone rows and
+        # a tiny feature dict; those are already topology-safe and can use the
+        # existing path.  Never silently fall through when native binder side
+        # chains are present but the adapter lacks enough metadata to scrub them.
+        categories = set(crop.atom_array.get_annotation_categories())
+        strict_ready = {
+            "ref_pos", "ref_mask", "ref_charge", "ref_space_uid",
+            "mol_atom_index", "centre_atom_mask",
+        }.issubset(categories)
+        has_native_binder_sidechain = _has_binder_sidechain(
+            crop.atom_array, crop.binder_atom_mask
+        )
+        if self.inference_safe_binder and strict_ready:
+            (
+                model_atom_array,
+                _model_token_array,
+                feat,
+                label,
+                model_binder_mask,
+            ) = _refeaturize_inference_safe_binder(
+                crop.atom_array,
+                crop.binder_atom_mask,
+                source_feature_dict=feat,
+            )
+        elif self.inference_safe_binder and has_native_binder_sidechain:
+            raise ValueError(
+                "InferenceSafeBinder: native binder side-chain rows are present, "
+                "but the provider lacks the reference annotations required for "
+                "strict re-featurization"
+            )
+
         # Apply design featurization on the cropped complex.
         rng = np.random.default_rng((self.seed + idx) % (2**32))
         selection = DesignSelection(
-            binder_atom_mask=crop.binder_atom_mask,
+            binder_atom_mask=model_binder_mask,
             hotspot_radius=self.hotspot_radius,
             hotspot_max_frac=self.hotspot_max_frac,
             hotspot_force_zero_prob=self.hotspot_force_zero_prob,
@@ -167,13 +218,28 @@ class DesignSourceDataset(Dataset):
             aa_mask_prob=self.aa_mask_prob,
             aa_mask_min_prob=self.aa_mask_min_prob,
             aa_mask_max_prob=self.aa_mask_max_prob,
-            compute_sidechain=self.compute_sidechain,
+            # Native side-chain supervision was captured before strict
+            # re-featurization and is merged below.  The model-side AtomArray is
+            # intentionally incapable of reconstructing those labels.
+            compute_sidechain=self.compute_sidechain and not self.inference_safe_binder,
+            aa_clean_override=native_aa,
             backbone_only_binder=self.backbone_only_binder,
             rng=rng,
         )
         new_feat, new_label, new_aa = DesignFeaturizer(selection).transform(
-            crop.atom_array, feat, label,
+            model_atom_array, feat, label,
         )
+
+        if native_sc is not None and self.inference_safe_binder:
+            # Local GT geometry/name/mask tensors are supervision.  Atom-index
+            # tensors, however, must refer to the new strict N_atom axis.
+            strict_idx, strict_centres = _strict_atom_index_features(
+                new_aa, new_feat, model_binder_mask
+            )
+            native_sc = dict(native_sc)
+            native_sc["sc_bb_atom_idx"] = strict_idx
+            native_sc["sc_token_center_idx"] = strict_centres
+            new_feat.update(native_sc)
 
         return {
             "input_feature_dict": new_feat,
@@ -181,6 +247,178 @@ class DesignSourceDataset(Dataset):
             "binder_token_mask": torch.from_numpy(crop.binder_token_mask),
             "source_name": self.source_name,
         }
+
+
+_BACKBONE_NAMES = ("N", "CA", "C", "O")
+_CANONICAL_BACKBONE_REF = {
+    "N": np.asarray([-0.525, 1.363, 0.000], dtype=np.float32),
+    "CA": np.asarray([0.000, 0.000, 0.000], dtype=np.float32),
+    "C": np.asarray([1.526, 0.000, 0.000], dtype=np.float32),
+    "O": np.asarray([2.153, -1.062, 0.000], dtype=np.float32),
+}
+
+
+def _has_binder_sidechain(atom_array, binder_atom_mask) -> bool:
+    names = np.asarray(atom_array.atom_name).astype(str)
+    binder = np.asarray(binder_atom_mask, dtype=bool)
+    return bool(
+        np.any(binder & ~np.isin(names, np.asarray(_BACKBONE_NAMES)))
+    )
+
+
+def _canonical_backbone_binder_atom_array(atom_array, binder_atom_mask):
+    """Remove binder side chains and erase native residue metadata.
+
+    The target/receptor is left untouched.  Every binder residue is represented
+    by the same four GLY-template atom rows, so atom count, atom names, element,
+    charge and reference conformer cannot identify its native amino acid.
+    """
+    binder = np.asarray(binder_atom_mask, dtype=bool)
+    if binder.shape != (len(atom_array),):
+        raise ValueError(
+            "InferenceSafeBinder: binder mask shape "
+            f"{binder.shape} != atom count {len(atom_array)}"
+        )
+    names = np.asarray(atom_array.atom_name)
+    keep = ~binder | np.isin(names, np.asarray(_BACKBONE_NAMES))
+    safe = atom_array[keep].copy()
+    safe_binder = binder[keep]
+
+    # Enforce the exact inference topology: one N/CA/C/O row per binder
+    # residue.  Silent missing/duplicate rows would reintroduce atom-count
+    # identity signals and break the fixed topology contract.
+    chain = np.asarray(safe.chain_id)
+    resid = np.asarray(safe.res_id)
+    residue_keys = []
+    seen = set()
+    for key in zip(chain[safe_binder], resid[safe_binder]):
+        if key not in seen:
+            seen.add(key)
+            residue_keys.append(key)
+    for key in residue_keys:
+        row = safe_binder & (chain == key[0]) & (resid == key[1])
+        row_names = [str(value) for value in np.asarray(safe.atom_name)[row]]
+        if sorted(row_names) != sorted(_BACKBONE_NAMES):
+            raise ValueError(
+                "InferenceSafeBinder: binder residue "
+                f"{key!r} must contain exactly N/CA/C/O, got {row_names}"
+            )
+
+    safe.res_name[safe_binder] = "GLY"
+    categories = set(safe.get_annotation_categories())
+    if "cano_seq_resname" in categories:
+        safe.cano_seq_resname[safe_binder] = "GLY"
+    if "ref_pos" in categories:
+        safe.ref_pos[safe_binder] = np.stack(
+            [_CANONICAL_BACKBONE_REF[str(name)] for name in safe.atom_name[safe_binder]]
+        )
+    if "ref_mask" in categories:
+        safe.ref_mask[safe_binder] = 1
+    if "ref_charge" in categories:
+        safe.ref_charge[safe_binder] = 0
+
+    # ref_space_uid is used as an equality/grouping identifier.  Reassigning it
+    # by residue removes native gaps caused by variable side-chain atom counts.
+    if "ref_space_uid" in categories:
+        uid = np.empty(len(safe), dtype=safe.ref_space_uid.dtype)
+        uid_by_key = {}
+        for i, key in enumerate(zip(chain, resid)):
+            uid_by_key.setdefault(key, len(uid_by_key))
+            uid[i] = uid_by_key[key]
+        safe.ref_space_uid[:] = uid
+
+    # Likewise, make atom indices contiguous within each molecule after rows
+    # were removed; the absolute values are bookkeeping, never residue labels.
+    if "mol_atom_index" in categories:
+        mol = np.asarray(safe.mol_id) if "mol_id" in categories else chain
+        next_index = {}
+        rebuilt = np.empty(len(safe), dtype=safe.mol_atom_index.dtype)
+        for i, mol_key in enumerate(mol):
+            value = next_index.get(mol_key, 0)
+            rebuilt[i] = value
+            next_index[mol_key] = value + 1
+        safe.mol_atom_index[:] = rebuilt
+
+    # AtomArrayTokenizer requires centre_atom_mask even for lightweight
+    # providers whose annotations only contain distogram_rep_atom_mask.
+    if "cano_seq_resname" not in categories:
+        safe.set_annotation(
+            "cano_seq_resname",
+            np.asarray(safe.res_name).astype("U3").copy(),
+        )
+    if "centre_atom_mask" not in categories:
+        safe.set_annotation(
+            "centre_atom_mask",
+            np.asarray(safe.distogram_rep_atom_mask).astype(np.int64).copy(),
+        )
+    for category in ("centre_atom_mask", "distogram_rep_atom_mask"):
+        if category in safe.get_annotation_categories():
+            values = getattr(safe, category)
+            values[safe_binder] = 0
+            values[safe_binder & (np.asarray(safe.atom_name) == "CA")] = 1
+    return safe, safe_binder
+
+
+def _refeaturize_inference_safe_binder(
+    atom_array,
+    binder_atom_mask,
+    *,
+    source_feature_dict: Optional[dict[str, torch.Tensor]] = None,
+):
+    """Build Protenix features only after strict binder canonicalisation."""
+    from protenix.data.core.featurizer import Featurizer
+    from protenix.data.tokenizer import AtomArrayTokenizer
+    from protenix.data.utils import data_type_transform, make_dummy_feature
+
+    safe, safe_binder = _canonical_backbone_binder_atom_array(
+        atom_array, binder_atom_mask
+    )
+    tokens = AtomArrayTokenizer(safe).get_token_array()
+    original_token_count = int(np.asarray(atom_array.distogram_rep_atom_mask).sum())
+    if len(tokens) != original_token_count:
+        raise ValueError(
+            "InferenceSafeBinder: strict token count "
+            f"{len(tokens)} != native token count {original_token_count}"
+        )
+
+    base = Featurizer(
+        cropped_token_array=tokens,
+        cropped_atom_array=safe,
+        ref_pos_augment=False,
+        lig_atom_rename=False,
+    )
+    feat = base.get_all_input_features()
+    label = base.get_labels()
+    feat = make_dummy_feature(features_dict=feat, dummy_feats=["msa", "template"])
+    feat = data_type_transform(feat_or_label_dict=feat)
+    label = data_type_transform(feat_or_label_dict=label)
+    if source_feature_dict is not None and "is_distillation" in source_feature_dict:
+        feat["is_distillation"] = source_feature_dict["is_distillation"]
+    else:
+        feat["is_distillation"] = torch.tensor([False])
+    return safe, tokens, feat, label, safe_binder
+
+
+def _strict_atom_index_features(atom_array, feature_dict, binder_atom_mask):
+    """Return strict-axis N/CA/C/O indices plus representative atom indices."""
+    atom_to_token = feature_dict["atom_to_token_idx"].detach().cpu().long()
+    n_token = int(feature_dict["restype"].shape[-2])
+    out = torch.full((n_token, 4), -1, dtype=torch.long)
+    binder = np.asarray(binder_atom_mask, dtype=bool)
+    col = {name: i for i, name in enumerate(_BACKBONE_NAMES)}
+    for atom_idx, name in enumerate(np.asarray(atom_array.atom_name)):
+        token_idx = int(atom_to_token[atom_idx])
+        if binder[atom_idx] and str(name) in col:
+            out[token_idx, col[str(name)]] = atom_idx
+    centres = torch.from_numpy(
+        np.nonzero(np.asarray(atom_array.distogram_rep_atom_mask).astype(bool))[0]
+    ).long()
+    if centres.numel() != n_token:
+        raise ValueError(
+            "InferenceSafeBinder: representative atom count "
+            f"{centres.numel()} != token count {n_token}"
+        )
+    return out, centres
 
 
 def _slice_feature_dict(

@@ -95,6 +95,13 @@ class DesignSelection:
     aa_mask_max_prob: float = 1.0
     aa_mask_prob: float = 1.0
     compute_sidechain: bool = False
+    # Optional labels captured from the native (pre-scrub) binder.  The strict
+    # training pipeline removes binder side-chain atoms and canonicalises every
+    # binder residue to the same GLY backbone *before* Protenix featurization;
+    # without this override the AA supervision would therefore also become GLY.
+    # This tensor is supervision only: masked design tokens still receive xpb in
+    # feature_dict["restype"].
+    aa_clean_override: Optional[torch.Tensor] = None
     # M1: emit `backbone_loss_mask` that excludes binder (design-token)
     # side-chain atoms from the backbone (L_bb) coordinate target, so B_theta is
     # backbone-only and S_phi is the sole side-chain generator. This also matches
@@ -169,8 +176,35 @@ class DesignFeaturizer:
 
         # 1. Preserve clean AA labels before turning binder residues into xpb.
         #    These labels are supervision targets only, not model inputs.
-        aa_clean = self._compute_clean_aa_labels(atom_array, feature_dict)
+        aa_clean = (
+            self._compute_clean_aa_labels(atom_array, feature_dict)
+            if self.selection.aa_clean_override is None
+            else self.selection.aa_clean_override.detach().cpu().long().clone()
+        )
+        if aa_clean.shape != (int(feature_dict["restype"].shape[-2]),):
+            raise ValueError(
+                "aa_clean_override must have one label per token; "
+                f"got {tuple(aa_clean.shape)} for {feature_dict['restype'].shape[-2]} tokens"
+            )
+        if self.selection.aa_clean_override is not None:
+            override = torch.as_tensor(
+                self.selection.aa_clean_override, dtype=torch.long
+            ).detach().clone()
+            if override.shape != aa_clean.shape:
+                raise ValueError(
+                    "aa_clean_override shape "
+                    f"{tuple(override.shape)} != token labels {tuple(aa_clean.shape)}"
+                )
+            aa_clean = override
         clean_restype = self._compute_restype(atom_array, feature_dict)
+        # Restore the native AA one-hot only for tokens deliberately left
+        # unmasked by a partial-corruption schedule.  Fully masked Stage I uses
+        # xpb below, so the label never crosses into the model input.
+        valid_aa = (aa_clean >= 0) & (aa_clean < 20)
+        if valid_aa.any():
+            clean_restype = clean_restype.clone()
+            clean_restype[valid_aa] = 0
+            clean_restype[valid_aa, aa_clean[valid_aa]] = 1
 
         # 1b. Side-chain targets (Stage II-A): computed from the ORIGINAL atom
         #     array (real res_name + GT side-chain coords), BEFORE xpb marking.

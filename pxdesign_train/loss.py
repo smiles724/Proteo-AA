@@ -520,8 +520,37 @@ class PXDesignLoss(nn.Module):
         else:
             aa_post_ce = total.sum() * 0.0
 
+        # --- Differentiable sub-losses for alternating (Stage III) training ---
+        # `loss_sc` = ONLY the side-chain coordinate + physical terms; `loss_bb`
+        # = everything else (backbone structure + AA + post-refinement). We build
+        # loss_bb as `total - loss_sc` so it EXCLUDES the side-chain coordinate
+        # loss entirely (including that loss's path back into the Backbone Module
+        # through h_res): in the bb phase we do not want L_sc to update the
+        # backbone. The post-refinement terms stay in loss_bb, so the bb phase
+        # still updates the fusion modules + AA head + h_res generation, with
+        # gradients flowing *through* the (un-stepped) Side-Chain Module.
+        # Both are returned NON-detached so the trainer can backprop each phase.
+        if has_global_sc or has_local_sc:
+            if has_global_sc:
+                loss_sc = self.weight_sc_local * sc_local + self.weight_sc_phys * sc_phys_val
+            else:
+                loss_sc = (
+                    self.weight_sc_local * sc_local
+                    + self.weight_sc_phys * sc_phys_val
+                    + self.weight_sc_global * sc_global_val
+                )
+            loss_bb = total - loss_sc
+            loss_sc_ret = loss_sc.mean()
+        else:
+            # No side-chain outputs this step: sc phase is a no-op. Return a
+            # detached zero so the trainer skips the sc backward/step.
+            loss_bb = total
+            loss_sc_ret = total.detach().mean() * 0.0
+
         return {
             "loss": total.mean(),
+            "loss_bb": loss_bb.mean(),
+            "loss_sc": loss_sc_ret,
             "mse": mse.mean().detach(),
             "ca_rmsd": ca_rmsd,
             "bb_rmsd": bb_rmsd,

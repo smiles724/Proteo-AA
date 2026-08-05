@@ -214,23 +214,102 @@ class PXDesignTrainer:
 
     def _init_optimizer(self) -> None:
         cfg = self.configs.training
-        params = [p for p in self.model.parameters() if p.requires_grad]
-        if not params:
-            raise ValueError("No trainable parameters")
-        self.optimizer = torch.optim.Adam(
-            params,
-            lr=float(cfg.lr),
-            betas=(0.9, 0.95),
-            weight_decay=float(getattr(cfg, "weight_decay", 0.0)),
-        )
-        # Linear warmup then constant lr. Matches Protenix's demo style; if
-        # callers want cosine they can swap this out post-hoc on `self.scheduler`.
+        self.train_mode = str(getattr(cfg, "train_mode", "joint"))
         warmup = int(getattr(cfg, "warmup_steps", 0))
 
-        def _lr_lambda(step):
-            return min(1.0, (step + 1) / max(1, warmup)) if warmup > 0 else 1.0
+        def _make_adam(params):
+            return torch.optim.Adam(
+                params,
+                lr=float(cfg.lr),
+                betas=(0.9, 0.95),
+                weight_decay=float(getattr(cfg, "weight_decay", 0.0)),
+            )
 
-        self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
+        # Linear warmup then constant lr. Matches Protenix's demo style; if
+        # callers want cosine they can swap this out post-hoc on `self.scheduler`.
+        def _make_sched(opt):
+            def _lr_lambda(step):
+                return min(1.0, (step + 1) / max(1, warmup)) if warmup > 0 else 1.0
+
+            return torch.optim.lr_scheduler.LambdaLR(opt, _lr_lambda)
+
+        # Alternating is a Stage-III concept: it only applies when BOTH modules
+        # are actively trained. Stage I is backbone-only (no side-chain params)
+        # and Stage II warms up S_phi with a frozen backbone (no trainable
+        # backbone params); in those cases we transparently fall back to joint
+        # (normal single-optimizer training) with a log line rather than
+        # erroring, so 'alternating' is a safe default across all stages. Multi-
+        # GPU IS supported: the two phases' grads are all-reduced manually before
+        # the optimizer step (see `_allreduce_alternating_grads`).
+        sc_params, bb_params = [], []
+        if self.train_mode == "alternating":
+            fallback_reason = None
+            sc_params, bb_params = self._split_sc_bb_params()
+            if not sc_params:
+                fallback_reason = (
+                    "no Side-Chain Module parameters (Stage I backbone-only "
+                    "or side-chain disabled)"
+                )
+            elif not bb_params:
+                fallback_reason = (
+                    "no trainable backbone-group parameters (Stage II "
+                    "side-chain warmup with a frozen backbone)"
+                )
+            if fallback_reason is not None:
+                # Uses the single-optimizer code path (internally the "joint"
+                # branch), but with only one module trainable it just trains that
+                # one module — there is no two-module 'joint' happening here.
+                self._log(
+                    "train_mode='alternating' not applicable "
+                    f"({fallback_reason}) -> single-optimizer training."
+                )
+                self.train_mode = "joint"
+
+        if self.train_mode == "alternating":
+            self.sc_params = sc_params
+            self.bb_params = bb_params
+            self.sc_optimizer = _make_adam(sc_params)
+            self.bb_optimizer = _make_adam(bb_params)
+            self.sc_lr_scheduler = _make_sched(self.sc_optimizer)
+            self.bb_lr_scheduler = _make_sched(self.bb_optimizer)
+            # Aliases so generic code (checkpoint/log) that reaches for a single
+            # optimizer still finds one; the step loop uses `_optimizers`.
+            self.optimizer = self.bb_optimizer
+            self.lr_scheduler = self.bb_lr_scheduler
+            self._optimizers = [self.sc_optimizer, self.bb_optimizer]
+            self._schedulers = [self.sc_lr_scheduler, self.bb_lr_scheduler]
+            self._log(
+                f"Alternating training: "
+                f"{sum(p.numel() for p in sc_params) / 1e6:.2f}M side-chain params, "
+                f"{sum(p.numel() for p in bb_params) / 1e6:.2f}M backbone-group params"
+            )
+        else:
+            params = [p for p in self.model.parameters() if p.requires_grad]
+            if not params:
+                raise ValueError("No trainable parameters")
+            self.optimizer = _make_adam(params)
+            self.lr_scheduler = _make_sched(self.optimizer)
+            self._optimizers = [self.optimizer]
+            self._schedulers = [self.lr_scheduler]
+
+    def _split_sc_bb_params(self):
+        """Partition trainable params into the Side-Chain group and the Backbone
+        group for alternating training.
+
+        The Side-Chain group is exactly the ``SideChainModule`` (parameter names
+        containing ``sidechain_module``); everything else trainable — the
+        DiffusionModule, the AA head, the h_res generation, and the a/q
+        fusion / feedback modules — is the Backbone group. Putting the fusion
+        modules in the backbone group is deliberate: they consume the side
+        chain's output and are supervised only by the post-refinement loss (part
+        of ``loss_bb``), so they must update in the bb phase, not the sc phase.
+        """
+        sc, bb = [], []
+        for name, p in self.raw_model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (sc if "sidechain_module" in name else bb).append(p)
+        return sc, bb
 
     def _init_dataloader(self) -> None:
         c = self.components
@@ -295,7 +374,12 @@ class PXDesignTrainer:
         Public for tests; production code calls `train_step` which wraps this.
         """
         batch = self._to_device(batch)
-        out = self.model(
+        # In alternating mode we fill grads via torch.autograd.grad, which does
+        # NOT engage DDP's reducer; forward through the raw model so DDP's
+        # backward-expecting hooks are never armed, and sync grads manually
+        # (see `_allreduce_alternating_grads`). Single-GPU: raw_model IS model.
+        fwd_model = self.raw_model if getattr(self, "train_mode", "joint") == "alternating" else self.model
+        out = fwd_model(
             input_feature_dict=batch["input_feature_dict"],
             label_dict=batch["label_dict"],
             mode="train",
@@ -352,16 +436,27 @@ class PXDesignTrainer:
             self._log(f"Skip step {self.step}: non-finite loss {loss.item()}")
             return {k: torch.zeros_like(v) for k, v in loss_out.items()}
 
-        (loss / self.iters_to_accumulate).backward()
+        # --- Accumulate gradients (mode-specific) ---
+        if self.train_mode == "alternating":
+            self._alternating_accumulate(loss_out)
+        else:
+            (loss / self.iters_to_accumulate).backward()
 
+        # --- Optimizer step on the accumulation boundary (shared) ---
         is_update = (self.global_step + 1) % self.iters_to_accumulate == 0
         if is_update:
+            # Sync the alternating phases' grads across ranks before clipping/step
+            # (autograd.grad bypassed DDP's own all-reduce). No-op single-GPU.
+            if self.train_mode == "alternating":
+                self._allreduce_alternating_grads()
             grad_clip = float(getattr(self.configs.training, "grad_clip_norm", 0.0))
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
-            self.lr_scheduler.step()
+            for opt in self._optimizers:
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+            for sched in self._schedulers:
+                sched.step()
             if self.ema_wrapper is not None:
                 self.ema_wrapper.update()
             self.step += 1
@@ -369,6 +464,77 @@ class PXDesignTrainer:
                 self.train_sampler.set_step(self.step)
         self.global_step += 1
         return loss_out
+
+    def _alternating_accumulate(self, loss_out: dict[str, torch.Tensor]) -> None:
+        """One forward's worth of gradient for the alternating (Stage III) scheme.
+
+        From a SINGLE forward we take two independent gradient sets via
+        ``torch.autograd.grad`` so the phases never contaminate each other:
+
+          - Phase A (side chain): ``d loss_sc / d(sc params)`` — the Side-Chain
+            Module trained against the backbone's fixed output this step.
+          - Phase B (backbone group): ``d loss_bb / d(bb params)`` — backbone +
+            AA head + h_res generation + a/q fusion, with the gradient flowing
+            THROUGH the (un-stepped) Side-Chain Module. Because we differentiate
+            ``loss_bb`` w.r.t. the backbone params directly, the side chain acts
+            as a conduit (never a ``no_grad`` barrier) yet its own params are not
+            updated here — matching the "freeze via requires_grad=False, not
+            no_grad" requirement without touching any requires_grad flag.
+
+        Gradients are written into ``.grad`` (scaled by ``iters_to_accumulate``)
+        so grad accumulation and the shared optimizer-step boundary keep working.
+        """
+        acc = self.iters_to_accumulate
+
+        # Phase A — skip cleanly if this batch produced no side-chain output
+        # (loss_sc is then a detached zero, so requires_grad is False).
+        loss_sc = loss_out["loss_sc"]
+        if loss_sc.requires_grad:
+            sc_grads = torch.autograd.grad(
+                loss_sc, self.sc_params, retain_graph=True, allow_unused=True
+            )
+            self._accumulate_into_grad(self.sc_params, sc_grads, acc)
+
+        # Phase B — last consumer of the shared graph, so no retain.
+        bb_grads = torch.autograd.grad(
+            loss_out["loss_bb"], self.bb_params, retain_graph=False, allow_unused=True
+        )
+        self._accumulate_into_grad(self.bb_params, bb_grads, acc)
+
+    @staticmethod
+    def _accumulate_into_grad(params, grads, acc: int) -> None:
+        """Add freshly computed grads into ``param.grad`` (creating it if None),
+        mirroring what ``loss.backward()`` would do under grad accumulation."""
+        for p, g in zip(params, grads):
+            if g is None:
+                continue  # param not in this loss's graph (allow_unused)
+            g = (g / acc).detach()
+            p.grad = g if p.grad is None else (p.grad + g)
+
+    def _allreduce_alternating_grads(self) -> None:
+        """Average the alternating phases' gradients across DDP ranks.
+
+        The alternating path fills ``param.grad`` via ``torch.autograd.grad``,
+        which does NOT trigger DDP's gradient all-reduce hooks (those fire only
+        on ``loss.backward()``). So after each rank has accumulated its local
+        grads we average them across ranks manually — exactly what DDP would do —
+        once at the accumulation boundary, right before the optimizer step.
+
+        A param can legitimately have ``grad is None`` on one rank but not
+        another (e.g. a batch with no side-chain atoms skips Phase A, so its
+        ``loss_sc`` is a detached zero and the side-chain params get no grad). We
+        materialise a zero grad in that case so every rank participates in the
+        collective with matching shapes; averaging by ``world_size`` then matches
+        DDP semantics (a rank with no contribution counts as zero).
+        """
+        if not (self.use_ddp and dist.is_available() and dist.is_initialized()):
+            return
+        world = float(self.world_size)
+        for p in (self.sc_params + self.bb_params):
+            if p.grad is None:
+                p.grad = torch.zeros_like(p)
+            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+            p.grad /= world
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:
@@ -426,16 +592,21 @@ class PXDesignTrainer:
             return None
         name = f"step{self.step}{('_' + tag) if tag else ''}.pt"
         path = os.path.join(self.checkpoint_dir, name)
-        torch.save(
-            {
-                "model": self.model.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.lr_scheduler.state_dict(),
-                "step": self.step,
-                "global_step": self.global_step,
-            },
-            path,
-        )
+        state = {
+            "model": self.model.state_dict(),
+            "step": self.step,
+            "global_step": self.global_step,
+            "train_mode": self.train_mode,
+        }
+        if self.train_mode == "alternating":
+            state["sc_optimizer"] = self.sc_optimizer.state_dict()
+            state["bb_optimizer"] = self.bb_optimizer.state_dict()
+            state["sc_scheduler"] = self.sc_lr_scheduler.state_dict()
+            state["bb_scheduler"] = self.bb_lr_scheduler.state_dict()
+        else:
+            state["optimizer"] = self.optimizer.state_dict()
+            state["scheduler"] = self.lr_scheduler.state_dict()
+        torch.save(state, path)
         self._log(f"Saved checkpoint -> {path}")
         return path
 
@@ -517,8 +688,21 @@ class PXDesignTrainer:
         missing, unexpected = self.model.load_state_dict(state, strict=load_strict)
         self._log(f"Loaded {path} (missing={len(missing)}, unexpected={len(unexpected)})")
         if not params_only:
-            self.optimizer.load_state_dict(ckpt["optimizer"])
-            self.lr_scheduler.load_state_dict(ckpt["scheduler"])
+            ckpt_mode = str(ckpt.get("train_mode", "joint"))
+            if ckpt_mode != self.train_mode:
+                self._log(
+                    f"Checkpoint train_mode='{ckpt_mode}' != current "
+                    f"'{self.train_mode}'; skipping optimizer/scheduler restore "
+                    f"(model weights + step counters still loaded)."
+                )
+            elif self.train_mode == "alternating":
+                self.sc_optimizer.load_state_dict(ckpt["sc_optimizer"])
+                self.bb_optimizer.load_state_dict(ckpt["bb_optimizer"])
+                self.sc_lr_scheduler.load_state_dict(ckpt["sc_scheduler"])
+                self.bb_lr_scheduler.load_state_dict(ckpt["bb_scheduler"])
+            else:
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+                self.lr_scheduler.load_state_dict(ckpt["scheduler"])
             self.step = int(ckpt.get("step", 0))
             self.global_step = int(ckpt.get("global_step", self.step))
 

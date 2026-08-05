@@ -78,6 +78,23 @@ training_configs["training"] = {
     "checkpoint_interval": 400,
     "log_interval": 50,
     "eval_interval": 400,
+    # Stage III training paradigm.
+    #   "joint"       — single optimizer, one backward over the combined loss
+    #                   (backbone + AA + side-chain + post), gradients end-to-end.
+    #   "alternating" — per batch, ONE forward then two selective updates:
+    #                   phase A updates ONLY the Side-Chain Module from loss_sc,
+    #                   phase B updates ONLY the Backbone group (diffusion + AA
+    #                   head + h_res generation + a/q fusion modules) from
+    #                   loss_bb, with gradients flowing THROUGH the un-stepped
+    #                   Side-Chain Module (never detached). Motivated by
+    #                   train-like-inference: each module trains against the
+    #                   other module's fixed output, matching per-step inference.
+    # DEFAULT = "alternating" (Fang's Stage III direction: module-alternating
+    # training). Works on single- AND multi-GPU: under DDP the two phases' grads
+    # are all-reduced manually before the step (autograd.grad bypasses DDP's own
+    # hooks). Falls back to joint automatically when only one module is trainable
+    # (Stage I backbone-only / Stage II side-chain warmup).
+    "train_mode": "alternating",
 }
 
 # Loss weights from eq. 4 of the report.

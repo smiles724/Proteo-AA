@@ -40,7 +40,7 @@ def cogenerate(
     temperature: float = 0.0,
     chunk_size: Optional[int] = None,
     sidechain_cycle: bool = False,
-    sc_start_frac: float = 0.5,
+    sc_start_frac: float = 1.0,
     stop_on_seq_stable: bool = False,
     seq_patience: int = 3,
     seq_mode: str = "complete_unmask",
@@ -300,13 +300,16 @@ def cogenerate(
             # all trajectory); the final sequence is this prediction at the last step.
             sampled[positions] = pred[positions]
 
-        # --- side-chain step (late sigma): decode side chains for committed
-        #     residues, pool -> h_res', persist for the next backbone step. ---
-        # Gate on STEP fraction, not on a linear fraction of sigma_max: the Karras (rho=7)
-        # schedule collapses sigma so fast that `sig_t <= 0.5*sigma_max` is already true at
-        # step 3 of 20 (sigma ~995 A) — i.e. "late sigma" was firing for 17 of 20 steps, most
-        # of them on near-pure noise. Last `sc_start_frac` of the trajectory is what the
-        # comment always meant.
+        # --- side-chain step: decode side chains for committed residues, pool ->
+        #     h_res', persist for the next backbone step. ---
+        # DEFAULT sc_start_frac=1.0 -> S runs on EVERY denoising step. This matches
+        # training, where the Side-Chain Module sees B's one-step clean estimate
+        # x0^bb at ALL sampled sigmas (no sigma/step gating in the train forward);
+        # gating S to only late steps at inference would be a train/inference
+        # mismatch S was never trained under. sc_start_frac<1.0 is kept as an
+        # ablation knob (delay S to the last `sc_start_frac` of the trajectory,
+        # gated on STEP fraction — the Karras rho=7 schedule collapses sigma too
+        # fast for a sigma-threshold to mean "late").
         _n_steps = len(noise_schedule) - 1
         _sc_from = int(round((1.0 - sc_start_frac) * _n_steps))
         if sc_enabled and step >= _sc_from:

@@ -50,7 +50,10 @@ def build(args, device):
                                    train_samples_per_epoch=max(1, args.max_steps))
 
     configs = parse_configs(training_configs, arg_str="")
-    configs.residue_type.input_source = args.aa_input_source
+    if args.aa_input_source is not None:
+        configs.residue_type.input_source = args.aa_input_source
+    # Keep logging/JSON explicit even when the CLI inherits the project default.
+    args.aa_input_source = configs.residue_type.input_source
     configs.residue_type.trunk_grad_scale = args.trunk_grad_scale
     configs.residue_type.internal_reduce = args.internal_reduce
     configs.residue_type.mask_mode = "all"
@@ -66,6 +69,8 @@ def build(args, device):
     configs.training.ema_decay = 0.0
     configs.training.iters_to_accumulate = 1
     configs.training.num_workers = 0
+    if args.train_mode is not None:
+        configs.training.train_mode = args.train_mode
     configs.load_strict = False
     configs.loss.align_before_mse = (device.type == "cuda")
     if getattr(args, "sidechain_warmup", False) or getattr(args, "coevolution", False):
@@ -226,8 +231,12 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--dtype", default="bf16")
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--aa_input_source", default="s_inputs",
-                    choices=["s_inputs", "diffusion_internal"])
+    ap.add_argument(
+        "--aa_input_source",
+        default=None,
+        choices=["s_inputs", "diffusion_internal"],
+        help="AA-head input source; defaults to configs.residue_type.input_source.",
+    )
     ap.add_argument("--trunk_grad_scale", type=float, default=1.0)
     ap.add_argument("--internal_reduce", default="mean", choices=["mean", "low_sigma"])
     ap.add_argument("--cogenerate", action="store_true",
@@ -283,6 +292,12 @@ def main():
     ap.add_argument("--no_template_init", action="store_true",
                     help="A/B control: disable Overleaf par.221 template-anchored init "
                          "and fall back to the legacy isotropic Gaussian init.")
+    ap.add_argument(
+        "--train_mode",
+        default=None,
+        choices=["joint", "alternating"],
+        help="Stage III training mode; defaults to configs.training.train_mode.",
+    )
     ap.add_argument("--out", default="mini_experiment.json")
     args = ap.parse_args()
     device = torch.device(args.device)

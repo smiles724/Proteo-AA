@@ -186,3 +186,42 @@ def test_bs_arms_present_and_default_off():
     assert training_configs["sidechain"]["q_bs"] is False
     assert "a-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["a-bs"]["a_bs_concat"] is True
     assert "q-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["q-bs"]["q_bs"] is True
+
+
+def test_stage2_checkpoint_groups_are_derived_and_non_trivial():
+    """An arm's Stage II warm-start requirement must follow from its own config.
+
+    bb_context decides whether S_phi's atom axis is 10 slots or 14. Two arms on
+    opposite sides of that flip cannot share a Stage II checkpoint, so a run that
+    compares them against one warm-start is measuring the layout change on top of
+    the channel it meant to isolate. The grouping is derived from the table (not
+    hand-maintained) so a newly added arm lands in a group automatically; this
+    test just pins that both groups are actually populated, i.e. that the trap is
+    real and a reader is not lulled by an empty set.
+    """
+    from pxdesign_train.configs.configs_train import (
+        ARMS_NEEDING_14_SLOT_STAGE2,
+        stage2_checkpoint_group,
+    )
+
+    ten = {a for a in ARMS if a not in ARMS_NEEDING_14_SLOT_STAGE2}
+    assert ARMS_NEEDING_14_SLOT_STAGE2 and ten, (
+        "both Stage II groups must be non-empty, or the documented trap is stale"
+    )
+    for arm in ARMS:
+        expected = "14-slot" if ARMS[arm]["bb_context"] else "10-slot"
+        assert stage2_checkpoint_group(arm) == expected
+
+    # q_direct / q_bs force the 14-slot axis, so every q arm is in that group.
+    for arm, cfg in ARMS.items():
+        if cfg["q_direct"] or cfg["q_bs"]:
+            assert arm in ARMS_NEEDING_14_SLOT_STAGE2, (
+                f"{arm} uses a q channel but is not marked as needing 14 slots"
+            )
+
+
+def test_unknown_arm_is_rejected_rather_than_defaulted():
+    from pxdesign_train.configs.configs_train import stage2_checkpoint_group
+
+    with pytest.raises(ValueError, match="unknown arm"):
+        stage2_checkpoint_group("not-an-arm")

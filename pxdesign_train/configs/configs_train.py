@@ -126,10 +126,67 @@ training_configs["loss"] = {
     "weight_aa_post": 1.0,
 }
 
+# ===========================================================================
+# HOW TO RUN THE STAGE III FEEDBACK ABLATION  (read before launching anything)
+# ===========================================================================
+#
+# The question is "does side-chain -> backbone feedback buy anything, and
+# through which channel". Five things make that easy to get wrong here; each one
+# has silently invalidated a comparison before.
+#
+# 1. THE BASELINE IS `no`, NOT `enable_coevolution=False`.
+#    `enable_coevolution=False` removes the second B_theta pass entirely, so a
+#    difference against it confounds "the feedback helped" with "running the
+#    backbone twice helped". `no` keeps the second pass and carries no
+#    side-chain information through it. Only that isolates the channel.
+#
+# 2. ⚠️ ARMS WITH DIFFERENT `bb_context` CANNOT SHARE A STAGE II CHECKPOINT.
+#    bb_context sets S_phi's atom axis to 10 side-chain slots (False) or 4
+#    backbone context slots + 10 (True). That changes the intra-residue
+#    attention's key set for every residue, so a Stage II module warm-started
+#    across the flip meets an input layout it never trained on. The parameters
+#    stay shape-compatible, so nothing crashes -- it just quietly degrades, and
+#    the degradation looks exactly like "this channel hurt".
+#    `PXDesignTrainer.SIDECHAIN_ARCH_KEYS` now refuses such a load, so this is a
+#    hard error rather than a silent one -- but the ablation still needs TWO
+#    Stage II runs, one per group (see ARMS_NEEDING_14_SLOT_STAGE2 below).
+#    Cheaper alternative: run every arm with bb_context=True. The four context
+#    slots are keys only -- never decoded, never in the coordinate loss -- so
+#    keeping them costs a little compute and removes the split entirely.
+#
+# 3. LEAVE-ONE-OUT MEASURES MARGINAL, NOT STANDALONE, CONTRIBUTION.
+#    Two channels carrying the same information will BOTH show ~zero when
+#    removed one at a time, even if either alone is worth a lot. `hres_inject`
+#    and `a_direct_pre` are the obvious candidates: same level (residue), same
+#    direction (S->B), different route. Read the leave-one-out and the
+#    single-channel arms together, never one alone.
+#
+# 4. HOLD THE WARM-START FIXED. Every arm must start from the SAME Stage I and
+#    Stage II checkpoints (subject to point 2). Otherwise the spread across arms
+#    includes warm-start variance, which on a small side-chain task is easily
+#    larger than the effect being measured.
+#
+# 5. REPORT PARAMETER COUNTS. Each channel adds a fusion module, so a "better"
+#    arm may just be a bigger model. Every fusion is zero-initialised, so all
+#    arms are identical at step 0 -- the divergence is what was learned, not a
+#    different starting point.
+#
+# Suggested order (stop early if a step comes back flat):
+#    (a) `no` vs the full wiring  -> is there any feedback effect at all?
+#    (b) leave-one-out            -> which channel carries it?
+#    (c) `a-direct` vs `a-direct-pre` (or `full-a-post` vs `full`)
+#                                 -> does the injection point matter? This pair
+#                                    differs in ONE thing: whether the fusion
+#                                    lands before or after the DiffusionModule's
+#                                    only global cross-residue attention.
+#    (d) single-channel arms      -> standalone strength, to interpret (b).
+#
+# ===========================================================================
+#
 # Every arm lists EVERY switch explicitly, so an arm is a full specification of
 # the feedback wiring rather than a delta on whatever the defaults happen to be.
 #
-# Two families, and they answer different questions:
+# Families, answering different questions:
 #   * the "which single channel is best" family REPLACES the default indirect
 #     channel (hres_inject=False) — comparing a_direct/q/... against a-indirect;
 #   * the "+..." family KEEPS hres_inject=True and adds a channel on top, which
@@ -163,6 +220,25 @@ SC_ABLATION_ARMS = {
     # the full bidirectional wiring the interconnection slide describes
     "+all":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
 }
+
+
+# Arms whose S_phi has the 14-slot atom axis. They need a Stage II checkpoint
+# trained with bb_context=True; the remaining arms need one trained without it.
+# Derived rather than hand-listed so it cannot drift from the table above.
+ARMS_NEEDING_14_SLOT_STAGE2 = frozenset(
+    name for name, cfg in SC_ABLATION_ARMS.items() if cfg["bb_context"]
+)
+
+
+def stage2_checkpoint_group(arm: str) -> str:
+    """Which Stage II warm-start an arm requires: "14-slot" or "10-slot".
+
+    Two arms in different groups cannot be compared using the same Stage II
+    checkpoint -- see point 2 of the protocol above.
+    """
+    if arm not in SC_ABLATION_ARMS:
+        raise ValueError(f"unknown arm {arm!r}")
+    return "14-slot" if arm in ARMS_NEEDING_14_SLOT_STAGE2 else "10-slot"
 
 
 def apply_sidechain_ablation_arm(configs, arm: str):

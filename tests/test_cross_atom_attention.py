@@ -15,10 +15,11 @@ These tests pin the mechanism rather than any loss value:
   * a context residue (one owning no S_phi atom) still participates, via a single
     virtual atom at its CA, so the atom-level rewrite did not cost the receptor
     awareness the pooled version had;
-  * `a_bs_concat` still does something. Under residue granularity it fused into
-    the pooled vector that got broadcast back; under atom granularity `pooled`
-    only seeds context slots, so without an explicit atom-level path the channel
-    would silently no-op on any structure with no context tokens.
+  * `a_bs_concat` still does something. It fused into the pooled vector, which
+    the earlier residue-level stage broadcast back to the atoms; now that the
+    atoms carry themselves and `pooled` only seeds context slots, the channel
+    needs an explicit atom-level path or it silently no-ops on any structure
+    with no context tokens -- which is every monomer.
 """
 import sys
 import types
@@ -157,27 +158,7 @@ def _sc_inputs(n_res=4, seed=0):
     )
 
 
-def test_module_defaults_to_atom_granularity():
-    m = SideChainModule(c_res=8, c_atom=16, n_type=20)
-    assert m.cross_granularity == "atom"
-    assert isinstance(m.cross_res_blocks[0], _CrossAtomBlock)
 
-
-def test_granularity_is_validated():
-    with pytest.raises(ValueError, match="cross_granularity"):
-        SideChainModule(c_res=8, c_atom=16, n_type=20, cross_granularity="token")
-
-
-def test_atom_and_residue_granularity_are_different_experiments():
-    torch.manual_seed(0)
-    atom = SideChainModule(c_res=8, c_atom=16, n_type=20, cross_granularity="atom").eval()
-    torch.manual_seed(0)
-    res = SideChainModule(c_res=8, c_atom=16, n_type=20, cross_granularity="residue").eval()
-    h, l, ids, m_, noisy, ca = _sc_inputs()
-    with torch.no_grad():
-        ya, _ = atom(h, l, ids, m_, noisy, torch.ones(1), ca_coords=ca)
-        yr, _ = res(h, l, ids, m_, noisy, torch.ones(1), ca_coords=ca)
-    assert not torch.allclose(ya, yr, atol=1e-6)
 
 
 def test_context_residue_still_participates_under_atom_granularity():

@@ -39,37 +39,6 @@ from pxdesign_train.sidechain.instantiate import (
 )
 
 
-class _CrossResBlock(nn.Module):
-    """Cross-residue geometric attention: each residue's pooled side-chain
-    feature attends to nearby residues, with attention biased by CA-CA distance
-    (closer residues attend more). Captures the Overleaf's "cross-residue
-    geometric attention between nearby atoms" — side-chain<->side-chain and
-    side-chain<->backbone interactions, at residue-pooled granularity."""
-
-    def __init__(self, c: int) -> None:
-        super().__init__()
-        self.ln = nn.LayerNorm(c)
-        self.q = nn.Linear(c, c)
-        self.k = nn.Linear(c, c)
-        self.v = nn.Linear(c, c)
-        self.o = nn.Linear(c, c)
-        self.dist_scale = nn.Parameter(torch.tensor(0.1))
-        self.c = c
-
-    def forward(self, x, ca, res_mask):
-        # x [B,L,c], ca [B,L,3], res_mask [B,L] bool
-        h = self.ln(x)
-        q, k, v = self.q(h), self.k(h), self.v(h)
-        scores = (q @ k.transpose(-1, -2)) / math.sqrt(self.c)     # [B,L,L]
-        d = torch.cdist(ca, ca)                                    # [B,L,L]
-        scores = scores - F.softplus(self.dist_scale) * d          # closer -> higher
-        scores = scores.masked_fill(~res_mask[:, None, :], float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        attn = torch.nan_to_num(attn)                             # rows with no valid key
-        out = attn @ v                                            # [B,L,c]
-        return x + self.o(out)
-
-
 class _CrossAtomBlock(nn.Module):
     """Cross-residue attention BETWEEN ATOMS, over a residue-KNN neighbourhood.
 
@@ -208,7 +177,6 @@ class SideChainModule(nn.Module):
         a_bs_concat: bool = False,
         q_bs: bool = False,
         c_q: int = 128,
-        cross_granularity: str = "atom",
         cross_neighbors: int = 16,
     ) -> None:
         super().__init__()
@@ -231,21 +199,11 @@ class SideChainModule(nn.Module):
         self.blocks = nn.ModuleList([
             _AtomBlock(c_atom, n_heads, ff_mult=ff_mult) for _ in range(n_blocks)
         ])
-        if cross_granularity not in ("atom", "residue"):
-            raise ValueError(
-                f"cross_granularity must be 'atom' or 'residue', got {cross_granularity!r}"
-            )
-        self.cross_granularity = cross_granularity
         self.cross_neighbors = int(cross_neighbors)
-        if cross_granularity == "atom":
-            self.cross_res_blocks = nn.ModuleList([
-                _CrossAtomBlock(c_atom, n_heads, cross_neighbors)
-                for _ in range(n_cross_blocks)
-            ])
-        else:
-            self.cross_res_blocks = nn.ModuleList([
-                _CrossResBlock(c_atom) for _ in range(n_cross_blocks)
-            ])
+        self.cross_res_blocks = nn.ModuleList([
+            _CrossAtomBlock(c_atom, n_heads, cross_neighbors)
+            for _ in range(n_cross_blocks)
+        ])
         # Backwards-compatible debug/test handle for the first cross-residue block.
         self.cross_res = self.cross_res_blocks[0]
         self.a_bs_concat = bool(a_bs_concat)
@@ -377,42 +335,35 @@ class SideChainModule(nn.Module):
                 # point 2: fuse the backbone a_token (h_proj) into the side-chain's all-atom
                 # residue representation (pooled), symmetric to a-direct on the S→B side.
                 fused_pooled = self.a_bs_concat_fusion(pooled, h_proj.to(pooled.dtype))
-                if self.cross_granularity == "atom":
-                    # Under residue granularity `pooled` is what gets mixed across
-                    # residues and broadcast back, so fusing into it is enough. Under
-                    # atom granularity the atoms carry themselves and `pooled` only
-                    # seeds context slots -- so the B->S contribution has to be added
-                    # to the atoms directly, or this channel would silently become a
-                    # no-op for every structure without context tokens.
-                    atom_feats = atom_feats + (fused_pooled - pooled).unsqueeze(2)
+                # The atoms carry themselves through the cross-residue stage and
+                # `pooled` only seeds context slots, so the B->S contribution has to
+                # reach the atoms directly. Fusing into `pooled` alone would make
+                # this channel a silent no-op on any structure with no context
+                # tokens -- which is every monomer, i.e. all of Stage II.
+                atom_feats = atom_feats + (fused_pooled - pooled).unsqueeze(2)
                 pooled = fused_pooled
 
-            if self.cross_granularity == "atom":
-                # Atom-level: every slot attends to the individual atoms of the M
-                # nearest residues, so a side chain can tell WHICH atom is in its
-                # way and in which direction. A context residue owns no S_phi slot,
-                # so it joins as ONE virtual atom at its CA carrying `pooled` --
-                # the same feature the residue-level block would have shown it,
-                # placed somewhere geometrically meaningful.
-                virt_feat = pooled.unsqueeze(2)                        # [B,L,1,c]
-                virt_xyz = ca_coords.unsqueeze(2).to(coords.dtype)     # [B,L,1,3]
-                is_virtual = keys_mask & ~mask.bool().any(dim=-1)      # context only
-                feats_ext = torch.cat([atom_feats, virt_feat.to(atom_feats.dtype)], dim=2)
-                xyz_ext = torch.cat([coords.to(atom_feats.dtype), virt_xyz.to(atom_feats.dtype)], dim=2)
-                mask_ext = torch.cat([mask.bool(), is_virtual.unsqueeze(-1)], dim=2)
-                nbr_idx = self.cross_res_blocks[0].residue_neighbours(
-                    ca_coords, keys_mask, self.cross_neighbors
+            # Every slot attends to the individual atoms of the M
+            # nearest residues, so a side chain can tell WHICH atom is in its
+            # way and in which direction. A context residue owns no S_phi slot,
+            # so it joins as ONE virtual atom at its CA carrying `pooled` --
+            # the same feature the residue-level block would have shown it,
+            # placed somewhere geometrically meaningful.
+            virt_feat = pooled.unsqueeze(2)                        # [B,L,1,c]
+            virt_xyz = ca_coords.unsqueeze(2).to(coords.dtype)     # [B,L,1,3]
+            is_virtual = keys_mask & ~mask.bool().any(dim=-1)      # context only
+            feats_ext = torch.cat([atom_feats, virt_feat.to(atom_feats.dtype)], dim=2)
+            xyz_ext = torch.cat([coords.to(atom_feats.dtype), virt_xyz.to(atom_feats.dtype)], dim=2)
+            mask_ext = torch.cat([mask.bool(), is_virtual.unsqueeze(-1)], dim=2)
+            nbr_idx = self.cross_res_blocks[0].residue_neighbours(
+                ca_coords, keys_mask, self.cross_neighbors
+            )
+            for cross_block in self.cross_res_blocks:
+                feats_ext = cross_block(
+                    feats_ext, xyz_ext, mask_ext, ca_coords, keys_mask,
+                    nbr_idx=nbr_idx,
                 )
-                for cross_block in self.cross_res_blocks:
-                    feats_ext = cross_block(
-                        feats_ext, xyz_ext, mask_ext, ca_coords, keys_mask,
-                        nbr_idx=nbr_idx,
-                    )
-                atom_feats = feats_ext[:, :, :A, :]                    # drop the virtual slot
-            else:
-                for cross_block in self.cross_res_blocks:
-                    pooled = cross_block(pooled, ca_coords, keys_mask)    # [B,L,c]
-                atom_feats = atom_feats + pooled[:, :, None, :]           # broadcast back
+            atom_feats = feats_ext[:, :, :A, :]                    # drop the virtual slot
 
         # Split the 14 slots back apart. Coordinates are decoded for the 10
         # SIDE-CHAIN slots only — backbone slots never produce coordinates and so

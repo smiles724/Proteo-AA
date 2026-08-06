@@ -51,14 +51,8 @@ OLD_SC_IDS = {
 
 def _module(seed=0, scale=1.0):
     torch.manual_seed(seed)
-    # cross_granularity="residue" on purpose: this file pins that adding the
-    # 14-slot axis left the 10-slot path bit-identical. Cross-residue granularity
-    # is a separate axis added later; comparing against the atom-level default
-    # would conflate the two changes. `tests/test_cross_atom_attention.py` covers
-    # the atom-level path.
     return SideChainModule(c_res=C_RES, c_atom=C_ATOM, c_time=16, n_blocks=2,
-                           n_heads=4, trunk_grad_scale=scale,
-                           cross_granularity="residue")
+                           n_heads=4, trunk_grad_scale=scale)
 
 
 def _batch(restypes, seed=1, requires_grad=False):
@@ -127,9 +121,21 @@ def _legacy_forward(m, h_res, logits, ids, mask, noisy, t, ca=None, R=None, tt=N
         x = blk(x, key_padding_mask=kpm)
     af = x.reshape(B, L, A, m.c_atom)
     if ca is not None:
+        # Mirror the module's cross-residue stage. It is atom-level (the appendix's
+        # "between nearby atoms"), so the reference has to run the same blocks over
+        # the same extended slot axis -- pooling here would compare against an
+        # architecture that no longer exists.
         am = mask.to(af.dtype)[..., None]
-        rf = (af * am).sum(2) / (am.sum(2) + 1e-6)
-        af = af + m.cross_res(rf, ca, mask.any(dim=-1))[:, :, None, :]
+        pooled = (af * am).sum(2) / (am.sum(2) + 1e-6)
+        keys_mask = mask.bool().any(dim=-1)
+        is_virtual = keys_mask & ~mask.bool().any(dim=-1)
+        feats_ext = torch.cat([af, pooled.unsqueeze(2).to(af.dtype)], dim=2)
+        xyz_ext = torch.cat([noisy.to(af.dtype), ca.unsqueeze(2).to(af.dtype)], dim=2)
+        mask_ext = torch.cat([mask.bool(), is_virtual.unsqueeze(-1)], dim=2)
+        nbr = m.cross_res_blocks[0].residue_neighbours(ca, keys_mask, m.cross_neighbors)
+        for blk in m.cross_res_blocks:
+            feats_ext = blk(feats_ext, xyz_ext, mask_ext, ca, keys_mask, nbr_idx=nbr)
+        af = feats_ext[:, :, :A, :]
     y0 = m.out(m.out_ln(af))
     if R is not None and tt is not None:
         x0 = to_global(y0, R, tt)

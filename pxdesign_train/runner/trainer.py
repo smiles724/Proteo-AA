@@ -628,17 +628,13 @@ class PXDesignTrainer:
     # zero init -- present, wired in, and untrained.
     SIDECHAIN_ARCH_KEYS = (
         "bb_context", "local_coord_input", "frame_aware_head", "a_bs_concat", "q_bs",
-        # cross_granularity swaps the cross-residue submodule itself (_CrossAtomBlock
-        # vs _CrossResBlock), so the two do not even share a parameter shape.
-        "cross_granularity",
     )
 
     def _sidechain_arch(self) -> dict:
         sc = getattr(self.configs, "sidechain", None)
         if sc is None or not getattr(self.configs, "enable_sidechain", False):
             return {}
-        # bool() would collapse the string-valued keys, so keep raw values.
-        return {k: getattr(sc, k, False) for k in self.SIDECHAIN_ARCH_KEYS}
+        return {k: bool(getattr(sc, k, False)) for k in self.SIDECHAIN_ARCH_KEYS}
 
     def _check_sidechain_arch(self, ckpt: dict) -> None:
         saved = ckpt.get("sidechain_arch")

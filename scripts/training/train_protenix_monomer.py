@@ -674,6 +674,37 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.trunk_grad_scale = 0.0
         configs.sidechain.force_gt_type_logits = True
+        # B->S wiring in the warmup. Two deliberate, asymmetric choices:
+        #
+        #   a_bs_concat=True  -- the residue-level channel is fused with
+        #       concat+MLP rather than being added in raw. B's a_token summarises
+        #       a residue from its four BACKBONE atoms only, while S_phi's pooled
+        #       feature summarises the same residue from all fourteen slots; the
+        #       two are not the same quantity, so letting the network learn how to
+        #       combine them beats summing them. (This asymmetry only became real
+        #       once the binder's native side chains stopped reaching a_token.)
+        #       Keeping the SAME interface shape as Stage III is also what makes
+        #       the warm-started weights transferable.
+        #
+        #   q_bs=False -- the ATOM-level channel stays off here. It hands S_phi the
+        #       Backbone Module's own per-atom features, and in this stage the
+        #       backbone is FROZEN: S_phi would fit itself to one frozen state's q,
+        #       which then moves as soon as Stage III starts updating the backbone.
+        #       The geometry S_phi actually needs is already present through the
+        #       frames and the ideal template.
+        #
+        # bb_context stays ON (the default) even though q_bs is off: it fixes
+        # S_phi's atom axis at 4 context + 10 side-chain slots, and that axis must
+        # be identical in Stage II and Stage III or the warm-started module meets a
+        # layout it never trained on.
+        configs.sidechain.a_bs_concat = True
+        configs.sidechain.q_bs = False
+        configs.sidechain.bb_context = True
+        # No S->B feedback in the warmup: there is no refinement pass to inject
+        # into, and trunk_grad_scale=0 already makes h_res read-only.
+        configs.sidechain.a_direct = False
+        configs.sidechain.a_direct_pre = False
+        configs.sidechain.q_direct = False
         # `design_condition_embedder` is a TOP-LEVEL module of ProtenixDesign, so
         # filtering the warm-start to "diffusion_module." alone dropped it: it
         # would stay randomly initialised AND frozen (it is not in

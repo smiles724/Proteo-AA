@@ -45,12 +45,19 @@ REPLACEMENT_ARMS = {
     "a-bs", "q-bs",
 }
 INCREMENTAL_ARMS = {
-    "+a-direct", "+a-direct-pre", "+q", "+a-bs", "+q-bs", "+all",
+    "+a-direct", "+a-direct-pre", "+q", "+a-bs", "+q-bs",
+}
+# Leave-one-out from the shipped default. This is the PRIMARY ablation now that
+# the default is the full bidirectional wiring: each arm removes exactly one
+# channel, so a drop measures that channel's contribution.
+LEAVE_ONE_OUT_ARMS = {
+    "full", "full-hres", "full-a", "full-q", "full-a-bs", "full-q-bs",
+    "full-a-post",
 }
 
 
 def test_all_arms_are_defined():
-    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS
+    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS | LEAVE_ONE_OUT_ARMS
 
 
 def test_every_arm_specifies_every_switch():
@@ -72,8 +79,8 @@ def test_incremental_arms_keep_the_default_channel_and_add_exactly_one_thing():
         assert arm["hres_inject"] is True, f"{name} dropped the default channel"
         added = {k for k in arm if arm[k] != base[k]}
         assert added, f"{name} adds nothing — it is just a-indirect"
-        if name != "+all":
-            counterpart = ARMS[name[1:]]
+        counterpart = ARMS[name[1:]]
+        if True:
             expected = {k for k in counterpart if counterpart[k] != base[k]} - {"hres_inject"}
             assert added == expected, (
                 f"{name} must add exactly what {name[1:]} switches on; "
@@ -90,20 +97,39 @@ def test_arms_are_pairwise_distinct():
         seen[key] = name
 
 
-def test_defaults_reproduce_the_a_indirect_arm():
-    """Today's default behaviour must be exactly one named arm -- and it is NOT 'no'.
+def test_defaults_reproduce_the_full_arm():
+    """The shipped default must BE a named arm, so a run can cite the arm it used.
 
-    This is the whole point of the file: the shipped default IS the indirect channel.
+    It used to be `a-indirect`: every explicit a/q channel shipped off, and the
+    only live feedback was the one channel that appears on neither the slide nor
+    the paper. The default is now the full bidirectional wiring, and the primary
+    ablation is leave-one-out from it.
     """
     d = training_configs["sidechain"]
-    assert d["hres_inject"] is True          # <- the channel that used to be invisible
-    assert d["a_direct"] is False
-    assert d["bb_context"] is False
-    assert d["q_direct"] is False
-    assert d["a_direct_pre"] is False
-    assert {k: d[k] for k in ARMS["a-indirect"]} == ARMS["a-indirect"], (
+    assert {k: d[k] for k in ARMS["full"]} == ARMS["full"], (
         "the shipped defaults must reproduce exactly one named arm"
     )
+    # the injection point that can reach spatial neighbours is the default one
+    assert d["a_direct_pre"] is True
+    assert d["a_direct"] is False
+
+
+def test_leave_one_out_arms_remove_exactly_one_channel():
+    full = ARMS["full"]
+    for name in LEAVE_ONE_OUT_ARMS - {"full", "full-a-post"}:
+        removed = {k for k in full if ARMS[name][k] != full[k]}
+        assert len(removed) == 1, f"{name} changes {removed}, not exactly one channel"
+        assert all(ARMS[name][k] is False for k in removed), (
+            f"{name} must switch its channel OFF"
+        )
+
+
+def test_the_injection_point_arm_swaps_rather_than_removes():
+    """full-a-post must hold everything fixed and only move where `a` is injected."""
+    full, post = ARMS["full"], ARMS["full-a-post"]
+    changed = {k for k in full if post[k] != full[k]}
+    assert changed == {"a_direct", "a_direct_pre"}
+    assert post["a_direct"] is True and post["a_direct_pre"] is False
 
 
 @pytest.mark.parametrize("arm", list(ARMS))
@@ -180,9 +206,10 @@ def test_model_attributes_match_the_arm(arm):
     assert no_feedback == (arm in ("no", "bbctx", "a-bs", "q-bs"))
 
 
-def test_bs_arms_present_and_default_off():
+def test_bs_channels_are_on_by_default_and_ablatable():
+    """Both B->S channels ship ON (the slide's wiring) and each has a removal arm."""
     from pxdesign_train.configs.configs_train import SC_ABLATION_ARMS, training_configs
-    assert training_configs["sidechain"]["a_bs_concat"] is False
-    assert training_configs["sidechain"]["q_bs"] is False
-    assert "a-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["a-bs"]["a_bs_concat"] is True
-    assert "q-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["q-bs"]["q_bs"] is True
+    assert training_configs["sidechain"]["a_bs_concat"] is True
+    assert training_configs["sidechain"]["q_bs"] is True
+    assert SC_ABLATION_ARMS["full-a-bs"]["a_bs_concat"] is False
+    assert SC_ABLATION_ARMS["full-q-bs"]["q_bs"] is False

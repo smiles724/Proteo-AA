@@ -399,12 +399,24 @@ def test_gradient_reaches_sphi_sidechain_atoms_through_q():
 # ----------------------------------------------------------- wiring / ablation
 
 
-def test_config_default_is_off_and_independent_of_a_direct():
+def test_config_default_ships_the_q_channel_zero_initialised():
+    """q_direct now ships ON as part of the full bidirectional default.
+
+    Shipping it on is only safe because the fusion is zero-initialised: at step 0
+    q'_bb == q_bb exactly, so enabling the channel changes what the model LEARNS
+    and never what a loaded checkpoint predicts before its first update. The
+    zero-init assertion below is therefore load-bearing, not cosmetic.
+
+    The a-level channel remains split across two injection points -- `a_direct_pre`
+    (before the global cross-residue attention, the default) and `a_direct` (after
+    it) -- so `a_direct` alone being off is not "the a channel is off".
+    """
     sc = training_configs["sidechain"]
-    assert sc["q_direct"] is False and sc["a_direct"] is False
+    assert sc["q_direct"] is True
     assert sc["q_direct_zero_init"] is True
-    # two independent switches -> the no / a-only / q-only / a+q ablation
-    assert "a_direct" in sc and "q_direct" in sc
+    assert sc["a_direct_pre"] is True and sc["a_direct"] is False
+    # still independent switches -> leave-one-out ablation stays meaningful
+    assert {"a_direct", "a_direct_pre", "q_direct"} <= set(sc)
 
 
 def test_q_direct_requires_coevolution_and_is_pass_scoped():

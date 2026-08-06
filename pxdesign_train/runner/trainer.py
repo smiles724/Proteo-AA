@@ -622,7 +622,13 @@ class PXDesignTrainer:
     # Loading anyway does not crash (the parameters are shape-compatible), it just
     # silently degrades, which is exactly the failure mode this project keeps
     # hitting.
-    SIDECHAIN_ARCH_KEYS = ("bb_context", "local_coord_input", "frame_aware_head")
+    # a_bs_concat / q_bs are here too: each one CREATES a submodule inside
+    # SideChainModule, so a checkpoint trained without them simply has no weights
+    # for it. load_strict=False would accept that silently and leave the fusion at
+    # its zero init -- present, wired in, and untrained.
+    SIDECHAIN_ARCH_KEYS = (
+        "bb_context", "local_coord_input", "frame_aware_head", "a_bs_concat", "q_bs",
+    )
 
     def _sidechain_arch(self) -> dict:
         sc = getattr(self.configs, "sidechain", None)

@@ -129,12 +129,14 @@ training_configs["loss"] = {
 # Every arm lists EVERY switch explicitly, so an arm is a full specification of
 # the feedback wiring rather than a delta on whatever the defaults happen to be.
 #
-# Two families, and they answer different questions:
-#   * the "which single channel is best" family REPLACES the default indirect
-#     channel (hres_inject=False) — comparing a_direct/q/... against a-indirect;
-#   * the "+..." family KEEPS hres_inject=True and adds a channel on top, which
-#     is the only way to measure INCREMENTAL benefit. Reporting a replacement arm
-#     as evidence for "adding a/q helps" conflates the two.
+# THREE families, answering three different questions:
+#   * "full-..." — leave-one-out from the shipped default. Now that the default IS
+#     the full bidirectional wiring, this is the primary ablation: each arm removes
+#     exactly one channel, so a drop is that channel's contribution.
+#   * single-channel arms (hres_inject off, one channel on) — "which channel alone
+#     is strongest", the comparison that made sense when a-indirect was the default.
+#   * "+..." — a-indirect plus one channel, i.e. incremental benefit over the OLD
+#     default. Kept so runs recorded before the default changed stay interpretable.
 SC_ABLATION_ARMS = {
     # true control: refinement pass runs, no side-chain info reaches the backbone
     "no":            dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
@@ -160,8 +162,18 @@ SC_ABLATION_ARMS = {
     "+q":            dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
     "+a-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
     "+q-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
-    # the full bidirectional wiring the interconnection slide describes
-    "+all":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    # ---- LEAVE-ONE-OUT from the shipped default ----
+    # `full` is an explicit alias for the default, so a run can name the config it
+    # used instead of relying on "whatever the defaults were that week".
+    "full":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-hres":     dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-a":        dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-q":        dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=False, a_bs_concat=True,  q_bs=True),
+    "full-a-bs":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=True),
+    "full-q-bs":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=False),
+    # injection-point comparison AT the default wiring: swap the pre-attention
+    # point for the post-attention one, everything else held fixed.
+    "full-a-post":   dict(hres_inject=True,  a_direct=True,  a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
 }
 
 
@@ -300,8 +312,12 @@ training_configs["sidechain"] = {
     # motivates the whole co-evolution channel. a_direct_pre rewrites the
     # DiffusionTransformer's `a` argument instead, i.e. before the global
     # attention. Separate weights from a_direct so the two are independent arms.
-    # Default False: turning it on changes what Stage III measures.
-    "a_direct_pre": False,
+    # DEFAULT = True. This is the S->B residue channel the interconnection slide
+    # specifies, at the only injection point where it can actually do what the
+    # slide claims. `a_direct` (the post-attention point) stays available as the
+    # injection-point ablation. Zero-initialised, so switching it on is an exact
+    # no-op at step 0 and cannot disturb a loaded checkpoint.
+    "a_direct_pre": True,
     "a_direct_zero_init": True,
     # DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
     #     q'_bb = q_bb + MLP(concat(q_bb, W q_sc_bb))
@@ -324,12 +340,28 @@ training_configs["sidechain"] = {
     # Set False for the TRUE no-feedback control arm: the refinement pass still runs,
     # but carries no side-chain information. Not the same as enable_coevolution=False,
     # which removes the second pass entirely.
+    # DEFAULTS are now the FULL bidirectional wiring the interconnection slide
+    # describes: a and q, in both directions, every one of them concat+MLP+residual.
+    # Previously all four explicit channels shipped off, so the only live feedback
+    # was `hres_inject` -- a channel that appears neither on the slide nor in the
+    # paper, and that occupies `s_trunk`, a slot this architecture treats as STATIC
+    # conditioning. It stays on (it is the paper's formula and has the widest reach)
+    # and is ablated by removal like everything else.
+    #
+    # Every fusion is zero-initialised, so this whole set is an exact no-op at step
+    # 0: turning it on changes what gets LEARNED, never what a loaded checkpoint
+    # predicts before the first update.
+    #
+    # `bb_context` is load-bearing beyond the q channels: it sets S_phi's atom axis
+    # to 4 backbone context slots + 10 side-chain slots. It MUST match between the
+    # Stage II warmup and Stage III, or the warm-started S_phi meets an input layout
+    # it never trained on (trainer.SIDECHAIN_ARCH_KEYS enforces this at load time).
     "hres_inject": True,
-    "bb_context": False,
-    "q_direct": False,
+    "bb_context": True,
+    "q_direct": True,
     "q_direct_zero_init": True,
-    "a_bs_concat": False,   # point 2: B→S residue concat (side-chain pooled + backbone a_token)
-    "q_bs": False,          # point 3: B→S atom fusion (backbone q -> side-chain backbone slots)
+    "a_bs_concat": True,    # point 2: B→S residue concat (side-chain pooled + backbone a_token)
+    "q_bs": True,           # point 3: B→S atom fusion (backbone q -> side-chain backbone slots)
     "weight_bb_post": 1.0,
     "weight_aa_post": 1.0,
 }

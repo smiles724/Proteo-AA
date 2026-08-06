@@ -233,8 +233,17 @@ def cogenerate(
         # uncleared it strong-references every step's q_skip for the whole sampling run.
         model._q_inject_calls = {}
         model._a_sc_cache = a_sc_inject
+        # One flag arms BOTH a-level injection points: `sc_a_direct` (hook on
+        # layernorm_a, after the global attention) and `sc_a_direct_pre` (pre-hook
+        # on the DiffusionTransformer, before it). Only the hooks the model
+        # actually registered can fire, so arming both is safe and keeps the two
+        # arms symmetric at sampling.
         model._a_direct_active = bool(
-            getattr(model, "sc_a_direct", False) and a_sc_inject is not None
+            (
+                getattr(model, "sc_a_direct", False)
+                or getattr(model, "sc_a_direct_pre", False)
+            )
+            and a_sc_inject is not None
         )
         # Same for the ATOM-level channel (sidechain.q_direct): the decoder pre-hook
         # rewrites the 4 backbone atom rows of q_skip with q'_bb, using the q_sc_bb
@@ -548,7 +557,9 @@ def cogenerate(
                 # fused token a'_bb = a_bb + MLP(concat(a_bb, W a_sc)). Without this the
                 # trained ATokenFusion is silently dropped at sampling and every one of its
                 # parameters is dead weight — a hard train/inference mismatch.
-                if getattr(model, "sc_a_direct", False):
+                if getattr(model, "sc_a_direct", False) or getattr(
+                    model, "sc_a_direct_pre", False
+                ):
                     a_sc_c = pool_side_chain_atoms(atom_feats, m[None]).squeeze(0)  # [Nc, c_atom]
                     a_sc_full = a_sc_c.new_zeros((a_full.shape[0], a_sc_c.shape[-1]))
                     a_sc_full[committed] = a_sc_c

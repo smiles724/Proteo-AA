@@ -330,6 +330,12 @@ def build_source_components(
         # enabled: otherwise diffusion_internal a_token can see noisy GT
         # side-chain coordinates when the AA head is trained.
         backbone_only_binder=True,
+        # Passed EXPLICITLY (it also defaults True) so the train/inference
+        # contract is visible at the training entry rather than buried in a
+        # dataclass default. Without it the binder keeps its native side-chain
+        # atom rows, whose names/elements/count decode the residue identity
+        # straight into q -> a_token -> AA head.
+        inference_safe_binder=not args.allow_binder_sidechain_leakage,
         max_crop_retries=int(args.max_crop_retries),
         seed=int(args.seed),
     )
@@ -393,6 +399,8 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         aa_mask_max_prob=float(args.aa_mask_max_prob),
         compute_sidechain=not args.disable_sidechain,
         backbone_only_binder=True,
+        # See the monomer builder above: explicit train/inference contract.
+        inference_safe_binder=not args.allow_binder_sidechain_leakage,
         max_crop_retries=int(args.max_crop_retries),
         seed=int(args.seed),
     )
@@ -661,7 +669,17 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.trunk_grad_scale = 0.0
         configs.sidechain.force_gt_type_logits = True
-        configs.training.checkpoint_include_prefixes = ["diffusion_module."]
+        # `design_condition_embedder` is a TOP-LEVEL module of ProtenixDesign, so
+        # filtering the warm-start to "diffusion_module." alone dropped it: it
+        # would stay randomly initialised AND frozen (it is not in
+        # trainable_param_keywords). It produces s_inputs and z, which feed the
+        # diffusion conditioning, the atom pair bias and the token transformer —
+        # so h_res in this stage would be a different quantity than the h_res of
+        # Stage I / III, and any w_res learnt here could not transfer.
+        configs.training.checkpoint_include_prefixes = [
+            "diffusion_module.",
+            "design_condition_embedder.",
+        ]
         configs.training.trainable_param_keywords = ["sidechain_module."]
         configs.training.ema_decay = 0.0
     elif args.training_stage == "joint":
@@ -838,6 +856,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument("--disable-sidechain", action="store_true")
+    p.add_argument(
+        "--allow-binder-sidechain-leakage",
+        action="store_true",
+        help="LEAKAGE ABLATION ONLY. Keep the binder's native side-chain atom rows "
+             "in the model input. Their atom names/elements/count decode the residue "
+             "identity into a_token, so the AA head can read the answer instead of "
+             "predicting it (measured ~96%% vs ~6%% accuracy). Training runs must "
+             "leave this off; it exists so the leaky arm stays reproducible.",
+    )
     p.add_argument("--enable-coevolution", action="store_true")
     p.add_argument(
         "--predicted-frame", action=argparse.BooleanOptionalAction, default=True

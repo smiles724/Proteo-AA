@@ -334,15 +334,44 @@ class ProtenixDesignTrain(ProtenixDesign):
                     "no refinement pass to inject into — disabling a_direct."
                 )
                 self.sc_a_direct = False
-            if self.sc_a_direct:
+            # ---- SAME fusion, EARLIER injection point (sidechain.a_direct_pre) ----
+            # `a_direct` above hooks `layernorm_a`, which runs AFTER the
+            # DiffusionTransformer — i.e. after the only GLOBAL cross-residue
+            # attention in the module. Everything downstream of it (the atom
+            # decoder) is SEQUENCE-local (n_queries=32 / n_keys=128 over the atom
+            # index), so a side chain injected there can reach residues that are
+            # near in sequence but never one that is near in SPACE. Side-chain
+            # packing is a spatial effect: a bulky side chain displaces whatever
+            # is beside it in 3D, which is usually far away in sequence. So the
+            # late injection point cannot express the very interaction that
+            # motivates the co-evolution channel.
+            # `a_direct_pre` injects the same concat+MLP+residual fusion into the
+            # DiffusionTransformer's `a` argument instead, i.e. BEFORE the global
+            # attention. Separate fusion weights from `a_direct` so the two
+            # injection points stay independent ablation arms.
+            self.sc_a_direct_pre = (
+                bool(getattr(sc_cfg, "a_direct_pre", False)) if sc_cfg is not None else False
+            )
+            if self.sc_a_direct_pre and not self.enable_coevolution:
+                logging.getLogger(__name__).warning(
+                    "sidechain.a_direct_pre=True but enable_coevolution=False; there "
+                    "is no refinement pass to inject into — disabling a_direct_pre."
+                )
+                self.sc_a_direct_pre = False
+            if self.sc_a_direct or self.sc_a_direct_pre:
                 c_token_diff = int(
                     getattr(self.diffusion_module, "c_token", None)
                     or getattr(configs, "c_token", 768)
                 )
-                self.a_token_fusion = ATokenFusion(
-                    c_token=c_token_diff, c_atom=c_atom,
-                    zero_init=bool(getattr(sc_cfg, "a_direct_zero_init", True)),
-                )
+                zero_init = bool(getattr(sc_cfg, "a_direct_zero_init", True))
+                if self.sc_a_direct:
+                    self.a_token_fusion = ATokenFusion(
+                        c_token=c_token_diff, c_atom=c_atom, zero_init=zero_init,
+                    )
+                if self.sc_a_direct_pre:
+                    self.a_token_fusion_pre = ATokenFusion(
+                        c_token=c_token_diff, c_atom=c_atom, zero_init=zero_init,
+                    )
 
             # ---- DIRECT q-level ATOM feedback (sidechain.q_direct) ----
             # 14-slot design: the side-chain module keeps backbone atoms in its
@@ -415,6 +444,13 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.diffusion_module.layernorm_a.register_forward_hook(
                 self._a_token_forward_hook
             )
+        if getattr(self, "sc_a_direct_pre", False):
+            # Pre-hook (with_kwargs) on the DiffusionTransformer: rewriting its
+            # `a` argument injects the side chain BEFORE the global cross-residue
+            # attention, unlike the layernorm_a hook which lands after it.
+            self.diffusion_module.diffusion_transformer.register_forward_pre_hook(
+                self._a_token_pre_attention_hook, with_kwargs=True
+            )
         if self.sc_q_direct or self.sc_q_bs:
             # READ side: q_skip is the AtomAttentionEncoder's 2nd output. Shared by
             # q_direct (S->B feedback, consumed in the refinement pass's decoder
@@ -461,6 +497,44 @@ class ProtenixDesignTrain(ProtenixDesign):
             # reads a'_bb (not the pre-fusion token) when a_direct is on.
             self._a_token_cache = out if fused is None else fused
         return fused                                     # None => output unchanged
+
+    def _a_token_pre_attention_hook(self, _module, args, kwargs):
+        """Forward-PRE hook on `DiffusionModule.diffusion_transformer`.
+
+        Fuses the side-chain summary into the token representation BEFORE the
+        global cross-residue attention, so the side chain can influence the
+        backbone of residues that are close in space but distant in sequence —
+        which the post-attention `a_direct` hook structurally cannot do.
+
+        Only fires inside the refinement pass (`_a_direct_active`), the only pass
+        where `a_sc` exists. Idempotent under activation-checkpoint recompute:
+        the result is a pure function of the incoming `a` and the never-mutated
+        `a_sc` cache, so a replay recomputes the same value rather than stacking
+        a second residual.
+
+        The DiffusionModule calls this submodule with keyword arguments only; if
+        that ever changes, `a` is absent from kwargs and we no-op rather than
+        silently injecting into the wrong tensor.
+        """
+        if not getattr(self, "_a_direct_active", False):
+            return None
+        a_sc = getattr(self, "_a_sc_cache", None)
+        if a_sc is None:
+            return None
+        a_bb = kwargs.get("a")
+        if a_bb is None:
+            self._warn_once(
+                "_warned_a_direct_pre_positional",
+                "a_direct_pre: DiffusionTransformer was called without a keyword "
+                "`a` argument; skipping the pre-attention injection.",
+            )
+            return None
+        aligned = self._align_a_sc(a_sc, a_bb)
+        if aligned is None:
+            return None
+        kwargs = dict(kwargs)
+        kwargs["a"] = self.a_token_fusion_pre(a_bb, aligned)
+        return args, kwargs
 
     def _align_a_sc(self, a_sc: torch.Tensor, out: torch.Tensor) -> Optional[torch.Tensor]:
         """Broadcast the per-token side-chain summary onto a_token's shape.

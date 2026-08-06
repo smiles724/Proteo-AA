@@ -36,8 +36,49 @@ def _sc_cfg(**overrides):
     return SimpleNamespace(**base)
 
 
-def test_all_six_arms_are_defined():
-    assert set(ARMS) == {"no", "a-indirect", "a-direct", "bbctx", "q", "a-direct+q", "a-bs", "q-bs"}
+# Arms that REPLACE the default indirect channel (hres_inject=False): they answer
+# "which single channel is best". Arms prefixed "+" KEEP it and add one channel on
+# top: they answer "does adding this channel buy anything". Reporting one as
+# evidence for the other is the confusion these two sets exist to prevent.
+REPLACEMENT_ARMS = {
+    "no", "a-indirect", "a-direct", "a-direct-pre", "bbctx", "q", "a-direct+q",
+    "a-bs", "q-bs",
+}
+INCREMENTAL_ARMS = {
+    "+a-direct", "+a-direct-pre", "+q", "+a-bs", "+q-bs", "+all",
+}
+
+
+def test_all_arms_are_defined():
+    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS
+
+
+def test_every_arm_specifies_every_switch():
+    """An arm is a FULL specification, never a delta on the current defaults.
+
+    A partially-specified arm silently inherits whatever the defaults happen to
+    be, so the same arm name would mean different wiring before and after a
+    default changes — and past runs would stop being comparable.
+    """
+    keys = {frozenset(cfg) for cfg in ARMS.values()}
+    assert len(keys) == 1, f"arms specify different switch sets: {keys}"
+
+
+def test_incremental_arms_keep_the_default_channel_and_add_exactly_one_thing():
+    """Each "+x" arm must be a-indirect plus the channel(s) its name promises."""
+    base = ARMS["a-indirect"]
+    for name in INCREMENTAL_ARMS:
+        arm = ARMS[name]
+        assert arm["hres_inject"] is True, f"{name} dropped the default channel"
+        added = {k for k in arm if arm[k] != base[k]}
+        assert added, f"{name} adds nothing — it is just a-indirect"
+        if name != "+all":
+            counterpart = ARMS[name[1:]]
+            expected = {k for k in counterpart if counterpart[k] != base[k]} - {"hres_inject"}
+            assert added == expected, (
+                f"{name} must add exactly what {name[1:]} switches on; "
+                f"got {added}, expected {expected}"
+            )
 
 
 def test_arms_are_pairwise_distinct():
@@ -59,7 +100,10 @@ def test_defaults_reproduce_the_a_indirect_arm():
     assert d["a_direct"] is False
     assert d["bb_context"] is False
     assert d["q_direct"] is False
-    assert dict(hres_inject=True, a_direct=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False) == ARMS["a-indirect"]
+    assert d["a_direct_pre"] is False
+    assert {k: d[k] for k in ARMS["a-indirect"]} == ARMS["a-indirect"], (
+        "the shipped defaults must reproduce exactly one named arm"
+    )
 
 
 @pytest.mark.parametrize("arm", list(ARMS))
@@ -75,6 +119,7 @@ def test_no_arm_really_has_no_feedback_channel():
     cfg = ARMS["no"]
     assert cfg["hres_inject"] is False, "indirect token channel still on -> not a control"
     assert cfg["a_direct"] is False
+    assert cfg["a_direct_pre"] is False
     assert cfg["q_direct"] is False
 
 
@@ -127,7 +172,12 @@ def test_model_attributes_match_the_arm(arm):
     if q_d:
         assert bb, "q_direct must imply bb_context"
     # Every old feedback channel off <=> this has no old feedback (but may have new B->S channels).
-    assert (not hres and not a_d and not q_d) == (arm in ("no", "bbctx", "a-bs", "q-bs"))
+    a_dp = bool(getattr(cfg, "a_direct_pre", False))
+    assert a_dp == ARMS[arm]["a_direct_pre"]
+    # Every S->B channel off <=> this arm has no side-chain -> backbone feedback
+    # (it may still have the B->S input channels a_bs_concat / q_bs).
+    no_feedback = not hres and not a_d and not a_dp and not q_d
+    assert no_feedback == (arm in ("no", "bbctx", "a-bs", "q-bs"))
 
 
 def test_bs_arms_present_and_default_off():

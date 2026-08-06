@@ -262,6 +262,37 @@ def test_native_aa_override_is_label_only_when_design_tokens_are_masked(
     assert torch.all(new_feat["restype"][design].argmax(dim=-1) == 32)
 
 
+def test_design_tokens_without_a_usable_label_still_show_xpb(synthetic_complex):
+    """A design residue whose native type has no 20-AA label must still be xpb.
+
+    `_sample_aa_corruption_mask` only draws from tokens carrying a valid label,
+    so an UNK / unmapped design residue is never corrupted. Before the fix it
+    fell through to `clean_restype` and the model was shown a concrete residue
+    at a position that is always xpb at inference.
+    """
+    from pxdesign_train.data import DesignFeaturizer, DesignSelection
+
+    aa, feat, lbl, n_a, n_b = synthetic_complex
+    # Second binder residue has no usable label; the rest are ordinary.
+    native = torch.tensor([7] * n_a + [0, -100, 2, 3], dtype=torch.long)
+    selection = DesignSelection(
+        binder_chain_id="B",
+        aa_mask_mode="all",
+        aa_clean_override=native,
+        rng=np.random.default_rng(0),
+    )
+    new_feat, _, _ = DesignFeaturizer(selection).transform(aa, feat, lbl)
+
+    design = new_feat["design_token_mask"].bool()
+    # EVERY design token is xpb in the model input, labelled or not.
+    assert torch.all(new_feat["restype"][design].argmax(dim=-1) == 32)
+    # ...but the unlabelled one is still excluded from the AA loss.
+    assert new_feat["aa_loss_mask"].bool()[n_a + 1].item() is False
+    assert new_feat["aa_loss_mask"].bool()[n_a].item() is True
+    # Target tokens are untouched.
+    assert torch.all(new_feat["restype"][~design].argmax(dim=-1) == 7)
+
+
 def test_featurizer_partial_aa_corruption_masks_only_selected_design_tokens(synthetic_complex):
     from pxdesign_train.data import DesignFeaturizer, DesignSelection
 

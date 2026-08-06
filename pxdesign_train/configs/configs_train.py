@@ -126,23 +126,42 @@ training_configs["loss"] = {
     "weight_aa_post": 1.0,
 }
 
+# Every arm lists EVERY switch explicitly, so an arm is a full specification of
+# the feedback wiring rather than a delta on whatever the defaults happen to be.
+#
+# Two families, and they answer different questions:
+#   * the "which single channel is best" family REPLACES the default indirect
+#     channel (hres_inject=False) — comparing a_direct/q/... against a-indirect;
+#   * the "+..." family KEEPS hres_inject=True and adds a channel on top, which
+#     is the only way to measure INCREMENTAL benefit. Reporting a replacement arm
+#     as evidence for "adding a/q helps" conflates the two.
 SC_ABLATION_ARMS = {
     # true control: refinement pass runs, no side-chain info reaches the backbone
-    "no":            dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "no":            dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
     # current/default indirect channel: h_res' -> s_trunk -> a_token recomputed
-    "a-indirect":    dict(hres_inject=True,  a_direct=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
-    # token-level concat/fusion: a'_bb = a_bb + MLP([a_bb, a_sc])
-    "a-direct":      dict(hres_inject=False, a_direct=True,  bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "a-indirect":    dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    # token-level concat/fusion AFTER the global attention: a'_bb = a_bb + MLP([a_bb, a_sc])
+    "a-direct":      dict(hres_inject=False, a_direct=True,  a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    # same fusion BEFORE the global attention — the injection-point comparison
+    "a-direct-pre":  dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
     # q control: S_phi sees 4 backbone context atoms, but no q feedback is written back
-    "bbctx":         dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=False),
+    "bbctx":         dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=False),
     # atom-level concat/fusion: q'_bb = q_bb + MLP([q_bb, q_sc_bb])
-    "q":             dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
+    "q":             dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
     # both explicit concat/fusion channels
-    "a-direct+q":    dict(hres_inject=False, a_direct=True,  bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
+    "a-direct+q":    dict(hres_inject=False, a_direct=True,  a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
     # B→S residue-level a concat (point 2)
-    "a-bs":          dict(hres_inject=False, a_direct=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
+    "a-bs":          dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
     # B→S atom-level q into side-chain (point 3)
-    "q-bs":          dict(hres_inject=False, a_direct=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
+    "q-bs":          dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
+    # ---- INCREMENTAL arms: default channel KEPT, one channel added on top ----
+    "+a-direct":     dict(hres_inject=True,  a_direct=True,  a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "+a-direct-pre": dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "+q":            dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
+    "+a-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
+    "+q-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
+    # the full bidirectional wiring the interconnection slide describes
+    "+all":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
 }
 
 
@@ -271,6 +290,18 @@ training_configs["sidechain"] = {
     # pass (requires enable_coevolution). Ablation arm: default False, and the
     # residual branch is zero-initialised, so turning it on is a no-op at step 0.
     "a_direct": False,
+    # SAME fusion as a_direct, injected EARLIER. a_direct hooks `layernorm_a`,
+    # which runs AFTER the DiffusionTransformer — the module's only GLOBAL
+    # cross-residue attention. Everything after it is sequence-local atom
+    # attention, so a side chain injected there can only reach residues nearby in
+    # SEQUENCE, never one that is nearby in SPACE. Side-chain packing is a spatial
+    # effect (a bulky side chain pushes on whatever is beside it in 3D, usually
+    # far in sequence), so the late point cannot express the interaction that
+    # motivates the whole co-evolution channel. a_direct_pre rewrites the
+    # DiffusionTransformer's `a` argument instead, i.e. before the global
+    # attention. Separate weights from a_direct so the two are independent arms.
+    # Default False: turning it on changes what Stage III measures.
+    "a_direct_pre": False,
     "a_direct_zero_init": True,
     # DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
     #     q'_bb = q_bb + MLP(concat(q_bb, W q_sc_bb))

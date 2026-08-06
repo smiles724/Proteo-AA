@@ -359,10 +359,53 @@ def _canonical_backbone_binder_atom_array(atom_array, binder_atom_mask):
     return safe, safe_binder
 
 
+def _assert_strict_token_alignment(native_atom_array, safe_atom_array, tokens) -> None:
+    """Fail loudly if strict re-tokenisation did not preserve the token axis.
+
+    `aa_clean` and every `sc_*` supervision tensor are captured on the NATIVE
+    token axis and then merged into a feature dict built on the STRICT one. That
+    merge is only valid if token i means the same residue on both sides. Checking
+    the token COUNT alone cannot catch a reordering: a permuted axis would pair
+    each residue with another residue's label and train on silently wrong
+    targets, with no crash and no obviously broken metric.
+
+    Both axes are ordered by `struc.residue_iter` over the same row order, so the
+    (chain_id, res_id) sequence must match element-for-element.
+    """
+    def _keys(atom_array):
+        rep = np.asarray(atom_array.distogram_rep_atom_mask).astype(bool)
+        return list(
+            zip(
+                np.asarray(atom_array.chain_id)[rep].tolist(),
+                np.asarray(atom_array.res_id)[rep].tolist(),
+            )
+        )
+
+    native_keys = _keys(native_atom_array)
+    safe_keys = _keys(safe_atom_array)
+    if len(tokens) != len(native_keys):
+        raise ValueError(
+            "InferenceSafeBinder: strict token count "
+            f"{len(tokens)} != native token count {len(native_keys)}"
+        )
+    if safe_keys != native_keys:
+        first = next(
+            (i for i, (a, b) in enumerate(zip(safe_keys, native_keys)) if a != b),
+            min(len(safe_keys), len(native_keys)),
+        )
+        raise ValueError(
+            "InferenceSafeBinder: strict token order diverges from the native "
+            f"token order at index {first} "
+            f"(strict={safe_keys[first:first + 3]}, native={native_keys[first:first + 3]}); "
+            "aa_clean / sc_* supervision would be attached to the wrong residues"
+        )
+
+
 def _refeaturize_inference_safe_binder(
     atom_array,
     binder_atom_mask,
     *,
+    ref_pos_augment: bool = True,
     source_feature_dict: Optional[dict[str, torch.Tensor]] = None,
 ):
     """Build Protenix features only after strict binder canonicalisation."""
@@ -374,17 +417,19 @@ def _refeaturize_inference_safe_binder(
         atom_array, binder_atom_mask
     )
     tokens = AtomArrayTokenizer(safe).get_token_array()
-    original_token_count = int(np.asarray(atom_array.distogram_rep_atom_mask).sum())
-    if len(tokens) != original_token_count:
-        raise ValueError(
-            "InferenceSafeBinder: strict token count "
-            f"{len(tokens)} != native token count {original_token_count}"
-        )
+    _assert_strict_token_alignment(atom_array, safe, tokens)
 
     base = Featurizer(
         cropped_token_array=tokens,
         cropped_atom_array=safe,
-        ref_pos_augment=False,
+        # Inference featurizes with the augmentation ON (Protenix's default, and
+        # PXDesign's inference path never overrides it), so the binder's four
+        # reference-conformer positions arrive randomly rotated per residue.
+        # Turning it off here would train the model on a fixed canonical
+        # orientation it never sees at inference -- and it would silently strip
+        # the augmentation from the TARGET residues too. The binder template is
+        # residue-type independent, so rotating it reintroduces no identity.
+        ref_pos_augment=ref_pos_augment,
         lig_atom_rename=False,
     )
     feat = base.get_all_input_features()

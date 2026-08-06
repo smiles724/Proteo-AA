@@ -229,8 +229,20 @@ class DesignFeaturizer:
             token_is_design=token_is_design,
             aa_clean=aa_clean,
         )
+        # A design token shows [xpb] if it is corrupted OR carries no usable
+        # label. The second half matters: `_sample_aa_corruption_mask` only draws
+        # from tokens with a valid 20-AA label, so a design residue whose native
+        # type is non-standard (UNK / unmapped CCD -> aa_clean == -100) is never
+        # corrupted and would otherwise fall through to `clean_restype` — showing
+        # the model a concrete residue (GLY under strict re-featurization, the
+        # native 3-letter code without it) at a position that is ALWAYS xpb at
+        # inference. It is excluded from the AA loss either way; this only fixes
+        # what the model is shown.
+        show_xpb = aa_corruption_mask | (
+            token_is_design & (aa_clean == AA_IGNORE_INDEX)
+        )
         feature_dict["restype"] = torch.where(
-            aa_corruption_mask[:, None],
+            show_xpb[:, None],
             xpb_restype,
             clean_restype,
         )

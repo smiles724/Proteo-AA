@@ -693,6 +693,36 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_sc_global = 0.0
         configs.loss.weight_bb_post = 0.0
         configs.loss.weight_aa_post = 0.0
+    elif args.training_stage in ("coevolution", "predicted_mask"):
+        # Paper Stage III (coevolution) and Stage IV (predicted_mask). Neither had
+        # an entry here: `joint` above is BB + AA head with the side chain OFF, so
+        # the co-evolution machinery that Stage III is *about* -- S_phi, the
+        # feedback channel, the refinement pass, L_bb^post / L_aa^post -- was
+        # reachable only from scripts/examples/finetune_mini.py.
+        configs.loss.weight_aa = 1.0
+        configs.enable_sidechain = True
+        configs.enable_coevolution = True
+        configs.sidechain.predicted_frame = True
+        configs.sidechain.per_sigma = True
+        configs.sidechain.template_init = True
+        configs.sidechain.template_provider = args.template_provider
+        configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
+        configs.sidechain.force_gt_type_logits = False
+        # Warm-start from the Stage II checkpoint: backbone, conditioning and the
+        # side-chain module all carry over, so no prefix filter.
+        configs.training.checkpoint_include_prefixes = []
+        configs.training.trainable_param_keywords = []
+        if args.training_stage == "predicted_mask":
+            # Stage IV: instantiate the atom set from the PREDICTED identity, and
+            # supervise coordinates only where that identity is right. Turning
+            # predicted_mask on is also what makes L_aa^post safe to supervise:
+            # under GT-type teacher forcing the atom composition carries the
+            # answer, so post_aa is deliberately not produced (model.py gates it).
+            configs.sidechain.predicted_mask = True
+            configs.sidechain.route_by_type = True
+        else:
+            configs.sidechain.predicted_mask = False
+            configs.sidechain.route_by_type = False
     return configs
 
 
@@ -720,6 +750,13 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
         args.enable_coevolution = False
+    elif args.training_stage in ("coevolution", "predicted_mask"):
+        args.disable_sidechain = False
+        args.disable_aa_loss = False
+        args.aa_mask_mode = "all"
+        args.enable_coevolution = True
+        args.predicted_frame = True
+        args.per_sigma = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -727,8 +764,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--training-stage",
         default="backbone_only",
-        choices=["backbone_only", "aa_head_warmup", "sidechain_warmup", "joint"],
-        help="Select the training objective bundle. backbone_only is the default pretraining stage.",
+        choices=[
+            "backbone_only", "aa_head_warmup", "sidechain_warmup", "joint",
+            "coevolution", "predicted_mask",
+        ],
+        help="Training objective bundle. backbone_only is the default pretraining "
+             "stage; 'coevolution' is paper Stage III (both modules + the "
+             "refinement pass) and 'predicted_mask' is Stage IV (atom sets "
+             "instantiated from the predicted identity).",
     )
     p.add_argument(
         "--data-mode",

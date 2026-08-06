@@ -597,6 +597,10 @@ class PXDesignTrainer:
             "step": self.step,
             "global_step": self.global_step,
             "train_mode": self.train_mode,
+            # Structural switches that change WHAT S_phi is fed, not just how it
+            # is optimized. Recorded so the next stage can refuse to warm-start
+            # across a change in them (see `_check_sidechain_arch`).
+            "sidechain_arch": self._sidechain_arch(),
         }
         if self.train_mode == "alternating":
             state["sc_optimizer"] = self.sc_optimizer.state_dict()
@@ -609,6 +613,43 @@ class PXDesignTrainer:
         torch.save(state, path)
         self._log(f"Saved checkpoint -> {path}")
         return path
+
+    # Switches that change S_phi's INPUT STRUCTURE rather than its optimization.
+    # Flipping one of these between stages means the warm-started module meets an
+    # input shape/composition it was never trained on -- e.g. `bb_context` turns
+    # S_phi's atom axis from 10 side-chain slots into 4 backbone context slots +
+    # 10, which changes the intra-residue attention's key set for every residue.
+    # Loading anyway does not crash (the parameters are shape-compatible), it just
+    # silently degrades, which is exactly the failure mode this project keeps
+    # hitting.
+    SIDECHAIN_ARCH_KEYS = ("bb_context", "local_coord_input", "frame_aware_head")
+
+    def _sidechain_arch(self) -> dict:
+        sc = getattr(self.configs, "sidechain", None)
+        if sc is None or not getattr(self.configs, "enable_sidechain", False):
+            return {}
+        return {k: bool(getattr(sc, k, False)) for k in self.SIDECHAIN_ARCH_KEYS}
+
+    def _check_sidechain_arch(self, ckpt: dict) -> None:
+        saved = ckpt.get("sidechain_arch")
+        current = self._sidechain_arch()
+        if not saved or not current:
+            return
+        mismatched = {
+            k: (saved.get(k), current[k])
+            for k in current
+            if k in saved and saved[k] != current[k]
+        }
+        if mismatched:
+            detail = ", ".join(
+                f"{k}: checkpoint={was} current={now}" for k, (was, now) in mismatched.items()
+            )
+            raise ValueError(
+                "Side-chain input structure changed between the checkpoint and this "
+                f"run ({detail}). S_phi would be warm-started onto an input layout it "
+                "never saw -- keep these switches identical across stages, or start "
+                "the side-chain module from scratch."
+            )
 
     def _migrate_atom_name_vocab(self, state: dict) -> dict:
         """Zero-pad S_phi's atom-name embedding when an OLDER checkpoint is loaded.
@@ -645,6 +686,7 @@ class PXDesignTrainer:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         load_strict = bool(getattr(self.configs, "load_strict", False))
         # Strip DDP prefix if loading a DDP checkpoint into a single-GPU model.
+        self._check_sidechain_arch(ckpt)
         state = ckpt["model"]
         if not self.use_ddp and any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}

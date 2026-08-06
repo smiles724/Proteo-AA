@@ -159,6 +159,7 @@ def _strict_backbone_input(
     from protenix.data.tokenizer import AtomArrayTokenizer
     from protenix.data.utils import data_type_transform, make_dummy_feature
     from pxdesign_train.data.featurizer import DesignFeaturizer
+    from pxdesign_train.runner.data import canonicalise_backbone_reference_metadata
 
     aa = crop.atom_array
     keep = np.zeros(len(aa), dtype=bool)
@@ -177,26 +178,15 @@ def _strict_backbone_input(
         raise ValueError("strict backbone AtomArray is empty")
 
     # Uniform residue identity before featurization is load-bearing: ref_pos,
-    # ref_charge, ref_element, ref atom names and atom counts are all rebuilt
-    # from the same residue template instead of inherited from the native AA.
-    bb.res_name[:] = "GLY"
-    if "cano_seq_resname" in bb.get_annotation_categories():
-        bb.cano_seq_resname[:] = "GLY"
-
-    # The source AtomArray's CCD reference annotations were computed from the
-    # native residue.  Replacing only res_name would therefore be insufficient:
-    # native ref_pos/ref_charge and skipped mol_atom_index values could still
-    # identify residues.  Replace all such values with one uniform backbone
-    # template before Featurizer reads the AtomArray.
-    canonical_ref = {
-        "N": np.asarray([-0.525, 1.363, 0.000], dtype=np.float32),
-        "CA": np.asarray([0.000, 0.000, 0.000], dtype=np.float32),
-        "C": np.asarray([1.526, 0.000, 0.000], dtype=np.float32),
-        "O": np.asarray([2.153, -1.062, 0.000], dtype=np.float32),
-    }
-    bb.ref_pos[:] = np.stack([canonical_ref[str(name)] for name in bb.atom_name])
-    bb.ref_mask[:] = 1
-    bb.ref_charge[:] = 0
+    # ref_charge, ref_element, ref atom names and atom counts must all come from
+    # one shared template rather than being inherited from the native residue.
+    #
+    # SHARED with the training path on purpose. This harness and
+    # DesignSourceDataset differ in residue-SELECTION policy (this one drops an
+    # unusable residue and reports which tokens survived; training raises), but
+    # if they ever disagreed about WHICH per-atom channels get erased, the number
+    # this script reports would not describe the pipeline that actually trains.
+    canonicalise_backbone_reference_metadata(bb, np.ones(len(bb), dtype=bool))
     bb.mol_atom_index[:] = np.arange(len(bb), dtype=bb.mol_atom_index.dtype)
     synthetic_residue_index = np.repeat(np.arange(len(selected_tokens)), len(BACKBONE))
     if synthetic_residue_index.size != len(bb):

@@ -258,6 +258,39 @@ _CANONICAL_BACKBONE_REF = {
 }
 
 
+def canonicalise_backbone_reference_metadata(atom_array, rows) -> None:
+    """Overwrite every residue-type-dependent per-atom channel on `rows` in place.
+
+    This is the leakage-critical half of the strict rebuild, factored out because
+    it has TWO callers with different residue-selection policies: the training
+    dataset (which raises on an incomplete binder residue) and the strict-backbone
+    evaluation harness (which drops it and reports which tokens survived). The
+    selection policy may differ; what must never drift between them is WHICH
+    channels get erased -- a field scrubbed in one and not the other would make
+    the measurement and the training run disagree about what "strict" means.
+
+    `ref_pos` in particular cannot simply be inherited: the CCD ideal conformer's
+    N/CA/C/O coordinates differ slightly between residue entries, so keeping them
+    would leave a weak but real identity channel behind after the side-chain rows
+    are gone.
+    """
+    rows = np.asarray(rows, dtype=bool)
+    categories = set(atom_array.get_annotation_categories())
+    names = np.asarray(atom_array.atom_name)
+
+    atom_array.res_name[rows] = "GLY"
+    if "cano_seq_resname" in categories:
+        atom_array.cano_seq_resname[rows] = "GLY"
+    if "ref_pos" in categories:
+        atom_array.ref_pos[rows] = np.stack(
+            [_CANONICAL_BACKBONE_REF[str(name)] for name in names[rows]]
+        )
+    if "ref_mask" in categories:
+        atom_array.ref_mask[rows] = 1
+    if "ref_charge" in categories:
+        atom_array.ref_charge[rows] = 0
+
+
 def _has_binder_sidechain(atom_array, binder_atom_mask) -> bool:
     names = np.asarray(atom_array.atom_name).astype(str)
     binder = np.asarray(binder_atom_mask, dtype=bool)
@@ -304,18 +337,8 @@ def _canonical_backbone_binder_atom_array(atom_array, binder_atom_mask):
                 f"{key!r} must contain exactly N/CA/C/O, got {row_names}"
             )
 
-    safe.res_name[safe_binder] = "GLY"
+    canonicalise_backbone_reference_metadata(safe, safe_binder)
     categories = set(safe.get_annotation_categories())
-    if "cano_seq_resname" in categories:
-        safe.cano_seq_resname[safe_binder] = "GLY"
-    if "ref_pos" in categories:
-        safe.ref_pos[safe_binder] = np.stack(
-            [_CANONICAL_BACKBONE_REF[str(name)] for name in safe.atom_name[safe_binder]]
-        )
-    if "ref_mask" in categories:
-        safe.ref_mask[safe_binder] = 1
-    if "ref_charge" in categories:
-        safe.ref_charge[safe_binder] = 0
 
     # ref_space_uid is used as an equality/grouping identifier.  Reassigning it
     # by residue removes native gaps caused by variable side-chain atom counts.

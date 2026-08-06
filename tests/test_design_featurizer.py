@@ -238,6 +238,30 @@ def test_featurizer_preserves_clean_aa_targets_without_leakage(synthetic_complex
     assert torch.all(new_feat["restype"][design].argmax(dim=-1) == 32)
 
 
+def test_native_aa_override_is_label_only_when_design_tokens_are_masked(
+    synthetic_complex,
+):
+    """Strict pre-featurization canonicalises binder residues to GLY.
+
+    The native labels must remain available for the loss without replacing xpb
+    in the model input.
+    """
+    from pxdesign_train.data import DesignFeaturizer, DesignSelection
+
+    aa, feat, lbl, n_a, n_b = synthetic_complex
+    native = torch.tensor([7] * n_a + [0, 1, 2, 3], dtype=torch.long)
+    selection = DesignSelection(
+        binder_chain_id="B",
+        aa_mask_mode="all",
+        aa_clean_override=native,
+        rng=np.random.default_rng(0),
+    )
+    new_feat, _, _ = DesignFeaturizer(selection).transform(aa, feat, lbl)
+    design = new_feat["design_token_mask"].bool()
+    assert torch.equal(new_feat["aa_clean"], native)
+    assert torch.all(new_feat["restype"][design].argmax(dim=-1) == 32)
+
+
 def test_featurizer_partial_aa_corruption_masks_only_selected_design_tokens(synthetic_complex):
     from pxdesign_train.data import DesignFeaturizer, DesignSelection
 

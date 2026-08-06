@@ -70,6 +70,108 @@ class _CrossResBlock(nn.Module):
         return x + self.o(out)
 
 
+class _CrossAtomBlock(nn.Module):
+    """Cross-residue attention BETWEEN ATOMS, over a residue-KNN neighbourhood.
+
+    This is what the appendix actually specifies -- "cross-residue geometric
+    attention between nearby ATOMS". `_CrossResBlock` below pools each residue's
+    fourteen slots into one vector first and attends residue-to-residue, which
+    throws away exactly the thing side-chain packing is about: a side-chain atom
+    cannot tell WHICH neighbouring atom sits in its way, or in which direction,
+    only that some residue is nearby. Mean-pooling is direction-blind.
+
+    Neighbourhood selection is two-level, and deliberately so. A flat atom KNN
+    needs an N_atom x N_atom distance matrix -- at the 640-token crop that is
+    ~9k atoms and ~80M pairs, which dwarfs the attention it feeds. Selecting the
+    M nearest RESIDUES by CA distance first costs L x L (~0.4M) and then attends
+    over every atom of those residues, so the query sees real atom-atom geometry
+    while the selection stays cheap. With M=16 and 14 slots a query attends to
+    224 keys, versus L=640 keys for the residue-level block: comparable cost,
+    atom-level resolution.
+
+    Context tokens (receptor / motif / ligand) own no S_phi atom, so they enter as
+    ONE virtual atom placed at their CA and carrying the residue feature the
+    caller supplies. That preserves exactly what the pooled block could see --
+    the side chain still knows a receptor residue is there -- without pretending
+    we have its individual atoms in S_phi's slot space.
+    """
+
+    def __init__(self, c: int, n_heads: int, n_neighbors: int) -> None:
+        super().__init__()
+        if c % n_heads != 0:
+            raise ValueError(f"c={c} must be divisible by n_heads={n_heads}")
+        self.ln = nn.LayerNorm(c)
+        self.q = nn.Linear(c, c)
+        self.k = nn.Linear(c, c)
+        self.v = nn.Linear(c, c)
+        self.o = nn.Linear(c, c)
+        # Per-head distance bias, softplus-gated to stay a *penalty*: the sign is
+        # fixed so "closer attends more" cannot be learned away into its opposite.
+        self.dist_scale = nn.Parameter(torch.full((n_heads,), 0.1))
+        self.c = c
+        self.n_heads = n_heads
+        self.head_dim = c // n_heads
+        self.n_neighbors = int(n_neighbors)
+
+    @staticmethod
+    def residue_neighbours(ca, res_mask, n_neighbors):
+        """Indices of the M nearest residues per residue, by CA distance.
+
+        Invalid residues are pushed to +inf so they are only ever selected as
+        padding once the real neighbours run out; the caller masks them anyway.
+        Each residue's own index is included (it is its own nearest), so a side
+        chain still sees its residue's other atoms here as well as in the
+        intra-residue block -- harmless, and it keeps the gather uniform.
+        """
+        d = torch.cdist(ca, ca)                                    # [B, L, L]
+        big = torch.finfo(d.dtype).max
+        d = d.masked_fill(~res_mask[:, None, :], big)
+        m = min(int(n_neighbors), d.shape[-1])
+        return d.topk(m, dim=-1, largest=False).indices            # [B, L, M]
+
+    def forward(self, atom_feats, atom_coords, atom_mask, ca, res_mask, nbr_idx=None):
+        """atom_feats [B,L,A,c]; atom_coords [B,L,A,3]; atom_mask [B,L,A] bool;
+        ca [B,L,3]; res_mask [B,L] bool. Returns atom_feats + update."""
+        B, L, A, c = atom_feats.shape
+        H, D = self.n_heads, self.head_dim
+        if nbr_idx is None:
+            nbr_idx = self.residue_neighbours(ca, res_mask, self.n_neighbors)
+        M = nbr_idx.shape[-1]
+
+        h = self.ln(atom_feats)
+        q = self.q(h).reshape(B, L, A, H, D)
+
+        def gather_residues(x):
+            """[B,L,...] -> [B,L,M,...] indexed by nbr_idx."""
+            trail = x.shape[2:]
+            idx = nbr_idx.reshape(B, L * M)
+            for _ in trail:
+                idx = idx.unsqueeze(-1)
+            idx = idx.expand(B, L * M, *trail)
+            return x.gather(1, idx).reshape(B, L, M, *trail)
+
+        k = gather_residues(self.k(h)).reshape(B, L, M * A, H, D)
+        v = gather_residues(self.v(h)).reshape(B, L, M * A, H, D)
+        k_xyz = gather_residues(atom_coords).reshape(B, L, M * A, 3)
+        k_ok = gather_residues(atom_mask).reshape(B, L, M * A)
+
+        # [B, L, A, M*A, H]
+        scores = torch.einsum("blahd,blkhd->blakh", q, k) / math.sqrt(D)
+        d_atom = torch.cdist(atom_coords.reshape(B * L, A, 3),
+                             k_xyz.reshape(B * L, M * A, 3)).reshape(B, L, A, M * A)
+        scores = scores - (
+            F.softplus(self.dist_scale).view(1, 1, 1, 1, H) * d_atom.unsqueeze(-1)
+        )
+        scores = scores.masked_fill(~k_ok[:, :, None, :, None], float("-inf"))
+        attn = torch.nan_to_num(torch.softmax(scores, dim=-2))   # rows with no key
+        out = torch.einsum("blakh,blkhd->blahd", attn, v).reshape(B, L, A, c)
+        # Zero AFTER the output projection, not before: `self.o` carries a bias, so
+        # projecting a zeroed row still yields that bias and a padding slot would
+        # drift away from its residual base every block.
+        upd = self.o(out) * atom_mask[..., None].to(out.dtype)
+        return atom_feats + upd
+
+
 class _AtomBlock(nn.Module):
     """Pre-norm masked self-attention + FFN over the atoms of one residue."""
 
@@ -106,6 +208,8 @@ class SideChainModule(nn.Module):
         a_bs_concat: bool = False,
         q_bs: bool = False,
         c_q: int = 128,
+        cross_granularity: str = "atom",
+        cross_neighbors: int = 16,
     ) -> None:
         super().__init__()
         if c_atom % n_heads != 0:
@@ -127,9 +231,21 @@ class SideChainModule(nn.Module):
         self.blocks = nn.ModuleList([
             _AtomBlock(c_atom, n_heads, ff_mult=ff_mult) for _ in range(n_blocks)
         ])
-        self.cross_res_blocks = nn.ModuleList([
-            _CrossResBlock(c_atom) for _ in range(n_cross_blocks)
-        ])
+        if cross_granularity not in ("atom", "residue"):
+            raise ValueError(
+                f"cross_granularity must be 'atom' or 'residue', got {cross_granularity!r}"
+            )
+        self.cross_granularity = cross_granularity
+        self.cross_neighbors = int(cross_neighbors)
+        if cross_granularity == "atom":
+            self.cross_res_blocks = nn.ModuleList([
+                _CrossAtomBlock(c_atom, n_heads, cross_neighbors)
+                for _ in range(n_cross_blocks)
+            ])
+        else:
+            self.cross_res_blocks = nn.ModuleList([
+                _CrossResBlock(c_atom) for _ in range(n_cross_blocks)
+            ])
         # Backwards-compatible debug/test handle for the first cross-residue block.
         self.cross_res = self.cross_res_blocks[0]
         self.a_bs_concat = bool(a_bs_concat)
@@ -260,10 +376,43 @@ class SideChainModule(nn.Module):
             if self.a_bs_concat and self.a_bs_concat_fusion is not None:
                 # point 2: fuse the backbone a_token (h_proj) into the side-chain's all-atom
                 # residue representation (pooled), symmetric to a-direct on the S→B side.
-                pooled = self.a_bs_concat_fusion(pooled, h_proj.to(pooled.dtype))
-            for cross_block in self.cross_res_blocks:
-                pooled = cross_block(pooled, ca_coords, keys_mask)    # [B,L,c]
-            atom_feats = atom_feats + pooled[:, :, None, :]           # broadcast back
+                fused_pooled = self.a_bs_concat_fusion(pooled, h_proj.to(pooled.dtype))
+                if self.cross_granularity == "atom":
+                    # Under residue granularity `pooled` is what gets mixed across
+                    # residues and broadcast back, so fusing into it is enough. Under
+                    # atom granularity the atoms carry themselves and `pooled` only
+                    # seeds context slots -- so the B->S contribution has to be added
+                    # to the atoms directly, or this channel would silently become a
+                    # no-op for every structure without context tokens.
+                    atom_feats = atom_feats + (fused_pooled - pooled).unsqueeze(2)
+                pooled = fused_pooled
+
+            if self.cross_granularity == "atom":
+                # Atom-level: every slot attends to the individual atoms of the M
+                # nearest residues, so a side chain can tell WHICH atom is in its
+                # way and in which direction. A context residue owns no S_phi slot,
+                # so it joins as ONE virtual atom at its CA carrying `pooled` --
+                # the same feature the residue-level block would have shown it,
+                # placed somewhere geometrically meaningful.
+                virt_feat = pooled.unsqueeze(2)                        # [B,L,1,c]
+                virt_xyz = ca_coords.unsqueeze(2).to(coords.dtype)     # [B,L,1,3]
+                is_virtual = keys_mask & ~mask.bool().any(dim=-1)      # context only
+                feats_ext = torch.cat([atom_feats, virt_feat.to(atom_feats.dtype)], dim=2)
+                xyz_ext = torch.cat([coords.to(atom_feats.dtype), virt_xyz.to(atom_feats.dtype)], dim=2)
+                mask_ext = torch.cat([mask.bool(), is_virtual.unsqueeze(-1)], dim=2)
+                nbr_idx = self.cross_res_blocks[0].residue_neighbours(
+                    ca_coords, keys_mask, self.cross_neighbors
+                )
+                for cross_block in self.cross_res_blocks:
+                    feats_ext = cross_block(
+                        feats_ext, xyz_ext, mask_ext, ca_coords, keys_mask,
+                        nbr_idx=nbr_idx,
+                    )
+                atom_feats = feats_ext[:, :, :A, :]                    # drop the virtual slot
+            else:
+                for cross_block in self.cross_res_blocks:
+                    pooled = cross_block(pooled, ca_coords, keys_mask)    # [B,L,c]
+                atom_feats = atom_feats + pooled[:, :, None, :]           # broadcast back
 
         # Split the 14 slots back apart. Coordinates are decoded for the 10
         # SIDE-CHAIN slots only — backbone slots never produce coordinates and so

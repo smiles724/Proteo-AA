@@ -51,8 +51,14 @@ OLD_SC_IDS = {
 
 def _module(seed=0, scale=1.0):
     torch.manual_seed(seed)
+    # cross_granularity="residue" on purpose: this file pins that adding the
+    # 14-slot axis left the 10-slot path bit-identical. Cross-residue granularity
+    # is a separate axis added later; comparing against the atom-level default
+    # would conflate the two changes. `tests/test_cross_atom_attention.py` covers
+    # the atom-level path.
     return SideChainModule(c_res=C_RES, c_atom=C_ATOM, c_time=16, n_blocks=2,
-                           n_heads=4, trunk_grad_scale=scale)
+                           n_heads=4, trunk_grad_scale=scale,
+                           cross_granularity="residue")
 
 
 def _batch(restypes, seed=1, requires_grad=False):

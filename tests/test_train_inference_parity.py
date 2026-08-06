@@ -49,6 +49,15 @@ TRAIN_ONLY = {
     "n_blocks": "architecture depth, not a behavioural switch",
     "n_heads": "architecture attention width, not a behavioural switch",
     "n_cross_blocks": "architecture depth, not a behavioural switch",
+    "cross_granularity": "chooses the cross-residue SUBMODULE at construction "
+                         "(_CrossAtomBlock vs _CrossResBlock). The sampler calls "
+                         "the same SideChainModule instance, so it inherits the "
+                         "choice -- there is nothing for it to read. The two are "
+                         "not even parameter-compatible, which is why this key is "
+                         "in trainer.SIDECHAIN_ARCH_KEYS: a checkpoint cannot be "
+                         "warm-started across the switch.",
+    "cross_neighbors": "neighbourhood size baked in at construction; same reason "
+                       "as cross_granularity",
     "ff_mult": "architecture FFN width, not a behavioural switch",
     "init_sigma": "consulted at sampling (the Gaussian fallback)",
     "q_direct_zero_init": "initialisation-time only",

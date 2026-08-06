@@ -299,11 +299,19 @@ class ProtenixDesignTrain(ProtenixDesign):
                 getattr(self.diffusion_module.atom_attention_encoder, "c_atom", None)
                 or 128
             )
+            self.sc_cross_granularity = (
+                str(getattr(sc_cfg, "cross_granularity", "atom")) if sc_cfg is not None else "atom"
+            )
+            self.sc_cross_neighbors = (
+                int(getattr(sc_cfg, "cross_neighbors", 16)) if sc_cfg is not None else 16
+            )
             self.sidechain_module = SideChainModule(
                 c_res=self.sc_c_res, c_atom=c_atom, n_type=vocab_size,
                 n_blocks=n_blocks, n_heads=n_heads, n_cross_blocks=n_cross_blocks,
                 ff_mult=ff_mult, trunk_grad_scale=sc_grad_scale,
                 a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
+                cross_granularity=self.sc_cross_granularity,
+                cross_neighbors=self.sc_cross_neighbors,
             )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
 

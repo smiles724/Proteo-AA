@@ -292,6 +292,22 @@ training_configs["sidechain"] = {
     # Receptor / motif / ligand context. Spec (Overleaf requires it in 6 places), not an
     # option; a switch only so Stage II-A warmup (GT frames) can skip it. See
     # docs/sidechain_config_notes.md.
+    # Granularity of the cross-residue stage inside S_phi.
+    #   "atom"    -- every slot attends to the individual atoms of the M nearest
+    #                residues, biased by ATOM-ATOM distance. This is what the
+    #                appendix specifies ("cross-residue geometric attention
+    #                between nearby atoms").
+    #   "residue" -- the original: pool each residue's 14 slots into one vector,
+    #                attend residue-to-residue biased by CA-CA distance. Kept as
+    #                the A/B arm, and used by the legacy-equivalence tests.
+    # DEFAULT = "atom". Pooling is a mean over slots and therefore direction-blind:
+    # under "residue" a side chain can learn that some residue is nearby but never
+    # WHICH atom is in its way or from which side -- and that is the quantity
+    # side-chain packing turns on. Cost is comparable, not larger: selecting the M
+    # nearest residues first keeps the distance matrix at L x L, and with M=16 a
+    # query attends to 16*14=224 keys versus L keys for the residue-level block.
+    "cross_granularity": "atom",
+    "cross_neighbors": 16,
     "context_aware": True,
     "context_radius": 10.0,      # A; atoms beyond this from any binder CA are dropped
     "context_max_atoms": 4096,   # hard cap on the context set (memory bound)

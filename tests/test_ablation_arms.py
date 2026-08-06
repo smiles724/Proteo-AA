@@ -49,12 +49,19 @@ REPLACEMENT_ARMS = {
 # pays for it with its own Stage II run.
 TEN_SLOT_ARMS = {"no-bbctx"}
 INCREMENTAL_ARMS = {
-    "+a-direct", "+a-direct-pre", "+q", "+a-bs", "+q-bs", "+all",
+    "+a-direct", "+a-direct-pre", "+q", "+a-bs", "+q-bs",
+}
+# Leave-one-out from the shipped default. Now that the default is the full
+# bidirectional wiring, this is the PRIMARY ablation: each arm drops exactly one
+# channel, so a regression is that channel's marginal contribution.
+LEAVE_ONE_OUT_ARMS = {
+    "full", "full-hres", "full-a", "full-q", "full-a-bs", "full-q-bs",
+    "full-a-post",
 }
 
 
 def test_all_arms_are_defined():
-    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS | TEN_SLOT_ARMS
+    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS | LEAVE_ONE_OUT_ARMS | TEN_SLOT_ARMS
 
 
 def test_every_arm_specifies_every_switch():
@@ -76,8 +83,8 @@ def test_incremental_arms_keep_the_default_channel_and_add_exactly_one_thing():
         assert arm["hres_inject"] is True, f"{name} dropped the default channel"
         added = {k for k in arm if arm[k] != base[k]}
         assert added, f"{name} adds nothing — it is just a-indirect"
-        if name != "+all":
-            counterpart = ARMS[name[1:]]
+        counterpart = ARMS[name[1:]]
+        if True:
             expected = {k for k in counterpart if counterpart[k] != base[k]} - {"hres_inject"}
             assert added == expected, (
                 f"{name} must add exactly what {name[1:]} switches on; "
@@ -205,12 +212,28 @@ def test_model_attributes_match_the_arm(arm):
     assert no_feedback == (arm in ("no", "no-bbctx", "a-bs", "q-bs"))
 
 
-def test_bs_arms_present_and_default_off():
+def test_bs_channels_ship_on_and_each_has_a_removal_arm():
+    """Both B->S channels are part of the default wiring, and both are ablatable."""
     from pxdesign_train.configs.configs_train import SC_ABLATION_ARMS, training_configs
-    assert training_configs["sidechain"]["a_bs_concat"] is False
-    assert training_configs["sidechain"]["q_bs"] is False
-    assert "a-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["a-bs"]["a_bs_concat"] is True
-    assert "q-bs" in SC_ABLATION_ARMS and SC_ABLATION_ARMS["q-bs"]["q_bs"] is True
+    assert training_configs["sidechain"]["a_bs_concat"] is True
+    assert training_configs["sidechain"]["q_bs"] is True
+    assert SC_ABLATION_ARMS["full-a-bs"]["a_bs_concat"] is False
+    assert SC_ABLATION_ARMS["full-q-bs"]["q_bs"] is False
+
+
+def test_leave_one_out_arms_remove_exactly_one_channel():
+    full = ARMS["full"]
+    for name in LEAVE_ONE_OUT_ARMS - {"full", "full-a-post"}:
+        removed = {k for k in full if ARMS[name][k] != full[k]}
+        assert len(removed) == 1, f"{name} changes {removed}, not exactly one channel"
+        assert all(ARMS[name][k] is False for k in removed)
+
+
+def test_the_injection_point_arm_swaps_rather_than_removes():
+    """full-a-post holds everything fixed and only moves where `a` is injected."""
+    full, post = ARMS["full"], ARMS["full-a-post"]
+    assert {k for k in full if post[k] != full[k]} == {"a_direct", "a_direct_pre"}
+    assert post["a_direct"] is True and post["a_direct_pre"] is False
 
 
 def test_stage2_checkpoint_groups_are_derived_and_non_trivial():

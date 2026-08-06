@@ -681,6 +681,26 @@ def build_configs(args: argparse.Namespace, device):
         # four backbone slots are keys only -- never decoded, never in the loss.
         # Leaving it off here would force a second Stage II run for every q arm.
         configs.sidechain.bb_context = True
+        # B->S wiring, asymmetric on purpose:
+        #   a_bs_concat=True  -- B's a_token summarises a residue from its four
+        #       BACKBONE atoms; S_phi's pooled feature summarises the same residue
+        #       from all fourteen slots. They are not the same quantity, so the
+        #       network should learn how to combine them rather than have them
+        #       summed. (The asymmetry only became real once the binder's native
+        #       side chains stopped reaching a_token.) Same interface shape as
+        #       Stage III, which is what makes the warmed-up weights transferable.
+        #   q_bs=False -- it hands S_phi the Backbone Module's own per-atom
+        #       features, and here the backbone is FROZEN. S_phi would fit one
+        #       frozen state's q, which moves as soon as Stage III updates the
+        #       backbone. The geometry it needs is already in the frames and the
+        #       ideal template.
+        configs.sidechain.a_bs_concat = True
+        configs.sidechain.q_bs = False
+        # No S->B feedback: there is no refinement pass to inject into, and
+        # trunk_grad_scale=0 already makes h_res read-only.
+        configs.sidechain.a_direct = False
+        configs.sidechain.a_direct_pre = False
+        configs.sidechain.q_direct = False
         # `design_condition_embedder` is a TOP-LEVEL module of ProtenixDesign, so
         # filtering the warm-start to "diffusion_module." alone dropped it: it
         # would stay randomly initialised AND frozen (it is not in

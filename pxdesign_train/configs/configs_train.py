@@ -217,7 +217,20 @@ SC_ABLATION_ARMS = {
     "+a-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=True,  q_bs=False),
     "+q-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
     # the full bidirectional wiring the interconnection slide describes
-    "+all":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    # ---- the shipped default, and leave-one-out from it ----
+    # With the full wiring as the default, the PRIMARY ablation is removal: each
+    # `full-*` arm drops exactly one channel, so a regression measures that
+    # channel's marginal contribution. Read alongside the single-channel arms --
+    # two redundant channels both read as zero under leave-one-out.
+    "full":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-hres":     dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-a":        dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-q":        dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=False, a_bs_concat=True,  q_bs=True),
+    "full-a-bs":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=True),
+    "full-q-bs":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=False),
+    # injection-point comparison at the default wiring: everything held fixed,
+    # only whether the a-fusion lands before or after the global attention.
+    "full-a-post":   dict(hres_inject=True,  a_direct=True,  a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
     # ---- the ONE 10-slot arm ----
     # Isolates the atom axis itself: does letting a side-chain atom attend to its
     # own N/CA/C/O help, independently of any feedback channel? Every other arm
@@ -383,7 +396,7 @@ training_configs["sidechain"] = {
     # DiffusionTransformer's `a` argument instead, i.e. before the global
     # attention. Separate weights from a_direct so the two are independent arms.
     # Default False: turning it on changes what Stage III measures.
-    "a_direct_pre": False,
+    "a_direct_pre": True,
     "a_direct_zero_init": True,
     # DIRECT q-level (ATOM-level) side-chain -> backbone feedback:
     #     q'_bb = q_bb + MLP(concat(q_bb, W q_sc_bb))
@@ -422,10 +435,10 @@ training_configs["sidechain"] = {
     # run. Defaulting it on lets ONE Stage II checkpoint serve every arm.
     # `no-bbctx` is the deliberate exception; it needs its own Stage II run.
     "bb_context": True,
-    "q_direct": False,
+    "q_direct": True,
     "q_direct_zero_init": True,
-    "a_bs_concat": False,   # point 2: B→S residue concat (side-chain pooled + backbone a_token)
-    "q_bs": False,          # point 3: B→S atom fusion (backbone q -> side-chain backbone slots)
+    "a_bs_concat": True,    # point 2: B→S residue concat (side-chain pooled + backbone a_token)
+    "q_bs": True,           # point 3: B→S atom fusion (backbone q -> side-chain backbone slots)
     "weight_bb_post": 1.0,
     "weight_aa_post": 1.0,
 }

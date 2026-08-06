@@ -193,32 +193,38 @@ training_configs["loss"] = {
 #     is the only way to measure INCREMENTAL benefit. Reporting a replacement arm
 #     as evidence for "adding a/q helps" conflates the two.
 SC_ABLATION_ARMS = {
-    # true control: refinement pass runs, no side-chain info reaches the backbone
-    "no":            dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    # true control: refinement pass runs, no side-chain info reaches the backbone.
+    # 14-slot like every other arm, so it is the baseline they all compare against.
+    "no":            dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=False, q_bs=False),
     # current/default indirect channel: h_res' -> s_trunk -> a_token recomputed
-    "a-indirect":    dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "a-indirect":    dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=False, q_bs=False),
     # token-level concat/fusion AFTER the global attention: a'_bb = a_bb + MLP([a_bb, a_sc])
-    "a-direct":      dict(hres_inject=False, a_direct=True,  a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "a-direct":      dict(hres_inject=False, a_direct=True,  a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=False, q_bs=False),
     # same fusion BEFORE the global attention — the injection-point comparison
-    "a-direct-pre":  dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
-    # q control: S_phi sees 4 backbone context atoms, but no q feedback is written back
-    "bbctx":         dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=False),
+    "a-direct-pre":  dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=True, q_direct=False, a_bs_concat=False, q_bs=False),
     # atom-level concat/fusion: q'_bb = q_bb + MLP([q_bb, q_sc_bb])
     "q":             dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
     # both explicit concat/fusion channels
     "a-direct+q":    dict(hres_inject=False, a_direct=True,  a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
     # B→S residue-level a concat (point 2)
-    "a-bs":          dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
+    "a-bs":          dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=True,  q_bs=False),
     # B→S atom-level q into side-chain (point 3)
     "q-bs":          dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
     # ---- INCREMENTAL arms: default channel KEPT, one channel added on top ----
-    "+a-direct":     dict(hres_inject=True,  a_direct=True,  a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
-    "+a-direct-pre": dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
+    "+a-direct":     dict(hres_inject=True,  a_direct=True,  a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=False, q_bs=False),
+    "+a-direct-pre": dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True, q_direct=False, a_bs_concat=False, q_bs=False),
     "+q":            dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=False),
-    "+a-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=True,  q_bs=False),
+    "+a-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True, q_direct=False, a_bs_concat=True,  q_bs=False),
     "+q-bs":         dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=False, a_bs_concat=False, q_bs=True),
     # the full bidirectional wiring the interconnection slide describes
     "+all":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    # ---- the ONE 10-slot arm ----
+    # Isolates the atom axis itself: does letting a side-chain atom attend to its
+    # own N/CA/C/O help, independently of any feedback channel? Every other arm
+    # runs 14-slot so they can share ONE Stage II checkpoint; this arm cannot, and
+    # needs its own Stage II run. Kept deliberately rather than dropped, because
+    # without it "q helps" and "the 14-slot axis helps" are indistinguishable.
+    "no-bbctx":      dict(hres_inject=False, a_direct=False, a_direct_pre=False, bb_context=False, q_direct=False, a_bs_concat=False, q_bs=False),
 }
 
 
@@ -401,7 +407,21 @@ training_configs["sidechain"] = {
     # but carries no side-chain information. Not the same as enable_coevolution=False,
     # which removes the second pass entirely.
     "hres_inject": True,
-    "bb_context": False,
+    # DEFAULT = True: S_phi's atom axis is 4 backbone context slots + 10
+    # side-chain slots. Those four are attention KEYS only -- never decoded into
+    # coordinates, never in the coordinate loss -- so a side-chain atom can attend
+    # to its own N/CA/C/O directly instead of only knowing the backbone through
+    # the rigid frame the template is posed in.
+    #
+    # It is on by default for a reason that has nothing to do with capacity: it
+    # adds ZERO parameters (the four slots reuse the same atom-name embedding and
+    # coordinate projection), but it CHANGES S_phi's input layout, so a Stage II
+    # checkpoint trained with it off cannot warm-start a 14-slot Stage III run.
+    # Since it is also the prerequisite for both q channels, leaving it off by
+    # default would mean every q ablation arm needed its own separate Stage II
+    # run. Defaulting it on lets ONE Stage II checkpoint serve every arm.
+    # `no-bbctx` is the deliberate exception; it needs its own Stage II run.
+    "bb_context": True,
     "q_direct": False,
     "q_direct_zero_init": True,
     "a_bs_concat": False,   # point 2: B→S residue concat (side-chain pooled + backbone a_token)

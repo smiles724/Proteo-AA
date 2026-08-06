@@ -674,6 +674,13 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.trunk_grad_scale = 0.0
         configs.sidechain.force_gt_type_logits = True
+        # 14-slot atom axis, stated explicitly rather than inherited. This is the
+        # ONE Stage II decision that cannot be deferred: it fixes the input layout
+        # every Stage III arm will warm-start from. Adds no parameters, costs a
+        # slightly wider intra-residue attention (14x14 instead of 10x10), and the
+        # four backbone slots are keys only -- never decoded, never in the loss.
+        # Leaving it off here would force a second Stage II run for every q arm.
+        configs.sidechain.bb_context = True
         # `design_condition_embedder` is a TOP-LEVEL module of ProtenixDesign, so
         # filtering the warm-start to "diffusion_module." alone dropped it: it
         # would stay randomly initialised AND frozen (it is not in

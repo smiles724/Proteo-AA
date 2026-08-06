@@ -41,16 +41,20 @@ def _sc_cfg(**overrides):
 # top: they answer "does adding this channel buy anything". Reporting one as
 # evidence for the other is the confusion these two sets exist to prevent.
 REPLACEMENT_ARMS = {
-    "no", "a-indirect", "a-direct", "a-direct-pre", "bbctx", "q", "a-direct+q",
+    "no", "a-indirect", "a-direct", "a-direct-pre", "q", "a-direct+q",
     "a-bs", "q-bs",
 }
+# The single 10-slot arm. Every other arm runs the 14-slot atom axis so they can
+# share one Stage II checkpoint; this one answers "does the axis itself help" and
+# pays for it with its own Stage II run.
+TEN_SLOT_ARMS = {"no-bbctx"}
 INCREMENTAL_ARMS = {
     "+a-direct", "+a-direct-pre", "+q", "+a-bs", "+q-bs", "+all",
 }
 
 
 def test_all_arms_are_defined():
-    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS
+    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS | TEN_SLOT_ARMS
 
 
 def test_every_arm_specifies_every_switch():
@@ -90,19 +94,24 @@ def test_arms_are_pairwise_distinct():
         seen[key] = name
 
 
-def test_defaults_reproduce_the_a_indirect_arm():
-    """Today's default behaviour must be exactly one named arm -- and it is NOT 'no'.
+def test_defaults_reproduce_exactly_one_named_arm():
+    """The shipped default must BE a named arm, so a run can cite the arm it used
+    instead of "whatever the defaults were that week".
 
-    This is the whole point of the file: the shipped default IS the indirect channel.
+    Today that arm is `+a-bs`: the indirect channel (the paper's formula) plus the
+    14-slot axis plus the residue-level B->S concat. bb_context is on by default
+    even though no q channel is -- it adds no parameters but fixes S_phi's input
+    layout, so defaulting it off would force a separate Stage II run for every q
+    ablation arm.
     """
     d = training_configs["sidechain"]
     assert d["hres_inject"] is True          # <- the channel that used to be invisible
-    assert d["a_direct"] is False
-    assert d["bb_context"] is False
-    assert d["q_direct"] is False
-    assert d["a_direct_pre"] is False
-    assert {k: d[k] for k in ARMS["a-indirect"]} == ARMS["a-indirect"], (
-        "the shipped defaults must reproduce exactly one named arm"
+    assert d["bb_context"] is True           # <- one Stage II checkpoint for all arms
+    matches = [
+        name for name, cfg in ARMS.items() if {k: d[k] for k in cfg} == cfg
+    ]
+    assert len(matches) == 1, (
+        f"defaults must reproduce exactly one arm, matched {matches}"
     )
 
 
@@ -124,10 +133,27 @@ def test_no_arm_really_has_no_feedback_channel():
 
 
 def test_q_arm_and_its_control_differ_only_in_the_q_channel():
-    """q - bbctx must isolate the atom channel: the two arms differ in q_direct ONLY."""
-    q, ctrl = ARMS["q"], ARMS["bbctx"]
+    """`q` minus `no` must isolate the atom channel.
+
+    `bbctx` used to be this control ("14 slots, no feedback"). Now that every arm
+    runs 14 slots, `no` IS that configuration, so `bbctx` was removed rather than
+    left as a duplicate row that silently makes two arms the same experiment.
+    """
+    q, ctrl = ARMS["q"], ARMS["no"]
     diff = {k for k in q if q[k] != ctrl[k]}
-    assert diff == {"q_direct"}, f"q vs bbctx differ in {diff}, not just the q channel"
+    assert diff == {"q_direct"}, f"q vs no differ in {diff}, not just the q channel"
+
+
+def test_the_axis_question_has_exactly_one_arm_and_it_is_flagged():
+    """`no` vs `no-bbctx` is the only pair that differs in the atom axis alone."""
+    from pxdesign_train.configs.configs_train import ARMS_NEEDING_14_SLOT_STAGE2
+
+    diff = {k for k in ARMS["no"] if ARMS["no-bbctx"][k] != ARMS["no"][k]}
+    assert diff == {"bb_context"}
+    assert "no-bbctx" not in ARMS_NEEDING_14_SLOT_STAGE2
+    assert set(ARMS) - ARMS_NEEDING_14_SLOT_STAGE2 == {"no-bbctx"}, (
+        "exactly one arm may need a separate Stage II checkpoint"
+    )
 
 
 def test_q_direct_implies_bb_context():
@@ -177,7 +203,7 @@ def test_model_attributes_match_the_arm(arm):
     # Every S->B channel off <=> this arm has no side-chain -> backbone feedback
     # (it may still have the B->S input channels a_bs_concat / q_bs).
     no_feedback = not hres and not a_d and not a_dp and not q_d
-    assert no_feedback == (arm in ("no", "bbctx", "a-bs", "q-bs"))
+    assert no_feedback == (arm in ("no", "no-bbctx", "a-bs", "q-bs"))
 
 
 def test_bs_arms_present_and_default_off():

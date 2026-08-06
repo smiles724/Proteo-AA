@@ -104,6 +104,13 @@ class DesignSourceDataset(Dataset):
     # native binder side-chain rows, atom counts, names and reference metadata
     # must never reach B_theta/a_token/AA head.  Target/receptor atoms are kept.
     inference_safe_binder: bool = True
+    # Forwarded to the strict re-featurization. Training wants it True (inference
+    # augments, so a fixed canonical orientation would be a mismatch); evaluation
+    # wants it False so the metric is deterministic and not re-randomised on every
+    # eval pass. Under `inference_safe_binder` the provider's own featurization is
+    # discarded and rebuilt, so the provider-level setting no longer reaches the
+    # model -- this field is what carries the intent through.
+    ref_pos_augment: bool = True
     # NOTE: no prior default existed anywhere for this; 8 is a chosen value.
     # Override at construction if a different retry budget is wanted.
     max_crop_retries: int = 8
@@ -198,6 +205,7 @@ class DesignSourceDataset(Dataset):
             ) = _refeaturize_inference_safe_binder(
                 crop.atom_array,
                 crop.binder_atom_mask,
+                ref_pos_augment=self.ref_pos_augment,
                 source_feature_dict=feat,
             )
         elif self.inference_safe_binder and has_native_binder_sidechain:

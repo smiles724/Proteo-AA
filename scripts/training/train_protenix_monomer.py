@@ -336,6 +336,10 @@ def build_source_components(
         # atom rows, whose names/elements/count decode the residue identity
         # straight into q -> a_token -> AA head.
         inference_safe_binder=not args.allow_binder_sidechain_leakage,
+        # The strict rebuild discards the provider's featurization, so this has to
+        # be forwarded here or --no-ref-pos-augment (which the eval loader sets)
+        # would silently stop reaching the model.
+        ref_pos_augment=bool(args.ref_pos_augment),
         max_crop_retries=int(args.max_crop_retries),
         seed=int(args.seed),
     )
@@ -401,6 +405,7 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         backbone_only_binder=True,
         # See the monomer builder above: explicit train/inference contract.
         inference_safe_binder=not args.allow_binder_sidechain_leakage,
+        ref_pos_augment=bool(args.ref_pos_augment),
         max_crop_retries=int(args.max_crop_retries),
         seed=int(args.seed),
     )

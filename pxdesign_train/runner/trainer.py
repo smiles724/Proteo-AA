@@ -639,7 +639,28 @@ class PXDesignTrainer:
     def _check_sidechain_arch(self, ckpt: dict) -> None:
         saved = ckpt.get("sidechain_arch")
         current = self._sidechain_arch()
-        if not saved or not current:
+        if not current:
+            return                      # this run has no S_phi -- nothing to match
+        if not saved:
+            # No record in the checkpoint. Two very different cases:
+            #   * it has no S_phi weights at all (a Stage I backbone checkpoint) --
+            #     there is nothing to mismatch, carry on;
+            #   * it DOES have S_phi weights but predates this record, so we cannot
+            #     tell which layout they were trained under. Silence would be the
+            #     worst outcome: bb_context adds no parameters, so a 10-slot S_phi
+            #     loads into a 14-slot model with no shape error and simply degrades,
+            #     and a newly enabled fusion sits at its zero init, wired in but
+            #     untrained. Refuse to guess.
+            has_sc_weights = any(k.startswith("sidechain_module.") for k in ckpt.get("model", {}))
+            if has_sc_weights:
+                raise ValueError(
+                    "Checkpoint contains side-chain weights but records no "
+                    f"sidechain_arch, so the layout they were trained under is "
+                    f"unknown (this run wants {current}). Retrain the side-chain "
+                    "module, or pass --warm-start-params-only with a prefix filter "
+                    "that excludes 'sidechain_module.' if you meant to start it "
+                    "from scratch."
+                )
             return
         mismatched = {
             k: (saved.get(k), current[k])

@@ -273,3 +273,37 @@ def test_unknown_arm_is_rejected_rather_than_defaulted():
 
     with pytest.raises(ValueError, match="unknown arm"):
         stage2_checkpoint_group("not-an-arm")
+
+
+def test_a_pre_record_sidechain_checkpoint_is_refused_not_silently_loaded():
+    """A checkpoint with S_phi weights but no layout record must not load quietly.
+
+    bb_context adds no parameters, so a 10-slot S_phi loads into a 14-slot model
+    with no shape error at all -- it just silently runs under a layout it never
+    trained on. A newly enabled fusion is equally quiet: load_strict=False leaves
+    it at its zero init, wired in but untrained. Both look like "the channel
+    didn't help".
+    """
+    import types
+
+    from pxdesign_train.runner.trainer import PXDesignTrainer
+
+    stub = types.SimpleNamespace(
+        configs=types.SimpleNamespace(
+            enable_sidechain=True,
+            sidechain=types.SimpleNamespace(
+                bb_context=True, local_coord_input=False,
+                frame_aware_head=False, a_bs_concat=True, q_bs=False,
+            ),
+        )
+    )
+    stub.SIDECHAIN_ARCH_KEYS = PXDesignTrainer.SIDECHAIN_ARCH_KEYS
+    stub._sidechain_arch = PXDesignTrainer._sidechain_arch.__get__(stub, type(stub))
+    check = PXDesignTrainer._check_sidechain_arch.__get__(stub, type(stub))
+
+    # a Stage I checkpoint has no side-chain weights -> nothing to mismatch
+    check({"model": {"diffusion_module.x": 1}})
+
+    # a pre-record Stage II checkpoint DOES -> refuse
+    with pytest.raises(ValueError, match="records no sidechain_arch"):
+        check({"model": {"sidechain_module.atom_embed.weight": 1}})

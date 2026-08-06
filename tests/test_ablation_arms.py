@@ -98,11 +98,10 @@ def test_defaults_reproduce_exactly_one_named_arm():
     """The shipped default must BE a named arm, so a run can cite the arm it used
     instead of "whatever the defaults were that week".
 
-    Today that arm is `+a-bs`: the indirect channel (the paper's formula) plus the
-    14-slot axis plus the residue-level B->S concat. bb_context is on by default
-    even though no q channel is -- it adds no parameters but fixes S_phi's input
-    layout, so defaulting it off would force a separate Stage II run for every q
-    ablation arm.
+    Today that arm is `a-indirect`: the paper's h_res' channel, on the 14-slot
+    axis. bb_context is on by default even though no q channel is -- it adds no
+    parameters but fixes S_phi's input layout, so defaulting it off would force a
+    separate Stage II run for every q ablation arm.
     """
     d = training_configs["sidechain"]
     assert d["hres_inject"] is True          # <- the channel that used to be invisible

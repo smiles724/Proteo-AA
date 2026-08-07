@@ -622,13 +622,22 @@ class PXDesignTrainer:
     # Loading anyway does not crash (the parameters are shape-compatible), it just
     # silently degrades, which is exactly the failure mode this project keeps
     # hitting.
-    # a_bs_concat / q_bs are here too: each CREATES a submodule inside
-    # SideChainModule, so a checkpoint trained without one simply has no weights
-    # for it. load_strict=False accepts that silently and leaves the fusion at its
-    # zero init -- present, wired in, and untrained.
-    SIDECHAIN_ARCH_KEYS = (
-        "bb_context", "local_coord_input", "frame_aware_head", "a_bs_concat", "q_bs",
-    )
+    # Two kinds of side-chain switch, and they deserve different treatment.
+    #
+    # LAYOUT keys change how the EXISTING weights are used. bb_context turns
+    # S_phi's atom axis from 10 side-chain slots into 4 backbone context slots +
+    # 10, so every pretrained intra-residue block suddenly attends over a
+    # different key set. Nothing errors -- the parameters are shape-compatible --
+    # it just quietly degrades, which is indistinguishable from "this channel
+    # didn't help". Crossing one of these is refused.
+    #
+    # ADDITIVE keys only decide whether an extra, zero-initialised fusion module
+    # exists. Enabling one at a later stage is a normal curriculum move, not a
+    # fault: the fusion starts as an exact no-op and learns from there. Warn so
+    # the transition is visible in the log, but do not block it.
+    SIDECHAIN_LAYOUT_KEYS = ("bb_context", "local_coord_input", "frame_aware_head")
+    SIDECHAIN_ADDITIVE_KEYS = ("a_bs_concat", "q_bs")
+    SIDECHAIN_ARCH_KEYS = SIDECHAIN_LAYOUT_KEYS + SIDECHAIN_ADDITIVE_KEYS
 
     def _sidechain_arch(self) -> dict:
         sc = getattr(self.configs, "sidechain", None)
@@ -667,15 +676,30 @@ class PXDesignTrainer:
             for k in current
             if k in saved and saved[k] != current[k]
         }
-        if mismatched:
-            detail = ", ".join(
-                f"{k}: checkpoint={was} current={now}" for k, (was, now) in mismatched.items()
+        def _fmt(keys):
+            return ", ".join(
+                f"{k}: checkpoint={mismatched[k][0]} current={mismatched[k][1]}"
+                for k in keys
             )
+
+        layout = [k for k in self.SIDECHAIN_LAYOUT_KEYS if k in mismatched]
+        additive = [k for k in self.SIDECHAIN_ADDITIVE_KEYS if k in mismatched]
+        if layout:
             raise ValueError(
-                "Side-chain input structure changed between the checkpoint and this "
-                f"run ({detail}). S_phi would be warm-started onto an input layout it "
-                "never saw -- keep these switches identical across stages, or start "
-                "the side-chain module from scratch."
+                "Side-chain input LAYOUT changed between the checkpoint and this "
+                f"run ({_fmt(layout)}). S_phi would be warm-started onto an atom "
+                "axis it never saw -- the parameters still fit, so this would not "
+                "fail anywhere later, it would just silently underperform. Keep "
+                "these identical across stages, or train the side-chain module "
+                "from scratch."
+            )
+        if additive:
+            self._log(
+                f"Side-chain fusion channels changed ({_fmt(additive)}). A channel "
+                "switched ON has no weights in this checkpoint and starts from its "
+                "zero init -- an exact no-op at step 0, then it learns. A channel "
+                "switched OFF leaves its trained weights unused. Both are legal "
+                "curriculum moves; logging so the change is visible."
             )
 
     def _migrate_atom_name_vocab(self, state: dict) -> dict:

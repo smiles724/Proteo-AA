@@ -307,3 +307,45 @@ def test_a_pre_record_sidechain_checkpoint_is_refused_not_silently_loaded():
     # a pre-record Stage II checkpoint DOES -> refuse
     with pytest.raises(ValueError, match="records no sidechain_arch"):
         check({"model": {"sidechain_module.atom_embed.weight": 1}})
+
+
+
+def test_layout_and_additive_switches_are_guarded_differently():
+    """Crossing a LAYOUT switch must fail; crossing an ADDITIVE one must not.
+
+    bb_context re-shapes the axis every pretrained intra-residue block attends
+    over, so a warm-start across it degrades silently -- refuse. a_bs_concat /
+    q_bs merely decide whether an extra zero-initialised fusion exists, and
+    enabling one at a later stage is exactly how the curriculum is meant to work
+    (Stage II deliberately runs without q_bs). Blocking that would have made the
+    intended Stage II -> Stage III hand-off impossible.
+    """
+    import types
+
+    from pxdesign_train.runner.trainer import PXDesignTrainer
+
+    def _checker(**current):
+        base = dict(bb_context=True, local_coord_input=False,
+                    frame_aware_head=False, a_bs_concat=True, q_bs=True)
+        base.update(current)
+        stub = types.SimpleNamespace(
+            configs=types.SimpleNamespace(
+                enable_sidechain=True, sidechain=types.SimpleNamespace(**base)
+            ),
+            _log=lambda *a, **k: None,
+        )
+        stub.SIDECHAIN_ARCH_KEYS = PXDesignTrainer.SIDECHAIN_ARCH_KEYS
+        stub.SIDECHAIN_LAYOUT_KEYS = PXDesignTrainer.SIDECHAIN_LAYOUT_KEYS
+        stub.SIDECHAIN_ADDITIVE_KEYS = PXDesignTrainer.SIDECHAIN_ADDITIVE_KEYS
+        stub._sidechain_arch = PXDesignTrainer._sidechain_arch.__get__(stub, type(stub))
+        return PXDesignTrainer._check_sidechain_arch.__get__(stub, type(stub))
+
+    saved = dict(bb_context=True, local_coord_input=False, frame_aware_head=False,
+                 a_bs_concat=True, q_bs=False)          # a Stage II checkpoint
+
+    # Stage II -> Stage III turns q_bs on. This is the intended hand-off.
+    _checker(q_bs=True)({"sidechain_arch": saved, "model": {}})
+
+    # Flipping the atom axis is not.
+    with pytest.raises(ValueError, match="LAYOUT changed"):
+        _checker(bb_context=False)({"sidechain_arch": saved, "model": {}})

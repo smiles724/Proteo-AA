@@ -222,15 +222,17 @@ SC_ABLATION_ARMS = {
     # `full-*` arm drops exactly one channel, so a regression measures that
     # channel's marginal contribution. Read alongside the single-channel arms --
     # two redundant channels both read as zero under leave-one-out.
-    "full":          dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
-    "full-hres":     dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
-    "full-a":        dict(hres_inject=True,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
-    "full-q":        dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=False, a_bs_concat=True,  q_bs=True),
-    "full-a-bs":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=True),
-    "full-q-bs":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=False),
+    "full":          dict(hres_inject=False, a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    # the fifth channel added back on top -- does the older indirect route still
+    # buy anything once a_direct_pre and q_direct are both live?
+    "full+hres":     dict(hres_inject=True,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-a":        dict(hres_inject=False,  a_direct=False, a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-q":        dict(hres_inject=False,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=False, a_bs_concat=True,  q_bs=True),
+    "full-a-bs":     dict(hres_inject=False,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=False, q_bs=True),
+    "full-q-bs":     dict(hres_inject=False,  a_direct=False, a_direct_pre=True,  bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=False),
     # injection-point comparison at the default wiring: everything held fixed,
     # only whether the a-fusion lands before or after the global attention.
-    "full-a-post":   dict(hres_inject=True,  a_direct=True,  a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
+    "full-a-post":   dict(hres_inject=False,  a_direct=True,  a_direct_pre=False, bb_context=True,  q_direct=True,  a_bs_concat=True,  q_bs=True),
     # ---- the ONE 10-slot arm ----
     # Isolates the atom axis itself: does letting a side-chain atom attend to its
     # own N/CA/C/O help, independently of any feedback channel? Every other arm
@@ -427,7 +429,25 @@ training_configs["sidechain"] = {
     # Set False for the TRUE no-feedback control arm: the refinement pass still runs,
     # but carries no side-chain information. Not the same as enable_coevolution=False,
     # which removes the second pass entirely.
-    "hres_inject": True,
+    # DEFAULT = False. This is the odd one out. The four explicit channels form a
+    # clean 2x2 -- residue/atom level x B->S/S->B direction -- and hres_inject is a
+    # FIFTH that sits in the same cell as a_direct_pre (residue level, S->B). It
+    # predates the others: when co-evolution was first implemented there was no way
+    # to feed anything back without editing Protenix, so it borrowed `s_trunk`, an
+    # input port PXDesign leaves at all-zeros because it dropped the PairFormer
+    # that used to fill it. The hook-based a_direct_pre came later and does the
+    # same job at the same level.
+    #
+    # They are not STRICTLY redundant -- hres_inject enters before the atom encoder
+    # and so reaches the atom level as well, where a_direct_pre only touches tokens
+    # -- but atom-level S->B is already covered by q_direct. Running both leaves
+    # one cell of the 2x2 with two overlapping channels, which makes Stage III's
+    # first real run un-attributable.
+    #
+    # NOTE: this leaves the Overleaf's `B_theta^refine(h_res', ...)` without a live
+    # implementation. Deliberate, and to be revisited once Stage III has data:
+    # either the paper adopts the a/q formulation, or this comes back on.
+    "hres_inject": False,
     # DEFAULT = True: S_phi's atom axis is 4 backbone context slots + 10
     # side-chain slots. Those four are attention KEYS only -- never decoded into
     # coordinates, never in the coordinate loss -- so a side-chain atom can attend

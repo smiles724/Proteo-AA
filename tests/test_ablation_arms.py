@@ -55,13 +55,17 @@ INCREMENTAL_ARMS = {
 # bidirectional wiring, this is the PRIMARY ablation: each arm drops exactly one
 # channel, so a regression is that channel's marginal contribution.
 LEAVE_ONE_OUT_ARMS = {
-    "full", "full-hres", "full-a", "full-q", "full-a-bs", "full-q-bs",
-    "full-a-post",
+    "full", "full-a", "full-q", "full-a-bs", "full-q-bs", "full-a-post",
 }
+# `hres_inject` is the one channel the default leaves OFF -- it shares a cell of
+# the 2x2 with a_direct_pre (residue level, S->B) and predates it. So it gets an
+# ADD-back arm rather than a leave-one-out one.
+ADD_BACK_ARMS = {"full+hres"}
 
 
 def test_all_arms_are_defined():
-    assert set(ARMS) == REPLACEMENT_ARMS | INCREMENTAL_ARMS | LEAVE_ONE_OUT_ARMS | TEN_SLOT_ARMS
+    assert set(ARMS) == (REPLACEMENT_ARMS | INCREMENTAL_ARMS | LEAVE_ONE_OUT_ARMS
+                         | ADD_BACK_ARMS | TEN_SLOT_ARMS)
 
 
 def test_every_arm_specifies_every_switch():
@@ -105,13 +109,14 @@ def test_defaults_reproduce_exactly_one_named_arm():
     """The shipped default must BE a named arm, so a run can cite the arm it used
     instead of "whatever the defaults were that week".
 
-    Today that arm is `a-indirect`: the paper's h_res' channel, on the 14-slot
-    axis. bb_context is on by default even though no q channel is -- it adds no
-    parameters but fixes S_phi's input layout, so defaulting it off would force a
-    separate Stage II run for every q ablation arm.
+    Today that arm is `full`: the four explicit a/q channels on, `hres_inject`
+    off. The four form a clean 2x2 (residue/atom level x B->S/S->B direction);
+    hres_inject would be a fifth sharing a cell with a_direct_pre, which is why
+    it is off and gets an add-back arm instead of a leave-one-out one.
     """
     d = training_configs["sidechain"]
-    assert d["hres_inject"] is True          # <- the channel that used to be invisible
+    assert d["hres_inject"] is False         # <- the fifth channel, off by default
+    assert d["a_direct_pre"] is True         # <- it covers the same cell of the 2x2
     assert d["bb_context"] is True           # <- one Stage II checkpoint for all arms
     matches = [
         name for name, cfg in ARMS.items() if {k: d[k] for k in cfg} == cfg
@@ -227,6 +232,13 @@ def test_leave_one_out_arms_remove_exactly_one_channel():
         removed = {k for k in full if ARMS[name][k] != full[k]}
         assert len(removed) == 1, f"{name} changes {removed}, not exactly one channel"
         assert all(ARMS[name][k] is False for k in removed)
+
+
+def test_the_add_back_arm_only_restores_the_fifth_channel():
+    """full+hres must be `full` plus hres_inject and nothing else."""
+    full, add = ARMS["full"], ARMS["full+hres"]
+    assert {k for k in full if add[k] != full[k]} == {"hres_inject"}
+    assert add["hres_inject"] is True and full["hres_inject"] is False
 
 
 def test_the_injection_point_arm_swaps_rather_than_removes():

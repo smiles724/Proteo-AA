@@ -200,7 +200,9 @@ def main() -> None:
         "filtered_index": str(filtered_index),
         "dataset_rows": n_items,
         "evaluated_samples": len(eval_dataset),
+        # Set-wide means, plus the per-protein rows they were computed from.
         "metrics": metrics,
+        "per_protein": trainer.last_eval_per_protein,
     }
     out_path = output_dir / "metrics.json"
     out_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

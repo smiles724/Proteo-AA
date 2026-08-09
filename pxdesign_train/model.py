@@ -203,6 +203,14 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_template_init = bool(getattr(sc_cfg, "template_init", True)) if sc_cfg is not None else True
             self.sc_frame_aware_head = bool(getattr(sc_cfg, "frame_aware_head", False)) if sc_cfg is not None else False
             self.sc_local_coord_input = bool(getattr(sc_cfg, "local_coord_input", False)) if sc_cfg is not None else False
+            self.sc_template_residual = bool(getattr(sc_cfg, "template_residual", False)) if sc_cfg is not None else False
+            if self.sc_template_residual and not (
+                self.sc_frame_aware_head and self.sc_local_coord_input
+            ):
+                raise ValueError(
+                    "sidechain.template_residual requires frame_aware_head=True "
+                    "and local_coord_input=True"
+                )
             self.sc_init_sigma_T = float(getattr(sc_cfg, "init_sigma_T", DEFAULT_SIGMA_T)) if sc_cfg is not None else DEFAULT_SIGMA_T
             if self.sc_template_init and not templates_available():
                 logging.getLogger(__name__).warning(
@@ -308,6 +316,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 ff_mult=ff_mult, trunk_grad_scale=sc_grad_scale,
                 a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
                 cross_neighbors=self.sc_cross_neighbors,
+                template_residual=self.sc_template_residual,
             )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
 

@@ -64,6 +64,13 @@ class ComplexProvider(Protocol):
         BinderSelector,            # how to pick the binder on this complex
     ]: ...
 
+    # OPTIONAL. A human-readable, stable identity for item `idx` (e.g. the PDB
+    # id), used to label per-protein validation metrics. Providers that cannot
+    # name their items simply omit it: `DesignSourceDataset` reads it with
+    # getattr and falls back to the provider index, so every existing provider
+    # (and every test double) keeps working untouched.
+    def sample_id(self, idx: int) -> str: ...
+
 
 @dataclass
 class DesignSourceDataset(Dataset):
@@ -139,8 +146,10 @@ class DesignSourceDataset(Dataset):
         retries = max(1, min(int(self.max_crop_retries), n))
         last_crop_error: Optional[ValueError] = None
 
+        tried: list[int] = []
         for attempt in range(retries):
-            local_idx = (idx + attempt) % n
+            local_idx = self._probe_index(idx, attempt, n)
+            tried.append(local_idx)
             try:
                 return self._get_one(local_idx)
             except ValueError as exc:
@@ -150,9 +159,33 @@ class DesignSourceDataset(Dataset):
 
         raise ValueError(
             f"DesignSourceDataset: failed to find a crop-valid example after "
-            f"{retries} attempts starting at index {idx}. Last crop error: "
-            f"{last_crop_error}"
+            f"{retries} attempts starting at index {idx} (tried {tried}). "
+            f"Last crop error: {last_crop_error}"
         )
+
+    def _probe_index(self, idx: int, attempt: int, n: int) -> int:
+        """Provider index to try on retry `attempt`.
+
+        Attempt 0 is always the requested item, so nothing changes for the common
+        case. Later attempts jump to a deterministic pseudo-random position rather
+        than the neighbour `idx + attempt`.
+
+        Walking to the NEXT index is what turned a handful of un-croppable entries
+        into a dead run. The index is ordered by pdb id, so neighbours are
+        near-duplicate structures: 7a7t / 7a7u / 7a7v / 7a7w are consecutive GFP
+        variants that all carry the same non-canonical CRO chromophore, which the
+        strict inference-safe rebuild cannot tokenize. Every neighbour then fails
+        for the identical reason and the whole retry budget is spent inside one bad
+        cluster. Jumping decorrelates the retry from the failure, which is what the
+        budget was always assuming.
+
+        Deterministic in (seed, idx, attempt): a given index still yields a given
+        example, so epochs stay reproducible.
+        """
+        if attempt == 0:
+            return idx % n
+        rng = np.random.default_rng([int(self.seed), int(idx), int(attempt)])
+        return int(rng.integers(n))
 
     def _get_one(self, idx: int) -> dict[str, Any]:
         atom_array, token_array, feat, label, binder_selector = self.provider[idx]
@@ -254,7 +287,28 @@ class DesignSourceDataset(Dataset):
             "label_dict": new_label,
             "binder_token_mask": torch.from_numpy(crop.binder_token_mask),
             "source_name": self.source_name,
+            # Identity of the complex actually returned. Note this is keyed on
+            # the LOCAL idx `_get_one` was called with, not the idx the caller
+            # asked for: `__getitem__` walks forward on crop failure, so the two
+            # differ exactly when a retry fired. Recovering the name from the
+            # index file afterwards would therefore mislabel those rows.
+            "sample_id": self._sample_id(idx),
         }
+
+    def _sample_id(self, idx: int) -> str:
+        """Best-effort human-readable name for provider item `idx`.
+
+        Providers are not required to implement `sample_id` (test doubles and the
+        CIF provider do not), so fall back to a positional label rather than
+        making per-protein reporting a hard dependency on the data source.
+        """
+        fn = getattr(self.provider, "sample_id", None)
+        if fn is not None:
+            try:
+                return str(fn(idx))
+            except Exception:  # noqa: BLE001 — a naming failure must never
+                pass          # break the actual training/eval step
+        return f"{self.source_name}#{idx}"
 
 
 _BACKBONE_NAMES = ("N", "CA", "C", "O")
@@ -390,6 +444,58 @@ def _canonical_backbone_binder_atom_array(atom_array, binder_atom_mask):
     return safe, safe_binder
 
 
+def _assert_binder_centres_are_wellformed(safe_atom_array, safe_binder) -> None:
+    """Every canonicalised binder residue must keep exactly one centre atom.
+
+    `_canonical_backbone_binder_atom_array` designates the centre by NAME
+    (`atom_name == "CA"`). A non-canonical residue need not contain an atom
+    literally named CA — the GFP chromophore CRO is the common case, and the
+    pdb-sorted index puts whole families of such structures together — and that
+    residue then keeps ZERO centre atoms.
+
+    Protenix's `AtomArrayTokenizer` still emits a token for the residue and then
+    dies deep inside with `AssertionError: Length of values must match the number
+    of tokens`. An AssertionError is NOT a ValueError, so the crop-retry loop in
+    `__getitem__` cannot skip it and the DataLoader worker takes the whole run
+    down (this is what killed job 97437 at step 150). Detect the malformed array
+    here and raise the retryable `InferenceSafeBinder:` ValueError instead, before
+    the tokenizer ever sees it.
+
+    Deliberately a SKIP, not a repair: a residue with no CA has no canonical
+    backbone frame and no canonical side chain, so it cannot participate in a
+    side-chain design objective. Inventing a substitute centre would put a
+    residue into the token axis that the loss cannot supervise.
+    """
+    binder = np.asarray(safe_binder, dtype=bool)
+    if not binder.any():
+        return
+    if "centre_atom_mask" not in safe_atom_array.get_annotation_categories():
+        return
+    centres = np.asarray(safe_atom_array.centre_atom_mask).astype(bool)
+    chain = np.asarray(safe_atom_array.chain_id)
+    resid = np.asarray(safe_atom_array.res_id)
+    resname = np.asarray(safe_atom_array.res_name)
+
+    counts: dict[tuple, int] = {}
+    names: dict[tuple, str] = {}
+    for i in np.flatnonzero(binder):
+        key = (chain[i], resid[i])
+        counts[key] = counts.get(key, 0) + int(centres[i])
+        names.setdefault(key, str(resname[i]))
+
+    bad = [(k, v) for k, v in counts.items() if v != 1]
+    if bad:
+        detail = ", ".join(
+            f"{names[k]} {k[0]}:{k[1]} has {v} centre atoms" for k, v in bad[:4]
+        )
+        raise ValueError(
+            "InferenceSafeBinder: canonical backbone rebuild left "
+            f"{len(bad)} binder residue(s) without exactly one centre atom "
+            f"({detail}). Such residues carry no atom named CA, so they have no "
+            "canonical backbone frame and cannot enter the side-chain objective."
+        )
+
+
 def _assert_strict_token_alignment(native_atom_array, safe_atom_array, tokens) -> None:
     """Fail loudly if strict re-tokenisation did not preserve the token axis.
 
@@ -447,7 +553,31 @@ def _refeaturize_inference_safe_binder(
     safe, safe_binder = _canonical_backbone_binder_atom_array(
         atom_array, binder_atom_mask
     )
-    tokens = AtomArrayTokenizer(safe).get_token_array()
+    # Must run BEFORE the tokenizer: a malformed centre-atom axis makes Protenix
+    # raise AssertionError, which the crop-retry loop cannot skip. This catches the
+    # common no-CA case with a precise message.
+    _assert_binder_centres_are_wellformed(safe, safe_binder)
+    # ...but it cannot catch every case, so the tokenizer call itself is the net.
+    # Protenix asserts `len(token_array) == centre_atom_mask.sum()` — a GLOBAL
+    # invariant. How many tokens a residue produces is Protenix's business: one for
+    # a standard residue, one PER ATOM for a non-standard one. So a binder residue
+    # that does own an atom named CA still breaks the count if Protenix tokenizes it
+    # per-atom (it then wants N centres and our rebuild left exactly 1) — which the
+    # per-residue guard above passes. Predicting the token count means reimplementing
+    # `AtomArrayTokenizer.tokenize()` and staying bug-compatible with it forever.
+    # Instead, let the tokenizer be the judge and translate its AssertionError into
+    # the retryable skip. Job 97705 died at step 150 on exactly this residual case.
+    try:
+        tokens = AtomArrayTokenizer(safe).get_token_array()
+    except AssertionError as exc:
+        n_centres = int(np.asarray(safe.centre_atom_mask).sum())
+        raise ValueError(
+            "InferenceSafeBinder: strict re-tokenisation of the canonicalised "
+            f"binder was rejected by AtomArrayTokenizer ({exc}). The rebuilt array "
+            f"carries {n_centres} centre atoms over {len(safe)} atoms; Protenix "
+            "requires exactly one per token, and a non-canonical binder residue "
+            "tokenized per-atom breaks that. Skipping this example."
+        ) from exc
     _assert_strict_token_alignment(atom_array, safe, tokens)
 
     base = Featurizer(

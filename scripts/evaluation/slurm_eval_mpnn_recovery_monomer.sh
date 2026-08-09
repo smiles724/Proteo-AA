@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=23:50:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=logs/validation/mpnn_recovery_monomer/%x-%j.out
+#SBATCH --error=logs/validation/mpnn_recovery_monomer/%x-%j.err
 
 set -euo pipefail
 

@@ -337,6 +337,9 @@ class PXDesignTrainer:
             collate_fn=_identity_collate,
         )
         self.eval_dl = c.eval_dataloader
+        # Per-protein breakdown from the most recent `evaluate()`. Defined here so
+        # callers can read it unconditionally, before any eval has run.
+        self.last_eval_per_protein: list[dict[str, Any]] = []
 
     # ----- core compute -----
 
@@ -538,16 +541,40 @@ class PXDesignTrainer:
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:
+        """Score the whole validation set.
+
+        Returns the SET-WIDE MEAN of every loss component. That return contract is
+        deliberately unchanged — `scripts/evaluation/eval_protenix_monomer.py`
+        serialises it straight to JSON as "metrics".
+
+        The per-protein rows the mean was computed from are left on
+        `self.last_eval_per_protein`: one dict per eval item, carrying its
+        position, its `sample_id`, and every loss component for that single
+        protein. The eval loader is built with `batch_size=1` and `shuffle=False`
+        (see `build_eval_dataloader`), so one batch IS one protein and the order
+        is stable across evals — which is what makes the rows comparable
+        step-to-step.
+        """
         if self.eval_dl is None:
+            self.last_eval_per_protein = []
             return {}
         self.model.eval()
         sums: dict[str, float] = {}
         count = 0
-        for batch in self.eval_dl:
+        per_protein: list[dict[str, Any]] = []
+        for i, batch in enumerate(self.eval_dl):
             loss_out = self.forward_loss(batch)
-            for k, v in loss_out.items():
-                sums[k] = sums.get(k, 0.0) + float(v.detach())
+            row = {k: float(v.detach()) for k, v in loss_out.items()}
+            for k, v in row.items():
+                sums[k] = sums.get(k, 0.0) + v
             count += 1
+            # `index` is kept alongside `sample_id` on purpose: a crop retry can
+            # make two eval positions resolve to the same complex, so sample_id
+            # alone is not guaranteed unique within a pass.
+            per_protein.append(
+                {"index": i, "sample_id": str(batch.get("sample_id", f"idx{i}")), **row}
+            )
+        self.last_eval_per_protein = per_protein
         return {k: v / max(1, count) for k, v in sums.items()}
 
     # ----- run loop -----
@@ -565,21 +592,52 @@ class PXDesignTrainer:
 
         while self.step < target_steps:
             for batch in self.train_dl:
+                # `self.step` counts OPTIMIZER steps, so it only advances on the
+                # accumulation boundary — it holds the same value for
+                # `iters_to_accumulate` consecutive batches. Anything gated on
+                # `self.step % interval == 0` therefore fires once per BATCH, not
+                # once per step: with iters_to_accumulate=8 that ran the whole
+                # validation set 8x per eval point (measured: 160 val log lines
+                # over 20 eval points in job 95909, all 8 repeats numerically
+                # identical) and rewrote the same checkpoint file 8x. Gate on the
+                # step boundary so each eval/checkpoint happens exactly once.
+                step_before = self.step
                 loss_out = self.train_step(batch)
+                stepped = self.step != step_before
 
                 if self.step > 0 and self.step % log_int == 0:
                     self._log(
                         f"step={self.step} "
                         + " ".join(f"{k}={v.detach().item():.4g}" if isinstance(v, torch.Tensor) else f"{k}={v:.4g}" for k, v in loss_out.items())
                     )
-                if eval_int > 0 and self.step > 0 and self.step % eval_int == 0:
+                if stepped and eval_int > 0 and self.step > 0 and self.step % eval_int == 0:
                     metrics = self.evaluate()
+                    # Per-protein first, then the set-wide mean, so the mean reads
+                    # as the summary line of the block above it.
+                    # Every metric on a validation line carries the `val_` prefix,
+                    # including the per-protein ones. The log is parsed by key, and
+                    # a bare `loss=`/`sc_local=` here would be indistinguishable
+                    # from a training row: `plot_training_metrics.py` keeps the LAST
+                    # row per (job, step) and would replace the real training point
+                    # at every eval step, while `plot_sidechain_warmup_report.py`
+                    # branches on `val_sc_local` vs `sc_local` and would file all
+                    # ~491 rows as training samples ~40x above the true curve.
+                    for row in self.last_eval_per_protein:
+                        self._log(
+                            f"step={self.step} val_protein={row['sample_id']} "
+                            f"val_index={row['index']} "
+                            + " ".join(
+                                f"val_{k}={v:.4g}"
+                                for k, v in row.items()
+                                if k not in ("index", "sample_id")
+                            )
+                        )
                     if metrics:
                         self._log(
-                            f"step={self.step} "
+                            f"step={self.step} val_n={len(self.last_eval_per_protein)} "
                             + " ".join(f"val_{k}={v:.4g}" for k, v in metrics.items())
                         )
-                if ckpt_int > 0 and self.step > 0 and self.step % ckpt_int == 0:
+                if stepped and ckpt_int > 0 and self.step > 0 and self.step % ckpt_int == 0:
                     self.save_checkpoint()
 
                 if self.step >= target_steps:

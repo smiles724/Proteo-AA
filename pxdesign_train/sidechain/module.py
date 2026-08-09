@@ -178,6 +178,7 @@ class SideChainModule(nn.Module):
         q_bs: bool = False,
         c_q: int = 128,
         cross_neighbors: int = 16,
+        template_residual: bool = False,
     ) -> None:
         super().__init__()
         if c_atom % n_heads != 0:
@@ -189,6 +190,7 @@ class SideChainModule(nn.Module):
         self.c_atom = c_atom
         self.c_time = c_time
         self.trunk_grad_scale = float(trunk_grad_scale)
+        self.template_residual = bool(template_residual)
 
         self.atom_embed = nn.Embedding(ATOM_VOCAB_SIZE, c_atom, padding_idx=0)
         self.w_res = nn.Linear(c_res, c_atom)
@@ -212,6 +214,12 @@ class SideChainModule(nn.Module):
         self.q_bs_fusion = QAtomBSFusion(c_atom, c_q) if self.q_bs else None
         self.out_ln = nn.LayerNorm(c_atom)
         self.out = nn.Linear(c_atom, 3)
+        if self.template_residual:
+            # Start from the high-quality template/noisy input and initially make
+            # no learned correction. This also keeps the first optimizer update
+            # well behaved when S_phi itself is randomly initialized.
+            nn.init.zeros_(self.out.weight)
+            nn.init.zeros_(self.out.bias)
 
     def _scale_grad(self, h_res: torch.Tensor) -> torch.Tensor:
         s = self.trunk_grad_scale
@@ -385,6 +393,15 @@ class SideChainModule(nn.Module):
         #
         #   CA-anchored head (frame_R/frame_t None): legacy behaviour, kept for A/B.
         y0 = self.out(self.out_ln(atom_feats))             # [B, L, A, 3]
+        if self.template_residual:
+            if frame_R is None or frame_t is None:
+                raise ValueError(
+                    "template_residual requires a frame-aware head so the residual "
+                    "base and learned correction are both residue-local"
+                )
+            # Under the optimized warm-up path noisy_local is the Dunbrack local
+            # template plus small sigma_T noise. S_phi learns only its correction.
+            y0 = noisy_local + y0
         if frame_R is not None and frame_t is not None:
             x0_global = to_global(y0, frame_R, frame_t)
         else:

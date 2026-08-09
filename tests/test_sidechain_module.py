@@ -16,6 +16,7 @@ from pxdesign_train.sidechain.instantiate import (
 )
 from pxdesign_train.sidechain.module import SideChainModule
 from pxdesign_train.sidechain.feedback import HResFeedback
+from pxdesign_train.sidechain.frames import to_global
 
 C_RES = 16
 
@@ -94,6 +95,53 @@ def test_grad_cut_when_readonly():
     y0, _ = _module(scale=0.0).forward(h_res, logits, atom_ids, atom_mask, noisy, t)
     y0.sum().backward()
     assert h_res.grad is None or torch.count_nonzero(h_res.grad) == 0
+
+
+def test_template_residual_starts_at_noisy_template_in_active_frame():
+    _, atom_mask, atom_ids, h_res, logits, noisy_local, t = _toy_batch()
+    mod = SideChainModule(
+        c_res=C_RES,
+        c_atom=32,
+        c_time=16,
+        n_blocks=2,
+        n_heads=4,
+        template_residual=True,
+    )
+    frame_R = torch.linalg.qr(torch.randn(1, 3, 3, 3))[0]
+    frame_t = torch.randn(1, 3, 3)
+    y0, _ = mod(
+        h_res,
+        logits,
+        atom_ids,
+        atom_mask,
+        noisy_local,
+        t,
+        frame_R=frame_R,
+        frame_t=frame_t,
+    )
+    expected = to_global(noisy_local, frame_R, frame_t)
+    expected = expected * atom_mask[..., None].to(expected.dtype)
+    assert torch.allclose(y0, expected, atol=1e-6)
+    assert torch.count_nonzero(mod.out.weight) == 0
+    assert torch.count_nonzero(mod.out.bias) == 0
+
+
+def test_template_residual_requires_frame_aware_output():
+    _, atom_mask, atom_ids, h_res, logits, noisy_local, t = _toy_batch()
+    mod = SideChainModule(
+        c_res=C_RES,
+        c_atom=32,
+        c_time=16,
+        n_blocks=2,
+        n_heads=4,
+        template_residual=True,
+    )
+    try:
+        mod(h_res, logits, atom_ids, atom_mask, noisy_local, t)
+    except ValueError as exc:
+        assert "frame-aware" in str(exc)
+    else:
+        raise AssertionError("template residual accepted a missing residue frame")
 
 
 # --- feedback ---

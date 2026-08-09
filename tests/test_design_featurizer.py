@@ -322,3 +322,123 @@ def test_featurizer_partial_aa_corruption_masks_only_selected_design_tokens(synt
     assert torch.all(restype_idx[corrupt] == 32)
     assert torch.all(restype_idx[uncorrupt_design] == 7)
     assert torch.all(restype_idx[~design] == 7)
+
+
+def _ser_complex(offset_from_origin: float, unresolved_slots=()):
+    """Two SER residues (N, CA, C, O, CB, OG) placed `offset` A from the origin.
+
+    `unresolved_slots` marks (res_index, atom_name) pairs the way a real mmCIF
+    does: the atom row EXISTS but its coordinate is the (0,0,0) placeholder and
+    `is_resolved` is False.
+    """
+    biotite = pytest.importorskip("biotite.structure")
+    pytest.importorskip("protenix")
+
+    names = ("N", "CA", "C", "O", "CB", "OG")
+    n_res = 2
+    n_atom = n_res * len(names)
+    aa = biotite.AtomArray(length=n_atom)
+    aa.coord = np.zeros((n_atom, 3), dtype=np.float32)
+    resolved = np.ones(n_atom, dtype=bool)
+
+    i = 0
+    for r in range(n_res):
+        for nm in names:
+            aa.chain_id[i] = "B"
+            aa.res_id[i] = r + 1
+            aa.res_name[i] = "SER"
+            aa.atom_name[i] = nm
+            aa.element[i] = nm[0]
+            if (r, nm) in unresolved_slots:
+                aa.coord[i] = (0.0, 0.0, 0.0)     # placeholder
+                resolved[i] = False
+            else:
+                # A plausible little residue, translated far from the origin.
+                local = {
+                    "N": (-1.2, 0.0, 0.0), "CA": (0.0, 0.0, 0.0), "C": (1.2, 0.0, 0.0),
+                    "O": (1.5, 1.0, 0.0), "CB": (0.0, 1.3, 0.6), "OG": (0.6, 2.2, 1.1),
+                }[nm]
+                aa.coord[i] = (
+                    local[0] + offset_from_origin + 4.0 * r,
+                    local[1] + offset_from_origin,
+                    local[2] + offset_from_origin,
+                )
+            i += 1
+
+    is_ca = aa.atom_name == "CA"
+    aa.set_annotation("distogram_rep_atom_mask", is_ca.astype(int))
+    aa.set_annotation("is_resolved", resolved)
+    aa.set_annotation("mol_type", np.array(["protein"] * n_atom))
+    feature_dict = {
+        "distogram_rep_atom_mask": torch.from_numpy(is_ca.astype(np.int64)).long(),
+        "restype": torch.zeros((n_res, 32)),
+    }
+    return aa, feature_dict, np.ones(n_atom, dtype=bool)
+
+
+def _sc_targets(aa, feature_dict, binder):
+    from pxdesign_train.data.featurizer import DesignFeaturizer, DesignSelection
+
+    return DesignFeaturizer(
+        DesignSelection(binder_atom_mask=binder)
+    )._compute_sidechain_targets(aa, feature_dict, binder)
+
+
+def test_unresolved_sidechain_atoms_are_not_supervised():
+    """An atom with no real coordinate must not become a training target.
+
+    Unresolved atoms keep their row but carry the (0,0,0) placeholder. Masking
+    them in makes the loss demand the atom be placed at the coordinate ORIGIN,
+    which is wherever the assembly happens to be centred — hundreds of Angstrom
+    away. Measured on the 491-protein validation set before this guard: 9.84% of
+    all supervised side-chain atoms across 461/491 structures were such targets,
+    which flat-lined Stage II-A training (7us9 alone read 21860 A^2).
+    """
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, "OG")})
+    out = _sc_targets(aa, feat, binder)
+    mask = out["sc_atom_mask"]
+
+    # SER slots are [CB, OG]; residue 0's OG is unresolved and must be masked OUT.
+    assert bool(mask[0, 0]) is True, "resolved CB must stay supervised"
+    assert bool(mask[0, 1]) is False, "unresolved OG must NOT be supervised"
+    assert bool(mask[1, 0]) is True and bool(mask[1, 1]) is True, "residue 1 is fully resolved"
+
+    # The slot IDENTITY is type-derived and must survive (it names the slot).
+    assert int(out["sc_atom_name_ids"][0, 1]) != 0, "atom-name id must not be cleared"
+
+
+def test_no_supervised_target_sits_at_the_coordinate_origin():
+    """The invariant that actually matters, checked in global space.
+
+    Guarding the mask alone is not enough: what broke training was a supervised
+    target whose GLOBAL position was (0,0,0). Reconstruct every supervised target
+    and assert none of them lands on the origin, and that all are within side-chain
+    reach of their own residue frame.
+    """
+    from pxdesign_train.sidechain.frames import to_global
+
+    for offset in (37.0, 400.0):     # 7lmv-like and 7us9-like placements
+        aa, feat, binder = _ser_complex(offset, unresolved_slots={(0, "OG"), (1, "CB")})
+        out = _sc_targets(aa, feat, binder)
+        gt, mask = out["sc_gt_local"].float(), out["sc_atom_mask"].bool()
+        R, t = out["sc_frame_R"].float(), out["sc_frame_t"].float()
+
+        assert mask.any(), "some atoms should still be supervised"
+        glob = to_global(gt, R, t)[mask]
+        assert (glob.abs().amax(dim=-1) > 1.0).all(), (
+            f"offset={offset}: a supervised target sits at the coordinate origin"
+        )
+        # And every supervised target must be physically reachable from its frame.
+        assert (gt[mask].norm(dim=-1) < 10.0).all(), (
+            f"offset={offset}: supervised target further than 10 A from its own frame"
+        )
+
+
+def test_missing_is_resolved_annotation_still_rejects_placeholder_coords():
+    """Fallback path: arrays without `is_resolved` must not regress to the bug."""
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, "OG")})
+    aa.del_annotation("is_resolved")
+    out = _sc_targets(aa, feat, binder)
+    assert bool(out["sc_atom_mask"][0, 1]) is False, (
+        "zero-coordinate atom must be rejected even with no is_resolved annotation"
+    )

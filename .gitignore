@@ -11,6 +11,17 @@ build/
 # rotamer-library build cache (regenerable)
 .pdb_cache/
 
-# Local scheduler output and generated experiment caches
-logs/
+# Local scheduler output and generated experiment caches. Keep the directory
+# hierarchy so Slurm always has a valid destination in a fresh checkout.
+logs/*
+!logs/training/
+!logs/validation/
+logs/training/*
+!logs/training/*/
+logs/training/*/*
+!logs/training/*/.gitkeep
+logs/validation/*
+!logs/validation/*/
+logs/validation/*/*
+!logs/validation/*/.gitkeep
 runs/

@@ -172,6 +172,28 @@ class ProtenixComplexProvider:
     def __len__(self) -> int:
         return len(self.base_dataset)
 
+    def sample_id(self, idx: int) -> str:
+        """`<pdb_id>_<assembly_id>_<chain_1_id>` for item `idx`.
+
+        Used to label per-protein validation metrics. pdb_id alone is not unique
+        across the index — the same entry appears once per assembly/chain sample —
+        so the assembly and chain are appended to keep eval rows distinguishable.
+        Reads the sample indice directly (the same call `__getitem__` uses for the
+        chain pair), so it needs no featurization and is cheap to call.
+        """
+        try:
+            indice = self.base_dataset._get_sample_indice(idx)
+            if not hasattr(indice, "get"):
+                return f"idx{idx}"
+            parts = [
+                str(indice.get(k)) for k in ("pdb_id", "assembly_id", "chain_1_id")
+            ]
+            # Drop absent/NaN fields rather than emitting the string "nan".
+            kept = [p for p in parts if p and p.lower() != "nan" and p != "None"]
+            return "_".join(kept) if kept else f"idx{idx}"
+        except Exception:  # noqa: BLE001 — naming must never break a step
+            return f"idx{idx}"
+
     def __getitem__(self, idx: int):
         data = self.base_dataset.process_one(idx, return_atom_token_array=True)
         atom_array = data["cropped_atom_array"]

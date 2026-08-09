@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=23:50:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=logs/training/stage2_complex_sidechain/%x-%j.out
+#SBATCH --error=logs/training/stage2_complex_sidechain/%x-%j.err
 
 set -euo pipefail
 
@@ -74,15 +74,20 @@ export PYTHONPATH="${REPO_ROOT}:${PXDESIGN_CODE_DIR}:${PROTENIX_CODE_DIR}${PYTHO
   --curriculum-stage2-start-step "${CURRICULUM_STAGE2_START_STEP:-10000}" \
   --max-steps "${MAX_STEPS:-30000}" \
   --train-samples-per-epoch "${TRAIN_SAMPLES_PER_EPOCH:-10000}" \
-  --lr "${LR:-1e-4}" \
-  --warmup-steps "${WARMUP_STEPS:-1000}" \
+  --lr "${LR:-5e-5}" \
+  --warmup-steps "${WARMUP_STEPS:-2000}" \
+  --iters-to-accumulate "${ITERS_TO_ACCUMULATE:-8}" \
+  --grad-clip-norm "${GRAD_CLIP_NORM:-1.0}" \
   --checkpoint-interval "${CHECKPOINT_INTERVAL:-2000}" \
   --log-interval "${LOG_INTERVAL:-50}" \
-  --eval-interval "${EVAL_INTERVAL:-1000}" \
-  --eval-samples "${EVAL_SAMPLES:-128}" \
+  --eval-interval "${EVAL_INTERVAL:-2000}" \
+  --eval-samples "${EVAL_SAMPLES:-491}" \
   --eval-num-workers "${EVAL_NUM_WORKERS:-0}" \
   --num-workers "${NUM_WORKERS:-4}" \
   --dtype "${DTYPE:-bf16}" \
   --device cuda \
   --template-provider "${TEMPLATE_PROVIDER:-dunbrack_mode}" \
+  --sc-local-coord-input \
+  --sc-frame-aware-head \
+  --sc-template-residual \
   "${@}"

@@ -98,8 +98,8 @@ def main() -> None:
         nargs="+",
         type=Path,
         default=[
-            Path("logs/proteo-aa-mono-90845.out"),
-            Path("logs/proteo-aa-mono-91031.out"),
+            Path("logs/training/monomer_pretrain/proteo-aa-mono-90845.out"),
+            Path("logs/training/monomer_pretrain/proteo-aa-mono-91031.out"),
         ],
     )
     p.add_argument("--first-job-max-step", type=int, default=5200)

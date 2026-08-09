@@ -627,6 +627,12 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.template_init = not args.disable_template_init
         configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
+        if args.sc_frame_aware_head is not None:
+            configs.sidechain.frame_aware_head = bool(args.sc_frame_aware_head)
+        if args.sc_local_coord_input is not None:
+            configs.sidechain.local_coord_input = bool(args.sc_local_coord_input)
+        if args.sc_template_residual is not None:
+            configs.sidechain.template_residual = bool(args.sc_template_residual)
     apply_sidechain_ablation_arm(configs, args.sc_ablation_arm)
 
     if args.training_stage == "backbone_only":
@@ -712,6 +718,25 @@ def build_configs(args: argparse.Namespace, device):
             "diffusion_module.",
             "design_condition_embedder.",
         ]
+        # Stable Stage II-A parameterization: S_phi reads residue-local template
+        # coordinates and predicts a zero-initialized local correction. The known
+        # GT frame performs the local->global map used by the coordinate loss.
+        configs.sidechain.frame_aware_head = (
+            True if args.sc_frame_aware_head is None else bool(args.sc_frame_aware_head)
+        )
+        configs.sidechain.local_coord_input = (
+            True if args.sc_local_coord_input is None else bool(args.sc_local_coord_input)
+        )
+        configs.sidechain.template_residual = (
+            True if args.sc_template_residual is None else bool(args.sc_template_residual)
+        )
+        if configs.sidechain.template_residual and not (
+            configs.sidechain.frame_aware_head and configs.sidechain.local_coord_input
+        ):
+            raise ValueError(
+                "--sc-template-residual requires --sc-frame-aware-head and "
+                "--sc-local-coord-input"
+            )
         configs.training.trainable_param_keywords = ["sidechain_module."]
         configs.training.ema_decay = 0.0
     elif args.training_stage == "joint":
@@ -949,6 +974,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-template-init", action="store_true")
     p.add_argument("--sc-trunk-grad-scale", type=float, default=1.0)
     p.add_argument(
+        "--sc-frame-aware-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Predict local offsets and map them through the active backbone frame.",
+    )
+    p.add_argument(
+        "--sc-local-coord-input",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Feed S_phi residue-local rather than raw global side-chain coordinates.",
+    )
+    p.add_argument(
+        "--sc-template-residual",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Predict a zero-initialized correction to the template/noisy local input.",
+    )
+    p.add_argument(
         "--sc-ablation-arm",
         default="default",
         choices=["default", "no", "a-indirect", "a-direct", "bbctx", "q", "a-direct+q"],
@@ -1085,16 +1128,28 @@ def main() -> None:
         components, n_items = build_components(args, filtered_index)
     eval_loader, n_eval, eval_filtered_index = build_eval_dataloader(args, output_dir)
     components.eval_dataloader = eval_loader
+    configs = build_configs(args, device)
     if args.dry_run:
         dry_run_components(components, n_items)
         if eval_loader is not None:
             print(f"validation_rows={n_eval}")
             print(f"validation_index={eval_filtered_index}")
+        if args.training_stage == "sidechain_warmup":
+            print(
+                "sidechain_parameterization="
+                f"local_input={bool(configs.sidechain.local_coord_input)},"
+                f"frame_aware_head={bool(configs.sidechain.frame_aware_head)},"
+                f"template_residual={bool(configs.sidechain.template_residual)}"
+            )
+            print(
+                "optimizer="
+                f"lr={float(configs.training.lr):g},"
+                f"accumulate={int(configs.training.iters_to_accumulate)},"
+                f"grad_clip={float(configs.training.grad_clip_norm):g}"
+            )
         return
 
     from pxdesign_train.runner.train import train_from_components
-
-    configs = build_configs(args, device)
 
     logging.info("Repo root: %s", repo_root)
     logging.info("Data root: %s", data_root)
@@ -1125,6 +1180,20 @@ def main() -> None:
     if eval_loader is not None:
         logging.info("Recent-PDB validation rows: %d", n_eval)
         logging.info("Recent-PDB validation index: %s", eval_filtered_index)
+    if args.training_stage == "sidechain_warmup":
+        logging.info(
+            "Side-chain parameterization: local_input=%s, frame_aware_head=%s, "
+            "template_residual=%s",
+            bool(configs.sidechain.local_coord_input),
+            bool(configs.sidechain.frame_aware_head),
+            bool(configs.sidechain.template_residual),
+        )
+        logging.info(
+            "Side-chain optimizer: lr=%g, accumulate=%d, grad_clip=%g",
+            float(configs.training.lr),
+            int(configs.training.iters_to_accumulate),
+            float(configs.training.grad_clip_norm),
+        )
     logging.info("Output dir: %s", output_dir)
     train_from_components(
         configs=configs,

@@ -74,6 +74,12 @@ def test_max_crop_retries_is_actually_used_by_getitem():
 
     Unfixed: AttributeError. Fixed: the loop retries min(max_crop_retries, n)
     times and then raises the crop-exhausted ValueError.
+
+    NOTE: this used to assert the exact sequence `[0, 1, 2]`. That pinned the
+    walk-to-the-next-index retry, which is itself the bug fixed in
+    `_probe_index` — adjacent index entries are near-duplicate structures, so
+    the neighbour fails for the same reason the original did. Only the first
+    attempt is contractual now; the rest deliberately jump.
     """
     provider = _StubProvider(n=4)
     ds = DesignSourceDataset(provider=provider, source_name="stub", max_crop_retries=3)
@@ -81,8 +87,10 @@ def test_max_crop_retries_is_actually_used_by_getitem():
     with pytest.raises(ValueError, match="failed to find a crop-valid example"):
         ds[0]
 
-    # Retried exactly `max_crop_retries` provider items (capped at len(provider)).
-    assert provider.calls == [0, 1, 2]
+    # Spent exactly `max_crop_retries` attempts, starting at the requested item.
+    assert len(provider.calls) == 3
+    assert provider.calls[0] == 0
+    assert all(0 <= c < 4 for c in provider.calls)
 
 
 def test_max_crop_retries_is_capped_by_provider_length():
@@ -90,7 +98,141 @@ def test_max_crop_retries_is_capped_by_provider_length():
     ds = DesignSourceDataset(provider=provider, source_name="stub", max_crop_retries=8)
     with pytest.raises(ValueError, match="failed to find a crop-valid example"):
         ds[0]
-    assert provider.calls == [0, 1]
+    assert len(provider.calls) == 2
+    assert provider.calls[0] == 0
+
+
+class _StubAtomArray:
+    """Only what `_assert_binder_centres_are_wellformed` touches."""
+
+    def __init__(self, chain_id, res_id, res_name, atom_name, centre_atom_mask):
+        import numpy as np
+        self.chain_id = np.asarray(chain_id)
+        self.res_id = np.asarray(res_id)
+        self.res_name = np.asarray(res_name)
+        self.atom_name = np.asarray(atom_name)
+        self.centre_atom_mask = np.asarray(centre_atom_mask)
+
+    def get_annotation_categories(self):
+        return ["chain_id", "res_id", "res_name", "atom_name", "centre_atom_mask"]
+
+
+def _residue(chain, rid, resname, names, ca_name="CA"):
+    """One residue's rows; `centre_atom_mask` set exactly where name == ca_name."""
+    return (
+        [chain] * len(names),
+        [rid] * len(names),
+        [resname] * len(names),
+        list(names),
+        [1 if n == ca_name else 0 for n in names],
+    )
+
+
+def _stub_from(residues):
+    cols = [sum(parts, []) for parts in zip(*residues)]
+    return _StubAtomArray(*cols)
+
+
+def test_binder_residue_without_a_CA_raises_a_retryable_error():
+    """Regression for the crash that killed job 97437 at step 150.
+
+    The canonical rebuild picks the centre atom by NAME (`atom_name == "CA"`).
+    A non-canonical residue (the GFP chromophore CRO) has no atom called CA, so it
+    keeps ZERO centre atoms; Protenix's tokenizer then dies with
+    `AssertionError: Length of values must match the number of tokens`. An
+    AssertionError is not a ValueError, so `__getitem__`'s retry loop could not
+    skip it and the DataLoader worker killed the run.
+
+    The guard must turn that into the retryable `InferenceSafeBinder:` ValueError.
+    """
+    import numpy as np
+    from pxdesign_train.runner.data import _assert_binder_centres_are_wellformed
+
+    good = _residue("A", 1, "GLY", ["N", "CA", "C", "O"])
+    # CRO-like: real atom names, none of them literally "CA".
+    bad = _residue("A", 2, "CRO", ["N1", "CA1", "CB2", "OH"], ca_name="CA")
+    safe = _stub_from([good, bad])
+    binder = np.ones(len(safe.atom_name), dtype=bool)
+
+    with pytest.raises(ValueError, match="InferenceSafeBinder"):
+        _assert_binder_centres_are_wellformed(safe, binder)
+
+    # And the message must name the offending residue, so the log is actionable.
+    try:
+        _assert_binder_centres_are_wellformed(safe, binder)
+    except ValueError as exc:
+        assert "CRO" in str(exc)
+        assert "0 centre atoms" in str(exc)
+
+
+def test_wellformed_binder_centres_pass():
+    import numpy as np
+    from pxdesign_train.runner.data import _assert_binder_centres_are_wellformed
+
+    safe = _stub_from([
+        _residue("A", 1, "GLY", ["N", "CA", "C", "O"]),
+        _residue("A", 2, "ALA", ["N", "CA", "C", "O"]),
+    ])
+    binder = np.ones(len(safe.atom_name), dtype=bool)
+    _assert_binder_centres_are_wellformed(safe, binder)  # must not raise
+
+
+def test_centre_guard_ignores_non_binder_residues():
+    """Target/receptor residues keep Protenix's own centres and are not our concern."""
+    import numpy as np
+    from pxdesign_train.runner.data import _assert_binder_centres_are_wellformed
+
+    safe = _stub_from([
+        _residue("A", 1, "GLY", ["N", "CA", "C", "O"]),
+        _residue("B", 2, "CRO", ["N1", "CA1", "CB2", "OH"], ca_name="CA"),
+    ])
+    binder = np.array([True] * 4 + [False] * 4)   # the CRO row is NOT binder
+    _assert_binder_centres_are_wellformed(safe, binder)  # must not raise
+
+
+def test_retry_escapes_a_contiguous_block_of_bad_entries():
+    """Regression for the crash that killed the Stage II-A run (job 97053).
+
+    The training index is ordered by pdb id, so un-croppable entries arrive in
+    CLUSTERS (7a7t/7a7u/7a7v/7a7w are consecutive GFP variants, all carrying the
+    non-canonical CRO chromophore that the strict inference-safe rebuild cannot
+    tokenize). With the old `idx + attempt` walk every retry landed inside the
+    same cluster, the budget was exhausted, and the DataLoader worker raised —
+    killing training at step 50.
+
+    Here a contiguous block is poisoned and the rest of the provider is fine, so
+    a walk would die and a jump must survive.
+    """
+    class _ClusteredProvider:
+        """Indices in [bad_lo, bad_hi) always fail; everything else succeeds."""
+
+        def __init__(self, n=4000, bad_lo=1000, bad_hi=1100):
+            self.n, self.bad_lo, self.bad_hi = n, bad_lo, bad_hi
+            self.calls: list[int] = []
+
+        def __len__(self):
+            return self.n
+
+        def __getitem__(self, idx):
+            self.calls.append(idx)
+            if self.bad_lo <= idx < self.bad_hi:
+                raise ValueError("InferenceSafeBinder: strict token count 269 != 291")
+            return ("atoms", "tokens", {}, {}, lambda _aa: "A")
+
+    provider = _ClusteredProvider()
+    ds = DesignSourceDataset(provider=provider, source_name="stub", max_crop_retries=16)
+
+    # Stub out the featurization; this test is only about index selection.
+    ds._get_one = lambda i: (provider[i], {"sample_id": f"p{i}"})[1]
+
+    # A request landing mid-cluster must still return, and from OUTSIDE the block.
+    item = ds[1050]
+    assert item["sample_id"] not in {f"p{i}" for i in range(1000, 1100)}
+    assert provider.calls[0] == 1050, "first attempt must still be the requested item"
+
+    # Determinism: the same request resolves to the same substitute.
+    provider.calls.clear()
+    assert ds[1050]["sample_id"] == item["sample_id"]
 
 
 # --------------------------------------------------------------------------

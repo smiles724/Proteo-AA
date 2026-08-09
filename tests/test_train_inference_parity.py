@@ -63,6 +63,14 @@ TRAIN_ONLY = {
     "context_radius": "loss-side only: bounds the clash/contact atom set, no loss at inference",
     "context_max_atoms": "loss-side only: memory cap on the clash/contact atom set",
     "a_bs_concat": "internal to SideChainModule.forward (pooled + h_proj); no new sampler input",
+    "template_residual": "internal to SideChainModule.forward (y0 = noisy_local + y0), "
+                         "baked in at construction, so the sampler's call inherits it. It "
+                         "needs no new sampler input because it cannot be enabled alone: "
+                         "model.py requires frame_aware_head and local_coord_input, and "
+                         "BOTH of those are already mirrored (sc_local_coord_input feeds "
+                         "the residue-local coords that become the residual base, "
+                         "sc_frame_aware_head supplies frame_R/frame_t). forward() raises "
+                         "if the frames are absent, so a mismatch cannot be silent.",
 }
 
 

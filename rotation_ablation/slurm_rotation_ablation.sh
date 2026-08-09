@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=logs/validation/rotation_ablation/%x-%j.out
+#SBATCH --error=logs/validation/rotation_ablation/%x-%j.err
 
 set -euo pipefail
 

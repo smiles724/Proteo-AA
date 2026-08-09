@@ -319,6 +319,11 @@ training_configs["sidechain"] = {
     # Ablation candidate, default OFF (feed S_phi's noisy coords as raw global). ON: feed them
     # in the residue-local frame (translation-free). docs/sidechain_config_notes.md.
     "local_coord_input": False,
+    # Predict a correction to the template-initialized LOCAL coordinates instead
+    # of regressing the complete side chain from scratch. The output projection is
+    # zero-initialized, so a new S_phi starts as the template/noisy-input baseline.
+    # Requires frame_aware_head=True and local_coord_input=True.
+    "template_residual": False,
     # Template perturbation scale (Angstrom, per coordinate). Keep it small
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
     # template anisotropy that carries the orientation.

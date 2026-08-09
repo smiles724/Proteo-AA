@@ -455,6 +455,27 @@ class DesignFeaturizer:
         res_id = np.asarray(atom_array.res_id)
         binder = np.asarray(binder_atom_mask, dtype=bool)
 
+        # An UNRESOLVED atom still occupies a row (the residue keeps its full
+        # complement of atom names) but its coordinate is a placeholder (0, 0, 0).
+        # Supervising such a row asks S_phi to put the atom at the coordinate
+        # ORIGIN, which is wherever the depositor happened to centre the assembly —
+        # 400 A away for 7us9, 37 A for 7lmv. Measured on the 491-protein
+        # validation set before this guard: 9.84% of all supervised side-chain
+        # atoms (59497/604774) across 461/491 structures were such origin targets,
+        # contributing an unlearnable error that dominated the loss (7us9 read
+        # 21860 A^2 == 133 atoms x ~416 A) and flat-lined training.
+        #
+        # `is_resolved` is the authoritative flag and survives cropping; on 7us9 it
+        # marks all 1034 zero-coordinate atoms correctly. The exact-zero coordinate
+        # test is a belt-and-braces fallback for arrays that lack the annotation (a
+        # real atom sitting exactly on the origin is not physically meaningful, so
+        # dropping it costs nothing).
+        if "is_resolved" in atom_array.get_annotation_categories():
+            resolved = np.asarray(atom_array.is_resolved, dtype=bool)
+        else:
+            resolved = np.ones(len(atom_array), dtype=bool)
+        resolved &= np.abs(coord).max(axis=1) > 1e-3
+
         res_atoms: dict = defaultdict(dict)
         for idx in range(len(atom_array)):
             res_atoms[(chain_id[idx], res_id[idx])][str(atom_name[idx])] = idx
@@ -500,8 +521,11 @@ class DesignFeaturizer:
             for j, nm in enumerate(sidechain_atoms(str(res_name[ai]))):
                 if j >= MAX_SC:
                     break
+                # `sc_ids` stays type-derived: it names the SLOT, which exists for
+                # this residue type whether or not the structure resolved it. Only
+                # the supervision mask is gated on having a real coordinate.
                 sc_ids[ti, j] = ATOM_NAME_TO_ID[nm]
-                if nm in atoms:
+                if nm in atoms and resolved[atoms[nm]]:
                     g = torch.from_numpy(coord[atoms[nm]])[None, None]  # [1,1,3]
                     sc_gt_local[ti, j] = to_local(g, R, t)[0, 0].numpy()
                     sc_mask[ti, j] = True

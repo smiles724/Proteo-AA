@@ -633,6 +633,14 @@ def build_configs(args: argparse.Namespace, device):
             configs.sidechain.centre_coord_input = bool(args.sc_centre_coord_input)
         if args.sc_template_residual is not None:
             configs.sidechain.template_residual = bool(args.sc_template_residual)
+        if args.sc_mismatch_loss is not None:
+            configs.sidechain.mismatch_loss = str(args.sc_mismatch_loss)
+        if args.sc_pack_loss is not None:
+            configs.sidechain.pack_loss = float(args.sc_pack_loss)
+        if args.sc_edm is not None:
+            configs.sidechain.edm = bool(args.sc_edm)
+        if args.sc_edm_sigma_data is not None:
+            configs.sidechain.edm_sigma_data = float(args.sc_edm_sigma_data)
     apply_sidechain_ablation_arm(configs, args.sc_ablation_arm)
 
     if args.training_stage == "backbone_only":

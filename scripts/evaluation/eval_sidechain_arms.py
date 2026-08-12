@@ -85,6 +85,10 @@ def main() -> None:
     train_args.training_stage = "sidechain_warmup"
     train_args.data_root = args.data_root
     train_args.output_dir = args.output_dir
+    # build_eval_dataloader returns None unless BOTH of these are positive; it is
+    # a training-loop gate ("evaluate every N steps") that this script has to
+    # satisfy even though it evaluates exactly once.
+    train_args.eval_interval = 1
     train_args.eval_samples = int(args.num_samples)
     train_args.eval_filtered_index = args.filtered_index
     train_args.min_n_token = int(args.min_n_token)
@@ -148,7 +152,11 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     eval_loader, n_eval, eval_index = training.build_eval_dataloader(train_args, output_dir)
     if eval_loader is None:
-        raise SystemExit("validation loader was not constructed")
+        raise SystemExit(
+            "validation loader was not constructed: build_eval_dataloader "
+            f"got eval_interval={train_args.eval_interval} "
+            f"eval_samples={train_args.eval_samples}; both must be > 0"
+        )
     print(f"validation_rows={n_eval} index={eval_index}")
 
     rows: list[dict] = []

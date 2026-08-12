@@ -1532,7 +1532,29 @@ class ProtenixDesignTrain(ProtenixDesign):
                 sc_kwargs = {"bb_coords": bb_local, "res_mask": sc_res_mask}
             if bb_q is not None:
                 sc_kwargs["bb_q"] = bb_q
-            if sc_sigma is not None and ca_for_module is not None:
+            if sc_sigma is not None and ca_for_module is None:
+                # Refuse rather than fall through. A silent fallback here would run
+                # the one-step path while every log line, checkpoint record and
+                # report still said EDM -- the failure is invisible until someone
+                # compares two runs that were never the same experiment.
+                raise ValueError(
+                    "sidechain.edm is on but no ca_coords reached S_phi, so the EDM "
+                    "preconditioning has no centre to work in. ca comes from the "
+                    "frame translation (sc_frame_t); if that is absent the run is "
+                    "not doing what its config says."
+                )
+            if sc_sigma is not None:
+                if not getattr(self, "_logged_edm", False):
+                    self._logged_edm = True
+                    logging.getLogger(__name__).info(
+                        "sidechain EDM ACTIVE: sigma_data=%.3g, sigma in [%.3g, %.3g], "
+                        "median %.3g; time embedding receives log(sigma)/4, "
+                        "loss weighted by lambda(sigma)=1/c_out^2",
+                        self.sc_edm_sigma_data,
+                        self.sc_noise_sampler.sigma_min,
+                        self.sc_noise_sampler.sigma_max,
+                        float(torch.tensor(self.sc_noise_sampler.p_mean).exp()),
+                    )
                 # EDM: the wrapper supplies `t` (= c_noise) and `coord_scale` (= c_in),
                 # so the time channel finally carries the noise level instead of the
                 # constant it has been fed since Stage II began.

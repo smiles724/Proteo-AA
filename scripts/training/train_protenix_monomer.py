@@ -969,6 +969,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-template-init", action="store_true")
     p.add_argument("--sc-trunk-grad-scale", type=float, default=1.0)
     p.add_argument(
+        "--sc-edm", action=argparse.BooleanOptionalAction, default=None,
+        help="EDM side-chain diffusion: sample sigma, precondition, and feed "
+             "log(sigma) to the time embedding. Requires --sc-centre-coord-input "
+             "and is incompatible with --sc-template-residual.",
+    )
+    p.add_argument("--sc-edm-sigma-data", type=float, default=None)
+    p.add_argument(
+        "--sc-mismatch-loss", default=None,
+        choices=["none", "clash", "legacy", "compat"],
+        help="0722 L_compat arm. 'none' disables the physical term outright.",
+    )
+    p.add_argument(
         "--sc-pack-loss", type=float, default=None,
         help="Weight of the GENERAL steric term over every supervised side-chain "
              "atom (0 = off, the default). Separate from --sc-mismatch-loss, which "

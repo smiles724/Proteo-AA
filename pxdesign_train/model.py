@@ -226,6 +226,29 @@ class ProtenixDesignTrain(ProtenixDesign):
                     "emit local offsets for the two to be commensurate"
                 )
             self.sc_init_sigma_T = float(getattr(sc_cfg, "init_sigma_T", DEFAULT_SIGMA_T)) if sc_cfg is not None else DEFAULT_SIGMA_T
+            # ---- EDM side-chain diffusion (sidechain.edm) ----
+            self.sc_edm = bool(getattr(sc_cfg, "edm", False)) if sc_cfg is not None else False
+            if self.sc_edm:
+                from pxdesign_train.sidechain.edm import (
+                    SideChainEDM, SideChainNoiseSampler,
+                )
+                if not self.sc_centre_coord_input:
+                    raise ValueError(
+                        "sidechain.edm requires centre_coord_input=True. EDM scales the "
+                        "network's coordinate input by c_in(sigma), and that scaling is "
+                        "only meaningful on data centred near zero -- applied to a raw "
+                        "global coordinate it just modulates the residue's absolute "
+                        "position, which is tens to hundreds of Angstrom and swamps the "
+                        "~4 A of side-chain geometry the scaling is for."
+                    )
+                self.sc_noise_sampler = SideChainNoiseSampler(
+                    p_mean=float(getattr(sc_cfg, "edm_p_mean", -0.223)),
+                    p_std=float(getattr(sc_cfg, "edm_p_std", 1.0)),
+                    sigma_min=float(getattr(sc_cfg, "edm_sigma_min", 0.05)),
+                    sigma_max=float(getattr(sc_cfg, "edm_sigma_max", 4.0)),
+                )
+                self.sc_edm_sigma_data = float(getattr(sc_cfg, "edm_sigma_data", 2.0))
+                self.sc_edm_infer_steps = int(getattr(sc_cfg, "edm_infer_steps", 8))
             if self.sc_template_init and not templates_available():
                 logging.getLogger(__name__).warning(
                     "sidechain.template_init=True but pxdesign_train.sidechain.templates "
@@ -333,6 +356,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                 template_residual=self.sc_template_residual,
                 centre_coord_input=self.sc_centre_coord_input,
             )
+            if self.sc_edm:
+                from pxdesign_train.sidechain.edm import SideChainEDM
+
+                # Holds no parameters, so the state dict is identical either way --
+                # which is exactly why `edm` must be a RECORDED arch switch: nothing
+                # about the weights reveals which objective produced them.
+                self.sc_edm_denoiser = SideChainEDM(
+                    self.sidechain_module, sigma_data=self.sc_edm_sigma_data
+                )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
 
             # ---- Cycle closure (Stage II-B co-evolution) ----
@@ -1200,7 +1232,12 @@ class ProtenixDesignTrain(ProtenixDesign):
                         100.0 * cov,
                     )
                 noisy_init = template_init_local(
-                    tix, mask_cpu, sigma_T=self.sc_init_sigma_T, phi=phi, psi=psi,
+                    tix, mask_cpu,
+                    # Under EDM the perturbation is the SAMPLED sigma below, so the
+                    # template arrives clean; sigma_T's fixed 0.3 A would otherwise
+                    # sit underneath it as an unaccounted noise floor.
+                    sigma_T=(0.0 if getattr(self, "sc_edm", False) else self.sc_init_sigma_T),
+                    phi=phi, psi=psi,
                 )
             else:
                 if getattr(self, "sc_template_init", False) and not getattr(self, "_warned_no_type_src", False):
@@ -1213,6 +1250,19 @@ class ProtenixDesignTrain(ProtenixDesign):
                     sc_slot.detach().cpu(), sigma=self.sc_init_sigma
                 )
             noisy_init = noisy_init.to(h_res.device).to(h_res.dtype)
+            sc_sigma = None
+            if getattr(self, "sc_edm", False):
+                from pxdesign_train.sidechain.edm import noise_sidechains
+
+                # One sigma per ROW of the flattened batch, so under per_sigma each
+                # backbone noise draw gets its own independent side-chain noise level
+                # rather than inheriting the backbone's.
+                sc_sigma = self.sc_noise_sampler(
+                    (h_res.shape[0],), device=h_res.device, dtype=torch.float32
+                )
+                noisy_init = noise_sidechains(
+                    noisy_init.float(), sc_sigma
+                ).to(h_res.dtype)
             # Sigma-embedding for S_phi's time input: the REAL per-sample noise
             # level (EDM c_noise = 0.25*ln sigma) when per-sigma; a constant for
             # the reduced warmup baseline (no single sigma to attach).
@@ -1482,13 +1532,26 @@ class ProtenixDesignTrain(ProtenixDesign):
                 sc_kwargs = {"bb_coords": bb_local, "res_mask": sc_res_mask}
             if bb_q is not None:
                 sc_kwargs["bb_q"] = bb_q
-            sc_out = self.sidechain_module(
-                h_res, aa_logits, sc_ids, sc_slot, noisy, t, ca_coords=ca_for_module,
-                frame_R=(fR.detach() if _fa else None),
-                frame_t=(ft.detach() if _fa else None),
-                ctx_mask=ctx_tok,
-                **sc_kwargs,
-            )
+            if sc_sigma is not None and ca_for_module is not None:
+                # EDM: the wrapper supplies `t` (= c_noise) and `coord_scale` (= c_in),
+                # so the time channel finally carries the noise level instead of the
+                # constant it has been fed since Stage II began.
+                sc_out = self.sc_edm_denoiser.denoise(
+                    noisy, sc_sigma, ca_for_module,
+                    h_res, aa_logits, sc_ids, sc_slot,
+                    frame_R=(fR.detach() if _fa else None),
+                    frame_t=(ft.detach() if _fa else None),
+                    ctx_mask=ctx_tok,
+                    **sc_kwargs,
+                )
+            else:
+                sc_out = self.sidechain_module(
+                    h_res, aa_logits, sc_ids, sc_slot, noisy, t, ca_coords=ca_for_module,
+                    frame_R=(fR.detach() if _fa else None),
+                    frame_t=(ft.detach() if _fa else None),
+                    ctx_mask=ctx_tok,
+                    **sc_kwargs,
+                )
             # 3-tuple only when we opted into the 14-slot axis (bb_local given).
             bb_feats = None
             if len(sc_out) == 3:
@@ -1546,6 +1609,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["sc_frame_R"] = fR
                 out["sc_frame_t"] = ft
             out["sc_atom_mask"] = sc_mask
+            if sc_sigma is not None:
+                from pxdesign_train.sidechain.edm import edm_loss_weight
+
+                out["sc_sigma"] = sc_sigma.detach()
+                # lambda(sigma) = 1/c_out^2. Without it the high-sigma draws dominate
+                # the gradient and the model quietly optimises the easy end.
+                out["sc_loss_weight"] = edm_loss_weight(
+                    sc_sigma, self.sc_edm_sigma_data
+                )
             out["h_res_prime"] = h_res_prime        # per-sigma [B*N_sample, L, C] when per-sigma
             # Reduced h_res' for the cycle injection: the Protenix diffusion shares
             # s_trunk across noise draws (no per-sample s_trunk), so per-sigma h_res'

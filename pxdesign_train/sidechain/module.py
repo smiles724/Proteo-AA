@@ -256,6 +256,7 @@ class SideChainModule(nn.Module):
         res_mask: Optional[torch.Tensor] = None,   # [B, L] bool — residue exists
         ctx_mask: Optional[torch.Tensor] = None,   # [B, L] bool — context (receptor/motif) token
         bb_q: Optional[torch.Tensor] = None,       # [B, L, 4, c_q] backbone q from Backbone Module
+        coord_scale: Optional[torch.Tensor] = None,  # [B] EDM c_in, embedding only
     ):
         """One-step side-chain denoise.
 
@@ -314,6 +315,13 @@ class SideChainModule(nn.Module):
             embed_coords = coords - ca_coords[:, :, None, :].to(coords.dtype)
         else:
             embed_coords = coords
+        if coord_scale is not None:
+            # EDM's c_in, applied to the EMBEDDING only (see sidechain/edm.py). The
+            # geometry above stays in true Angstrom: the cross-residue distance bias
+            # is a physical prior, and scaling it would make "nearby" mean something
+            # different at every noise level.
+            cs = torch.as_tensor(coord_scale, device=coords.device, dtype=coords.dtype)
+            embed_coords = embed_coords * cs.view(-1, *([1] * (coords.dim() - 1)))
 
         te = sinusoidal_time_embedding(torch.as_tensor(t, device=h_res.device).float(), self.c_time)
         te = self.w_t(te)                                  # [B, c_atom]

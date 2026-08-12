@@ -391,6 +391,21 @@ training_configs["sidechain"] = {
     # holding every parameter and shape fixed. If sc_local barely moves, the channel
     # was carrying nothing and the Stage II->III flip costs nothing either. Default
     # True = today's behaviour.
+    # EDM side-chain diffusion (pxdesign_train/sidechain/edm.py). OFF by default;
+    # the one-step path is unchanged when this is False. Turning it on replaces the
+    # fixed sigma_T=0.3 template jitter with a SAMPLED sigma, feeds log(sigma) to the
+    # time embedding (which is a dead constant today), and applies EDM
+    # preconditioning -- see that module's header for the 2.18 A vs 0.3 A mismatch
+    # that motivates it.
+    "edm": False,
+    # Side-chain scale, NOT the backbone's 16.0. See DEFAULT_SIGMA_DATA.
+    "edm_sigma_data": 2.0,
+    "edm_p_mean": -0.223,          # ln(0.8): median sigma 0.8 A
+    "edm_p_std": 1.0,
+    "edm_sigma_min": 0.05,
+    "edm_sigma_max": 4.0,
+    # Reverse-loop length at inference (A2). 1 reproduces a single one-step decode.
+    "edm_infer_steps": 8,
     "type_logits_input": True,
     "pack_loss": 0.0,
     "pack_arm": "clash",

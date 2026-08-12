@@ -325,6 +325,7 @@ class PXDesignLoss(nn.Module):
         sc_type_match: Optional[torch.Tensor] = None,      # [..., L] bool (pred==gt type)
         sc_phys: Optional[torch.Tensor] = None,            # precomputed physical loss scalar
         sc_pack: Optional[torch.Tensor] = None,            # general steric term (all atoms)
+        sc_loss_weight: Optional[torch.Tensor] = None,     # [B] EDM lambda(sigma)
         sc_global: Optional[torch.Tensor] = None,          # predicted-frame pseudo-target aux (scalar)
         post_pred_coordinate: Optional[torch.Tensor] = None,   # [..., N_sample, N_atom, 3]
         post_gt_coordinate_aug: Optional[torch.Tensor] = None, # [..., N_sample, N_atom, 3]
@@ -489,6 +490,7 @@ class PXDesignLoss(nn.Module):
                     sc_frame_t,
                     coord_mask,
                     eps=self.eps,
+                    row_weight=sc_loss_weight,
                 )
             else:
                 sc_local = sidechain_local_loss(sc_pred_local, sc_gt_local, coord_mask, eps=self.eps)

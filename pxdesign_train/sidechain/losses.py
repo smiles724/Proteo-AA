@@ -8,6 +8,8 @@ against a predicted-frame-aligned pseudo-target:
 where y_gt_local is the ground-truth side-chain geometry in the residue-local
 frame. The legacy local-frame loss is kept for tests and older callers.
 """
+from typing import Optional
+
 import torch
 
 from pxdesign_train.sidechain.frames import to_global
@@ -40,6 +42,7 @@ def sidechain_global_frame_aligned_loss(
     frame_t: torch.Tensor,      # [..., L, 3]
     mask: torch.Tensor,         # [..., L, A] bool/float
     eps: float = 1e-6,
+    row_weight: Optional[torch.Tensor] = None,   # [B] EDM lambda(sigma), or None
 ) -> torch.Tensor:
     """Masked MSE to GT local geometry attached to a stop-grad frame.
 
@@ -81,4 +84,11 @@ def sidechain_global_frame_aligned_loss(
     target = to_global(gt_local, frame_R.detach(), frame_t.detach())
     se = ((pred_global - target) ** 2).sum(dim=-1)
     m = mask.to(se.dtype).expand_as(se)
+    if row_weight is not None:
+        # EDM lambda(sigma), one per batch ROW. It multiplies BOTH the numerator and
+        # the denominator so the result stays a weighted MEAN -- an unnormalised sum
+        # would make the loss scale with lambda, i.e. with how noisy this draw
+        # happened to be, which is the opposite of what the weighting is for.
+        w = row_weight.to(se.dtype).view(-1, *([1] * (se.dim() - 1))).expand_as(se)
+        m = m * w
     return (se * m).sum() / (m.sum() + eps)

@@ -65,6 +65,15 @@ TRAIN_ONLY = {
                  "is the ONE steric channel the objective has, because weight_sc_phys "
                  "is 0722's L_compat and its subject set is empty under teacher forcing.",
     "pack_arm": "loss-side only: which physical_loss arm the general steric term uses",
+    "edm_sigma_data": "numeric hyper-parameter of sidechain.edm, which IS mirrored "
+                      "(sc_edm in the sampler); the sampler reads it off the same "
+                      "SideChainEDM instance the training path built",
+    "edm_p_mean": "sampling distribution of sigma at TRAIN time; inference walks the "
+                  "deterministic Karras schedule instead",
+    "edm_p_std": "training-time sigma distribution; see edm_p_mean",
+    "edm_sigma_min": "read at inference through model.sc_noise_sampler.schedule()",
+    "edm_sigma_max": "read at inference through model.sc_noise_sampler.schedule()",
+    "edm_infer_steps": "inference-only: reverse-loop length (sc_edm_infer_steps)",
     "context_radius": "loss-side only: bounds the clash/contact atom set, no loss at inference",
     "context_max_atoms": "loss-side only: memory cap on the clash/contact atom set",
     "a_bs_concat": "internal to SideChainModule.forward (pooled + h_proj); no new sampler input",

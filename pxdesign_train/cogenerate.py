@@ -388,7 +388,10 @@ def cogenerate(
                         phi_c, psi_c = _phi[sel], _psi[sel]
                     noisy_local = sc_init.template_init_local(
                         a_hat.cpu(), m.cpu(),
-                        sigma_T=getattr(model, "sc_init_sigma_T", sc_init.DEFAULT_SIGMA_T),
+                        sigma_T=(
+                            0.0 if getattr(model, "sc_edm", False)
+                            else getattr(model, "sc_init_sigma_T", sc_init.DEFAULT_SIGMA_T)
+                        ),
                         phi=phi_c, psi=psi_c,
                     )
                 else:
@@ -527,14 +530,41 @@ def cogenerate(
                             sc_kwargs["bb_q"] = torch.cat(
                                 [_bq, _bq.new_zeros(Nx, _bq.shape[-2], _bq.shape[-1])], 0
                             )[None]
-                sc_out = model.sidechain_module(
-                    h_e, l_e, ids_e, m_e, noisy_e,
-                    sc_t, ca_coords=ca_e,
-                    frame_R=(R_e[None].float() if _fa else None),
-                    frame_t=(t_e[None].float() if _fa else None),
-                    ctx_mask=ctx_e,
-                    **sc_kwargs,
-                )
+                if getattr(model, "sc_edm", False):
+                    # A2: a reverse loop that CARRIES its estimate, instead of the
+                    # single re-initialised decode this sampler does per backbone
+                    # step. Same number of S_phi calls buys N steps of refinement
+                    # rather than one, because each step starts from the last.
+                    from pxdesign_train.sidechain.edm import sidechain_reverse_loop
+
+                    sch = model.sc_noise_sampler.schedule(
+                        int(getattr(model, "sc_edm_infer_steps", 8)),
+                        device=device, dtype=torch.float32,
+                    )
+                    x_init = (
+                        noisy_e.float()
+                        + sch[0] * torch.randn_like(noisy_e.float())
+                    ).to(noisy_e.dtype)
+                    y0_global, aux = sidechain_reverse_loop(
+                        model.sc_edm_denoiser, x_init, sch, ca_e,
+                        h_e, l_e, ids_e, m_e,
+                        frame_R=(R_e[None].float() if _fa else None),
+                        frame_t=(t_e[None].float() if _fa else None),
+                        ctx_mask=ctx_e,
+                        atom_mask=m_e,
+                        return_aux=True,
+                        **sc_kwargs,
+                    )
+                    sc_out = (y0_global, *aux)
+                else:
+                    sc_out = model.sidechain_module(
+                        h_e, l_e, ids_e, m_e, noisy_e,
+                        sc_t, ca_coords=ca_e,
+                        frame_R=(R_e[None].float() if _fa else None),
+                        frame_t=(t_e[None].float() if _fa else None),
+                        ctx_mask=ctx_e,
+                        **sc_kwargs,
+                    )
                 bb_feats = None
                 if len(sc_out) == 3:
                     y0_global, atom_feats, bb_feats = sc_out

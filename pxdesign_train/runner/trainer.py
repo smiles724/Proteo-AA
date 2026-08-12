@@ -414,6 +414,7 @@ class PXDesignTrainer:
             sc_type_match=out.get("sc_type_match"),
             sc_phys=out.get("sc_phys_val"),
             sc_pack=out.get("sc_pack_val"),
+            sc_loss_weight=out.get("sc_loss_weight"),
             sc_global=out.get("sc_global_aux"),
             post_pred_coordinate=out.get("post_pred_coordinate"),
             post_gt_coordinate_aug=out.get("post_gt_coordinate_aug"),
@@ -702,6 +703,9 @@ class PXDesignTrainer:
     SIDECHAIN_LAYOUT_KEYS = (
         "bb_context", "centre_coord_input", "frame_aware_head", "template_residual",
         "type_logits_input",
+        # Same shapes either way -- SideChainEDM holds no parameters -- so
+        # nothing about the weights reveals which objective produced them.
+        "edm",
     )
     SIDECHAIN_ADDITIVE_KEYS = ("a_bs_concat", "q_bs")
     SIDECHAIN_ARCH_KEYS = SIDECHAIN_LAYOUT_KEYS + SIDECHAIN_ADDITIVE_KEYS

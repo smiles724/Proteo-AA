@@ -38,6 +38,7 @@ This module does NOT:
 
 Callers compose: parse → crop → Protenix-featurize → DesignFeaturizer.
 """
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -57,7 +58,34 @@ from pxdesign_train.data._helpers import (
     restype_onehot_encoded,
 )
 
+logger = logging.getLogger(__name__)
+
 XPB_BACKBONE_ATOM_NAMES = ("N", "CA", "C", "O")  # 4 backbone atoms per report p. 23
+
+# Largest distance a real side-chain atom can sit from its own residue frame
+# origin (CA). The longest side chains (ARG NH1/NH2, LYS NZ, TRP CZ2) reach
+# ~6.5-7.5 A; measured maxima on clean PDB data are 7.10 A and 7.46 A. 12 A is
+# therefore ~50% headroom over anything chemically achievable, so a supervised
+# target beyond it is corrupt by definition rather than merely unusual.
+#
+# This bound is the annotation-INDEPENDENT backstop. `is_resolved` plus the
+# zero-coordinate test catch a missing atom only when the pipeline marks it or
+# parks it at the origin; a preprocessing step that substituted some OTHER
+# placeholder would slip past both. A physical bound cannot be fooled that way.
+MAX_SC_LOCAL_RADIUS_A = 12.0
+
+# Rate-limited reporting: these run inside DataLoader workers, once per item, so
+# an unconditional warning would flood the log. Silence is worse though — a
+# silently dropped target is exactly the failure this guard exists to stop.
+_SC_GUARD_COUNTS = {"missing_is_resolved": 0, "implausible_targets": 0}
+
+
+def _report_sc_guard(kind: str, detail: str) -> None:
+    """Log the 1st occurrence and every 500th after that, with a running total."""
+    _SC_GUARD_COUNTS[kind] = _SC_GUARD_COUNTS.get(kind, 0) + 1
+    n = _SC_GUARD_COUNTS[kind]
+    if n == 1 or n % 500 == 0:
+        logger.warning("side-chain target guard [%s] (occurrence %d): %s", kind, n, detail)
 DEFAULT_HOTSPOT_RADIUS = 8.0   # Å, Cα-Cα interface cutoff
 DEFAULT_HOTSPOT_MAX_FRAC = 0.5  # at most half of contact residues get marked
 AA_IGNORE_INDEX = -100
@@ -473,7 +501,20 @@ class DesignFeaturizer:
         if "is_resolved" in atom_array.get_annotation_categories():
             resolved = np.asarray(atom_array.is_resolved, dtype=bool)
         else:
+            # Assuming "everything is resolved" is the DANGEROUS default: it is
+            # exactly the pre-fix behaviour. Verified 108/108 real train+eval
+            # items DO carry the annotation, so this branch is a safety net for a
+            # provider that drops it (the CIF provider, a synthetic test double, a
+            # future Protenix change), not a path the current pipeline takes. Say
+            # so out loud, and let MAX_SC_LOCAL_RADIUS_A below do the real work.
             resolved = np.ones(len(atom_array), dtype=bool)
+            _report_sc_guard(
+                "missing_is_resolved",
+                f"atom_array has no is_resolved annotation ({len(atom_array)} atoms); "
+                "falling back to the zero-coordinate test plus the physical-radius "
+                "bound. Unresolved atoms stored at a NON-ZERO placeholder cannot be "
+                "identified in this mode.",
+            )
         resolved &= np.abs(coord).max(axis=1) > 1e-3
 
         res_atoms: dict = defaultdict(dict)
@@ -529,6 +570,29 @@ class DesignFeaturizer:
                     g = torch.from_numpy(coord[atoms[nm]])[None, None]  # [1,1,3]
                     sc_gt_local[ti, j] = to_local(g, R, t)[0, 0].numpy()
                     sc_mask[ti, j] = True
+
+        # Annotation-independent backstop. Everything above trusts the pipeline's
+        # own bookkeeping (`is_resolved`, or a coordinate parked at the origin).
+        # This last check trusts only chemistry: a supervised side-chain atom
+        # farther than MAX_SC_LOCAL_RADIUS_A from its own frame cannot be real,
+        # whatever the annotations claim. It is what catches an unresolved atom
+        # stored at a non-zero placeholder, and it also removes genuinely broken
+        # geometry that is correctly flagged as "resolved" (measured: 7 atoms out
+        # of 155385, up to 74.7 A, in 1 of 150 sampled training structures).
+        if sc_mask.any():
+            radius = np.linalg.norm(sc_gt_local, axis=-1)
+            implausible = sc_mask & (radius > MAX_SC_LOCAL_RADIUS_A)
+            n_bad = int(implausible.sum())
+            if n_bad:
+                sc_mask[implausible] = False
+                sc_gt_local[implausible] = 0.0   # never leave a live target behind
+                _report_sc_guard(
+                    "implausible_targets",
+                    f"dropped {n_bad} supervised side-chain target(s) beyond "
+                    f"{MAX_SC_LOCAL_RADIUS_A} A of their residue frame "
+                    f"(max {float(radius[implausible].max()):.1f} A) — corrupt "
+                    "coordinates, not model error",
+                )
 
         return {
             "sc_gt_local": torch.from_numpy(sc_gt_local),

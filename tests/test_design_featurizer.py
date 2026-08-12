@@ -17,6 +17,8 @@ The goal is to verify shapes, dtypes, and a few correctness invariants:
 import os
 import sys
 
+import logging
+
 import numpy as np
 import pytest
 import torch
@@ -442,3 +444,85 @@ def test_missing_is_resolved_annotation_still_rejects_placeholder_coords():
     assert bool(out["sc_atom_mask"][0, 1]) is False, (
         "zero-coordinate atom must be rejected even with no is_resolved annotation"
     )
+
+
+def _displace_atom(aa, res_index, atom_name, new_xyz, keep_resolved=True):
+    """Move one atom, optionally leaving `is_resolved` claiming it is fine."""
+    ch = np.asarray(aa.chain_id); ri = np.asarray(aa.res_id); an = np.asarray(aa.atom_name)
+    row = np.flatnonzero((ri == res_index + 1) & (an == atom_name))[0]
+    aa.coord[row] = new_xyz
+    if not keep_resolved:
+        res = np.asarray(aa.is_resolved, dtype=bool).copy()
+        res[row] = False
+        aa.set_annotation("is_resolved", res)
+    return row
+
+
+def test_nonzero_placeholder_is_rejected_even_though_is_resolved_says_ok():
+    """The gap the zero-coordinate heuristic cannot close.
+
+    `is_resolved` + "is it at (0,0,0)?" only catch a missing atom when the
+    pipeline either flags it or parks it at the origin. If a preprocessing step
+    substituted some OTHER placeholder, both tests pass and the bogus target
+    would be supervised. The physical-radius bound is what actually rejects it,
+    because no real side-chain atom sits 12 A from its own CA.
+    """
+    aa, feat, binder = _ser_complex(400.0)
+    # Unresolved in reality, but stored at a non-zero placeholder AND still
+    # flagged resolved — the exact blind spot.
+    _displace_atom(aa, 0, "OG", (9999.0, 9999.0, 9999.0), keep_resolved=True)
+
+    out = _sc_targets(aa, feat, binder)
+    mask = out["sc_atom_mask"]
+    assert bool(mask[0, 1]) is False, (
+        "a target 9999 A from its residue frame must not be supervised"
+    )
+    assert bool(mask[0, 0]) is True, "the residue's good CB must survive"
+    assert bool(mask[1, 0]) and bool(mask[1, 1]), "the untouched residue is unaffected"
+    # And no live target may be left in the coordinate tensor.
+    gt = out["sc_gt_local"]
+    assert float(gt[0, 1].norm()) == 0.0
+
+
+def test_all_supervised_targets_are_physically_reachable():
+    """The invariant, stated positively: every supervised target is within reach."""
+    from pxdesign_train.data.featurizer import MAX_SC_LOCAL_RADIUS_A
+
+    aa, feat, binder = _ser_complex(37.0)
+    _displace_atom(aa, 1, "OG", (500.0, -500.0, 250.0), keep_resolved=True)
+    out = _sc_targets(aa, feat, binder)
+    gt, mask = out["sc_gt_local"].float(), out["sc_atom_mask"].bool()
+    assert mask.any()
+    assert (gt[mask].norm(dim=-1) <= MAX_SC_LOCAL_RADIUS_A).all()
+
+
+def test_missing_is_resolved_annotation_is_reported_not_silent():
+    """Falling back to "assume all resolved" must never happen quietly.
+
+    That default IS the original bug. Verified 108/108 real train+eval items do
+    carry the annotation, so this path is a net for a provider that drops it —
+    and if it ever fires we want it in the log, not inferred from a bad curve.
+    """
+    import pxdesign_train.data.featurizer as fz
+
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, "OG")})
+    aa.del_annotation("is_resolved")
+
+    before = fz._SC_GUARD_COUNTS.get("missing_is_resolved", 0)
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    fz.logger.addHandler(handler)
+    try:
+        out = _sc_targets(aa, feat, binder)
+    finally:
+        fz.logger.removeHandler(handler)
+
+    assert fz._SC_GUARD_COUNTS["missing_is_resolved"] > before, "occurrence not counted"
+    # First occurrence always logs.
+    if before == 0:
+        assert any("missing_is_resolved" in r.getMessage() for r in records), (
+            f"expected a warning naming the guard, got {[r.getMessage() for r in records]}"
+        )
+    # The zero-coordinate path still protects us in this mode.
+    assert bool(out["sc_atom_mask"][0, 1]) is False

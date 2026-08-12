@@ -82,6 +82,20 @@ class CifFileProvider:
     def __len__(self) -> int:
         return len(self.cif_paths)
 
+    def sample_id(self, idx: int) -> str:
+        """Human-readable name for item `idx` — the CIF's stem (e.g. `6y4f`).
+
+        Optional part of the `ComplexProvider` interface; `DesignSourceDataset`
+        reads it to label per-protein validation rows. Without it a CASP-style
+        evaluation would report `casp14#0`, `casp14#1`, ... which is useless for
+        a per-target table.
+        """
+        name = Path(self.cif_paths[idx]).name
+        for suffix in (".cif.gz", ".cif"):
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+        return name
+
     def __getitem__(self, idx: int):
         if self._cache_enabled and idx in self._cache:
             return self._cache[idx]

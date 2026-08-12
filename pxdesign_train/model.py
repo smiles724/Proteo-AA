@@ -1257,9 +1257,21 @@ class ProtenixDesignTrain(ProtenixDesign):
                 # One sigma per ROW of the flattened batch, so under per_sigma each
                 # backbone noise draw gets its own independent side-chain noise level
                 # rather than inheriting the backbone's.
-                sc_sigma = self.sc_noise_sampler(
-                    (h_res.shape[0],), device=h_res.device, dtype=torch.float32
-                )
+                if getattr(self, "sc_edm_eval", False):
+                    # EVAL PROTOCOL: start deterministically at sigma_max and walk
+                    # the Karras schedule down, which is how this model is actually
+                    # used. Sampling a random sigma per item -- correct for training
+                    # -- makes the validation number a draw from a distribution
+                    # rather than a measurement, and lambda(sigma) weighting makes it
+                    # incomparable to an arm trained at a fixed sigma.
+                    sc_sigma = torch.full(
+                        (h_res.shape[0],), self.sc_noise_sampler.sigma_max,
+                        device=h_res.device, dtype=torch.float32,
+                    )
+                else:
+                    sc_sigma = self.sc_noise_sampler(
+                        (h_res.shape[0],), device=h_res.device, dtype=torch.float32
+                    )
                 noisy_init = noise_sidechains(
                     noisy_init.float(), sc_sigma
                 ).to(h_res.dtype)
@@ -1558,14 +1570,31 @@ class ProtenixDesignTrain(ProtenixDesign):
                 # EDM: the wrapper supplies `t` (= c_noise) and `coord_scale` (= c_in),
                 # so the time channel finally carries the noise level instead of the
                 # constant it has been fed since Stage II began.
-                sc_out = self.sc_edm_denoiser.denoise(
-                    noisy, sc_sigma, ca_for_module,
-                    h_res, aa_logits, sc_ids, sc_slot,
+                _edm_common = dict(
                     frame_R=(fR.detach() if _fa else None),
                     frame_t=(ft.detach() if _fa else None),
                     ctx_mask=ctx_tok,
                     **sc_kwargs,
                 )
+                if getattr(self, "sc_edm_eval", False):
+                    from pxdesign_train.sidechain.edm import sidechain_reverse_loop
+
+                    sch = self.sc_noise_sampler.schedule(
+                        self.sc_edm_infer_steps,
+                        device=h_res.device, dtype=torch.float32,
+                    )
+                    _y, _aux = sidechain_reverse_loop(
+                        self.sc_edm_denoiser, noisy, sch, ca_for_module,
+                        h_res, aa_logits, sc_ids, sc_slot,
+                        atom_mask=sc_slot, return_aux=True, **_edm_common,
+                    )
+                    sc_out = (_y, *_aux)
+                else:
+                    sc_out = self.sc_edm_denoiser.denoise(
+                        noisy, sc_sigma, ca_for_module,
+                        h_res, aa_logits, sc_ids, sc_slot,
+                        **_edm_common,
+                    )
             else:
                 sc_out = self.sidechain_module(
                     h_res, aa_logits, sc_ids, sc_slot, noisy, t, ca_coords=ca_for_module,
@@ -1637,9 +1666,14 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["sc_sigma"] = sc_sigma.detach()
                 # lambda(sigma) = 1/c_out^2. Without it the high-sigma draws dominate
                 # the gradient and the model quietly optimises the easy end.
-                out["sc_loss_weight"] = edm_loss_weight(
-                    sc_sigma, self.sc_edm_sigma_data
-                )
+                #
+                # NOT applied under the eval protocol: there the whole point is a
+                # number commensurate with an arm that never had a sigma to weight
+                # by, so the reported loss must be the plain masked MSE.
+                if not getattr(self, "sc_edm_eval", False):
+                    out["sc_loss_weight"] = edm_loss_weight(
+                        sc_sigma, self.sc_edm_sigma_data
+                    )
             out["h_res_prime"] = h_res_prime        # per-sigma [B*N_sample, L, C] when per-sigma
             # Reduced h_res' for the cycle injection: the Protenix diffusion shares
             # s_trunk across noise draws (no per-sample s_trunk), so per-sigma h_res'

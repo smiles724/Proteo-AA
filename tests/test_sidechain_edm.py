@@ -220,3 +220,50 @@ def test_reverse_loop_keeps_padding_slots_zero():
     out = sidechain_reverse_loop(_ConstantDenoiser(target), target.clone(), sch,
                                  torch.zeros(1, 3, 3), atom_mask=mask)
     assert torch.count_nonzero(out[0, 0, 1:]) == 0      # ALA owns one slot
+
+
+# ------------------------------------------------- objective specification ----
+
+def test_the_denoiser_is_only_consistent_when_the_target_is_what_was_noised():
+    """Why EDM must noise the GT and not the ideal-rotamer template.
+
+    D(x; sigma) = c_skip*x + c_out*F(...) with c_skip -> 1 as sigma -> 0, so at low
+    noise the denoiser is pinned to its own input. That is correct when the input
+    is `target + sigma*eps` -- the input IS almost the answer. It is a hard error
+    floor when the input is `template + sigma*eps`, because the template sits a
+    fixed distance from the target no matter how small sigma gets.
+
+    lambda(sigma) then makes it worse rather than better: it grows without bound
+    as sigma -> 0, so the mis-specified regime is exactly the one the loss weights
+    most heavily.
+    """
+    sigma = torch.tensor([0.05, 0.1, 0.3])
+    c_skip, _, c_out, _ = edm_scalings(sigma, DEFAULT_SIGMA_DATA)
+    lam = edm_loss_weight(sigma, DEFAULT_SIGMA_DATA)
+
+    # 2.18 A is the measured template-to-target RMSD (491-protein baseline).
+    template_offset = 2.18
+    # Best case for the network: c_out * F can only shift the output by so much
+    # relative to a fixed input offset, so the residual error is at least
+    # (1 - c_skip) short of closing the gap... in the limit c_skip -> 1 the
+    # denoiser reproduces its input and the whole offset survives.
+    surviving = c_skip * template_offset
+    assert (surviving > 2.0).all(), (
+        "at low sigma the skip connection reproduces the input almost exactly, so "
+        "a template input leaves the template-to-target offset in place"
+    )
+    # And that is where the loss puts its weight.
+    assert (lam > 30).any(), "lambda should blow up in exactly that regime"
+    assert lam[0] > lam[-1], "lambda must increase as sigma falls"
+
+
+def test_model_noises_the_target_not_the_template():
+    """Pin the fix at the call site, since the bug was invisible in the numbers:
+    the run trained for 90 minutes and only looked slightly off."""
+    import inspect
+
+    from pxdesign_train.model import ProtenixDesignTrain
+
+    src = inspect.getsource(ProtenixDesignTrain)
+    assert "noisy_init = noise_sidechains(x0_local, sc_sigma)" in src
+    assert 'gt_local_t = input_feature_dict.get("sc_gt_local")' in src

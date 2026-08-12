@@ -1272,9 +1272,43 @@ class ProtenixDesignTrain(ProtenixDesign):
                     sc_sigma = self.sc_noise_sampler(
                         (h_res.shape[0],), device=h_res.device, dtype=torch.float32
                     )
-                noisy_init = noise_sidechains(
-                    noisy_init.float(), sc_sigma
-                ).to(h_res.dtype)
+                # WHAT GETS NOISED, and why it is the GT and not the template.
+                #
+                # EDM's whole parameterisation assumes x_sigma = x_0 + sigma*eps with
+                # x_0 the TARGET. Noising the template instead breaks it in the worst
+                # possible place: the template sits ~2.18 A from the target (measured),
+                # so at small sigma c_skip -> 1 forces the denoiser to output the
+                # template and be wrong by that much, while lambda(sigma) -> infinity
+                # puts almost all the loss weight exactly there. The model would be
+                # graded hardest on the regime where it is structurally forbidden to
+                # be right.
+                #
+                # This is not GT leakage: noising your own target and learning to undo
+                # it IS diffusion training. The model never sees a clean target at
+                # inference -- it starts from the template at sigma_max, where
+                # c_skip ~ 0 and the template's bias is small next to 4 A of noise.
+                #
+                # Under the eval protocol there IS no target to noise, so the template
+                # stays the starting point, which is exactly the inference behaviour.
+                if getattr(self, "sc_edm_eval", False):
+                    x0_local = noisy_init.float()
+                else:
+                    gt_local_t = input_feature_dict.get("sc_gt_local")
+                    if gt_local_t is None:
+                        raise ValueError(
+                            "sidechain.edm needs sc_gt_local to build the diffusion "
+                            "input; without it the only thing available to noise is "
+                            "the template, which mis-specifies the objective."
+                        )
+                    x0_local = gt_local_t.to(h_res.device).float()
+                    if use_per_sigma:
+                        x0_local = _tile_per_sigma(x0_local, trailing_ndim=3)
+                    else:
+                        if x0_local.dim() == 3:
+                            x0_local = x0_local.unsqueeze(0)
+                        if x0_local.shape[0] != h_res.shape[0]:
+                            x0_local = x0_local.expand(h_res.shape[0], -1, -1, -1)
+                noisy_init = noise_sidechains(x0_local, sc_sigma).to(h_res.dtype)
             # Sigma-embedding for S_phi's time input: the REAL per-sample noise
             # level (EDM c_noise = 0.25*ln sigma) when per-sigma; a constant for
             # the reduced warmup baseline (no single sigma to attach).

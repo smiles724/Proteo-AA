@@ -46,10 +46,15 @@ SURFACE = "#fcfcfb"
 
 TEMPLATE_BASELINE = 4.664   # A^2, ideal-rotamer template over the same 491
 
-# label -> (display name, hue, dashed, panel)
+# Named by what the TEMPLATE is used for, which is the substantive difference and
+# the one that predicts the curves' shape. Every arm still INITIALISES from the
+# Dunbrack modal rotamer; what varies is whether the head's output is a correction
+# added to it ("with template") or absolute local coordinates ("w/o template").
+# Calling these "local" and "global" named the head parameterisation instead, which
+# is the mechanism rather than the thing being tested.
 SERIES = [
-    ("global_head", "global, pre-fix", GLOBAL_HUE, True),
-    ("local_head", "local, pre-fix", LOCAL_HUE, True),
+    ("global_head", "w/o template, pre-fix", GLOBAL_HUE, True),
+    ("local_head", "with template, pre-fix", LOCAL_HUE, True),
     ("fixed_global", "global, fixed", GLOBAL_HUE, False),
     ("fixed_local", "local, fixed", LOCAL_HUE, False),
 ]
@@ -92,6 +97,10 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--metrics-dir", type=Path, default=Path("runs/metrics"))
     p.add_argument("--edm-label", default="edm_global")
+    p.add_argument("--include-edm", action="store_true",
+                   help="add the EDM arm in its OWN panel. Off by default: its "
+                        "training-time validation is lambda(sigma)-weighted and "
+                        "not commensurate with these curves.")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
 
@@ -99,12 +108,18 @@ def main() -> None:
     data = {k: v for k, v in data.items() if v[0]}
     if not data:
         raise SystemExit(f"no val curves found under {args.metrics_dir}")
-    edm_steps, edm_vals = read_val(args.metrics_dir, args.edm_label)
-
-    fig, (axL, axR) = plt.subplots(
-        1, 2, figsize=(15.2, 5.8), facecolor=SURFACE,
-        gridspec_kw={"width_ratios": [1.9, 1.0]},
+    edm_steps, edm_vals = (
+        read_val(args.metrics_dir, args.edm_label) if args.include_edm else ([], [])
     )
+
+    if edm_steps:
+        fig, (axL, axR) = plt.subplots(
+            1, 2, figsize=(16.4, 5.8), facecolor=SURFACE,
+            gridspec_kw={"width_ratios": [2.05, 0.95]},
+        )
+    else:
+        fig, axL = plt.subplots(1, 1, figsize=(11.4, 5.8), facecolor=SURFACE)
+        axR = None
 
     # ---------------- left: the four comparable arms ----------------
     xmax = max(max(s) for s, _ in data.values())
@@ -147,7 +162,9 @@ def main() -> None:
             color=INK_2, fontsize=8.5, va="center", ha="left",
             annotation_clip=False,
         )
-    axL.set_title("same metric, one axis", color=INK, fontsize=10.5, loc="left", pad=8)
+    if axR is not None:
+        axL.set_title("same metric, one axis", color=INK, fontsize=10.5,
+                      loc="left", pad=8)
 
     # ---------------- right: EDM, held apart ----------------
     if edm_steps:
@@ -172,26 +189,33 @@ def main() -> None:
             transform=axR.transAxes, color=MUTED, fontsize=8.5,
             ha="left", va="top", linespacing=1.6,
         )
-    else:
+    elif axR is not None:
         axR.axis("off")
 
-    fig.subplots_adjust(left=0.056, right=0.975, top=0.715, bottom=0.108, wspace=0.50)
+    if axR is not None:
+        fig.subplots_adjust(left=0.056, right=0.975, top=0.690, bottom=0.108, wspace=0.78)
+    else:
+        # The direct labels sit outside the axes, so the right margin has to
+        # leave room for them; tight_layout cannot see them.
+        fig.subplots_adjust(left=0.080, right=0.735, top=0.690, bottom=0.108)
     fig.text(0.010, 0.965,
-             "Frame fixes moved the needle far more than the local-vs-global choice",
+             "The template buys a head start, not a better ceiling",
              color=INK, fontsize=13.5, ha="left", va="top")
     fig.text(0.010, 0.900,
              "Side-chain warm-up on 491 recent-PDB monomers · dashed = before the "
-             "single-frame refactor, solid = after · physical loss off in every arm",
-             color=INK_2, fontsize=9.5, ha="left", va="top")
+             "single-frame refactor, solid = after · physical loss off in every arm\n"
+             "Every arm initialises from the Dunbrack modal rotamer; the split is "
+             "whether the head's output is added to it",
+             color=INK_2, fontsize=9.5, ha="left", va="top", linespacing=1.5)
 
     handles = [
-        plt.Line2D([], [], color=GLOBAL_HUE, linewidth=2.0, label="global head"),
-        plt.Line2D([], [], color=LOCAL_HUE, linewidth=2.0, label="local head (frame-aware + template residual)"),
+        plt.Line2D([], [], color=GLOBAL_HUE, linewidth=2.0, label="global head — no template residual"),
+        plt.Line2D([], [], color=LOCAL_HUE, linewidth=2.0, label="local head — template residual"),
         plt.Line2D([], [], color=MUTED, linewidth=2.0, linestyle=(0, (4, 3)), label="pre-fix"),
         plt.Line2D([], [], color=MUTED, linewidth=2.0, label="fixed"),
     ]
-    leg = fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.007, 0.828),
-                     frameon=False, fontsize=9, ncol=4, handlelength=2.4,
+    leg = fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.007, 0.800),
+                     frameon=False, fontsize=9, ncol=2, handlelength=2.4,
                      columnspacing=2.0, borderpad=0)
     for t in leg.get_texts():
         t.set_color(INK_2)

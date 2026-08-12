@@ -59,6 +59,85 @@ def test_cross_residue_attention_runs():
     assert h_res.grad is not None and torch.count_nonzero(h_res.grad) > 0
 
 
+def test_centred_input_makes_the_module_translation_equivariant():
+    """The single-frame contract's whole justification, stated as a property.
+
+    With `centre_coord_input` on, nothing inside the module reads an ABSOLUTE
+    position: the embedding sees coords - CA, and every geometric term is a
+    distance. So translating the entire input (atoms, CAs, frame origins) by a
+    constant must translate the output by exactly that constant -- no drift, no
+    change in the attention pattern. If some tensor were still residue-local while
+    another was global, this would not hold.
+    """
+    torch.manual_seed(0)
+    _, atom_mask, atom_ids, h_res, logits, noisy, t = _toy_batch()
+    h_res = h_res.detach()
+    ca = torch.randn(1, 3, 3)
+    frame_R = torch.linalg.qr(torch.randn(1, 3, 3, 3))[0]
+    mod = SideChainModule(c_res=C_RES, c_atom=32, c_time=16, n_blocks=2,
+                          n_heads=4, centre_coord_input=True).eval()
+    shift = torch.tensor([137.0, -42.0, 8.5])
+
+    with torch.no_grad():
+        a, _ = mod.forward(h_res, logits, atom_ids, atom_mask, noisy, t,
+                           ca_coords=ca, frame_R=frame_R, frame_t=ca)
+        b, _ = mod.forward(h_res, logits, atom_ids, atom_mask, noisy + shift, t,
+                           ca_coords=ca + shift, frame_R=frame_R, frame_t=ca + shift)
+    expected = (a + shift) * atom_mask[..., None].to(a.dtype)
+    assert torch.allclose(b, expected, atol=1e-3), (
+        "centred input is not translation-equivariant — some tensor is still being "
+        "read as an absolute position"
+    )
+
+
+def test_uncentred_input_is_not_translation_equivariant():
+    """The control for the test above, and the reason `centre_coord_input` exists:
+    fed raw global coordinates, `w_xyz` encodes where the residue is in the
+    assembly, so moving the assembly changes the prediction."""
+    torch.manual_seed(0)
+    _, atom_mask, atom_ids, h_res, logits, noisy, t = _toy_batch()
+    h_res = h_res.detach()
+    ca = torch.randn(1, 3, 3)
+    frame_R = torch.linalg.qr(torch.randn(1, 3, 3, 3))[0]
+    mod = SideChainModule(c_res=C_RES, c_atom=32, c_time=16, n_blocks=2,
+                          n_heads=4, centre_coord_input=False).eval()
+    shift = torch.tensor([137.0, -42.0, 8.5])
+
+    with torch.no_grad():
+        a, _ = mod.forward(h_res, logits, atom_ids, atom_mask, noisy, t,
+                           ca_coords=ca, frame_R=frame_R, frame_t=ca)
+        b, _ = mod.forward(h_res, logits, atom_ids, atom_mask, noisy + shift, t,
+                           ca_coords=ca + shift, frame_R=frame_R, frame_t=ca + shift)
+    assert not torch.allclose(b, (a + shift) * atom_mask[..., None].to(a.dtype), atol=1e-3)
+
+
+def test_cross_residue_bias_reads_the_same_tensor_the_atoms_do():
+    """One coordinate tensor, one frame: moving the residues apart has to change
+    the cross-residue attention, because the distance bias is computed off exactly
+    the coordinates that were handed in."""
+    torch.manual_seed(0)
+    _, atom_mask, atom_ids, h_res, logits, noisy, t = _toy_batch()
+    h_res = h_res.detach()
+    ca = torch.zeros(1, 3, 3)
+    mod = SideChainModule(c_res=C_RES, c_atom=32, c_time=16, n_blocks=2,
+                          n_heads=4, centre_coord_input=True).eval()
+
+    spread = torch.arange(3, dtype=torch.float32).view(1, 3, 1) * 60.0
+    ca_far = ca + spread
+    with torch.no_grad():
+        y_near, _ = mod.forward(h_res, logits, atom_ids, atom_mask, noisy, t,
+                                ca_coords=ca)
+        y_far, _ = mod.forward(h_res, logits, atom_ids, atom_mask,
+                               noisy + spread[..., None, :], t, ca_coords=ca_far)
+    # Subtract the trivial translation each residue underwent; what is left is the
+    # change in the attention pattern.
+    delta = (y_far - spread[..., None, :]) - y_near
+    assert delta.abs().max() > 1e-5, (
+        "pulling the residues 60 A apart changed nothing — the distance bias is "
+        "not reading the coordinates"
+    )
+
+
 def test_multiple_cross_residue_blocks_run():
     _, atom_mask, atom_ids, h_res, logits, noisy, t = _toy_batch()
     ca = torch.randn(1, 3, 3)
@@ -119,9 +198,11 @@ def test_template_residual_starts_at_noisy_template_in_active_frame():
         frame_R=frame_R,
         frame_t=frame_t,
     )
-    expected = to_global(noisy_local, frame_R, frame_t)
-    expected = expected * atom_mask[..., None].to(expected.dtype)
-    assert torch.allclose(y0, expected, atol=1e-6)
+    # Input is GLOBAL under the single-frame contract; the module maps it into the
+    # frame to form the residual base and the zero-init head maps it straight back,
+    # so a template-residual module starts as the identity on its own input.
+    expected = noisy_local * atom_mask[..., None].to(noisy_local.dtype)
+    assert torch.allclose(y0, expected, atol=1e-4)
     assert torch.count_nonzero(mod.out.weight) == 0
     assert torch.count_nonzero(mod.out.bias) == 0
 

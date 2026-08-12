@@ -27,7 +27,7 @@ import math
 import torch
 import torch.nn as nn
 
-from pxdesign_train.sidechain.frames import to_global
+from pxdesign_train.sidechain.frames import to_global, to_local
 import torch.nn.functional as F
 
 from pxdesign_train.heads import sinusoidal_time_embedding
@@ -179,6 +179,7 @@ class SideChainModule(nn.Module):
         c_q: int = 128,
         cross_neighbors: int = 16,
         template_residual: bool = False,
+        centre_coord_input: bool = False,
     ) -> None:
         super().__init__()
         if c_atom % n_heads != 0:
@@ -191,6 +192,19 @@ class SideChainModule(nn.Module):
         self.c_time = c_time
         self.trunk_grad_scale = float(trunk_grad_scale)
         self.template_residual = bool(template_residual)
+        # ONE coordinate convention: every coordinate that enters this module is in
+        # the GLOBAL frame. `centre_coord_input` only decides whether the per-atom
+        # embedding sees them CA-centred; it never rotates anything, so no per-residue
+        # frame can leak into a tensor that is later compared across residues.
+        #
+        # Why centring at all: `w_xyz` is a single Linear(3, c_atom) over the whole
+        # atom axis, and a raw global coordinate carries the residue's absolute
+        # position -- tens to hundreds of Angstrom -- on top of ~4 A of side-chain
+        # geometry. Without centring the layer mostly encodes "where in the assembly
+        # is this residue", which is not what the side-chain shape depends on.
+        # Subtracting CA is translation-free and costs nothing; it is the part of the
+        # old residue-local input that was actually doing the work.
+        self.centre_coord_input = bool(centre_coord_input)
 
         self.atom_embed = nn.Embedding(ATOM_VOCAB_SIZE, c_atom, padding_idx=0)
         self.w_res = nn.Linear(c_res, c_atom)
@@ -233,19 +247,19 @@ class SideChainModule(nn.Module):
         restype_logits: torch.Tensor, # [B, L, n_type]
         atom_name_ids: torch.Tensor,  # [B, L, A] long
         atom_mask: torch.Tensor,      # [B, L, A] bool
-        noisy_local: torch.Tensor,    # [B, L, A, 3] global coords in current path
+        noisy_coords: torch.Tensor,   # [B, L, A, 3] side-chain atoms, GLOBAL frame
         t: torch.Tensor,              # [B] or scalar diffusion time
-        ca_coords: Optional[torch.Tensor] = None,  # [B, L, 3] residue CA (frame origin)
+        ca_coords: Optional[torch.Tensor] = None,  # [B, L, 3] residue CA, GLOBAL frame
         frame_R: Optional[torch.Tensor] = None,    # [B, L, 3, 3] local->global rotation
         frame_t: Optional[torch.Tensor] = None,    # [B, L, 3] local->global translation
-        bb_local: Optional[torch.Tensor] = None,   # [B, L, 4, 3] N,CA,C,O in the LOCAL frame
+        bb_coords: Optional[torch.Tensor] = None,  # [B, L, 4, 3] N,CA,C,O, GLOBAL frame
         res_mask: Optional[torch.Tensor] = None,   # [B, L] bool — residue exists
         ctx_mask: Optional[torch.Tensor] = None,   # [B, L] bool — context (receptor/motif) token
         bb_q: Optional[torch.Tensor] = None,       # [B, L, 4, c_q] backbone q from Backbone Module
     ):
         """One-step side-chain denoise.
 
-        INTERNAL 14-ATOM AXIS. When ``bb_local`` is given, S_phi builds the ATOM14
+        INTERNAL 14-ATOM AXIS. When ``bb_coords`` is given, S_phi builds the ATOM14
         layout internally — slots 0..3 are the residue's backbone atoms (N, CA, C, O)
         and slots 4..13 are its ``MAX_SC=10`` side-chain slots — and attends over all
         14. Backbone slots are pure CONTEXT: their coordinates are KNOWN (they come
@@ -256,10 +270,10 @@ class SideChainModule(nn.Module):
         Backbone Module can be given an atom-level (q-level) side-chain signal.
 
         The EXTERNAL contract is unchanged: ``atom_name_ids`` / ``atom_mask`` /
-        ``noisy_local`` stay 10-slot, and the coordinate output stays [B, L, 10, 3].
+        ``noisy_coords`` stay 10-slot, and the coordinate output stays [B, L, 10, 3].
 
         Returns:
-            ``(x0_global, atom_feats)`` when ``bb_local is None`` (bit-identical to
+            ``(x0_global, atom_feats)`` when ``bb_coords is None`` (bit-identical to
             the pre-14-slot module), otherwise ``(x0_global, atom_feats, bb_feats)``
             with ``bb_feats`` [B, L, 4, c_atom]. ``atom_feats`` is ALWAYS the 10
             side-chain slots only, so HResFeedback / ATokenFusion pooling against
@@ -268,10 +282,16 @@ class SideChainModule(nn.Module):
         B, L, A_sc = atom_name_ids.shape
         h_res = self._scale_grad(h_res)
 
-        # --- build the atom axis: 4 backbone context slots + the 10 side-chain slots ---
-        if bb_local is None:
+        # ONE coordinate tensor, one frame. `coords` is global for every slot -- the
+        # four backbone context atoms and the ten side-chain atoms alike -- because
+        # `w_xyz` is a single Linear over that axis and the cross-residue distance
+        # bias is compared against `ca_coords`, which is global. Mixing frames on
+        # this axis (backbone rows residue-local, side-chain rows global) makes the
+        # embedding read two coordinate systems out of one weight matrix and makes
+        # every cross-residue distance meaningless; both were live bugs.
+        if bb_coords is None:
             n_bb = 0
-            ids, mask, coords = atom_name_ids, atom_mask, noisy_local
+            ids, mask, coords = atom_name_ids, atom_mask, noisy_coords
         else:
             n_bb = N_BB
             bb_ids = BACKBONE_ATOM_NAME_IDS.to(atom_name_ids.device).view(1, 1, n_bb)
@@ -284,9 +304,16 @@ class SideChainModule(nn.Module):
             ids = torch.cat([bb_ids, atom_name_ids], dim=2)              # [B, L, 14]
             mask = torch.cat([bb_mask, atom_mask], dim=2)                # [B, L, 14]
             coords = torch.cat(
-                [bb_local.to(noisy_local.dtype), noisy_local], dim=2     # [B, L, 14, 3]
+                [bb_coords.to(noisy_coords.dtype), noisy_coords], dim=2  # [B, L, 14, 3]
             )
         A = ids.shape[2]
+        # The embedding may see the SAME coordinates recentred on the residue's CA.
+        # A pure translation, applied per residue, so it is only ever used here --
+        # never for anything compared across residues.
+        if self.centre_coord_input and ca_coords is not None:
+            embed_coords = coords - ca_coords[:, :, None, :].to(coords.dtype)
+        else:
+            embed_coords = coords
 
         te = sinusoidal_time_embedding(torch.as_tensor(t, device=h_res.device).float(), self.c_time)
         te = self.w_t(te)                                  # [B, c_atom]
@@ -296,7 +323,7 @@ class SideChainModule(nn.Module):
         res_feat = h_proj[:, :, None, :]                   # [B, L, 1, c_atom]
         type_feat = self.w_aa(torch.softmax(restype_logits, dim=-1))[:, :, None, :]
         atom_feat = self.atom_embed(ids)                   # [B, L, A, c_atom]
-        xyz_feat = self.w_xyz(coords)                      # [B, L, A, c_atom]
+        xyz_feat = self.w_xyz(embed_coords)                # [B, L, A, c_atom]
         u = atom_feat + res_feat + type_feat + xyz_feat + te[:, None, None, :]
 
         if self.q_bs and self.q_bs_fusion is not None and bb_q is not None and n_bb > 0:
@@ -361,6 +388,8 @@ class SideChainModule(nn.Module):
             virt_xyz = ca_coords.unsqueeze(2).to(coords.dtype)     # [B,L,1,3]
             is_virtual = keys_mask & ~mask.bool().any(dim=-1)      # context only
             feats_ext = torch.cat([atom_feats, virt_feat.to(atom_feats.dtype)], dim=2)
+            # GLOBAL frame here, not `coords` -- `virt_xyz` is `ca_coords`, which is
+            # global, and the cross-residue distances have to be commensurate with it.
             xyz_ext = torch.cat([coords.to(atom_feats.dtype), virt_xyz.to(atom_feats.dtype)], dim=2)
             mask_ext = torch.cat([mask.bool(), is_virtual.unsqueeze(-1)], dim=2)
             nbr_idx = self.cross_res_blocks[0].residue_neighbours(
@@ -399,9 +428,12 @@ class SideChainModule(nn.Module):
                     "template_residual requires a frame-aware head so the residual "
                     "base and learned correction are both residue-local"
                 )
-            # Under the optimized warm-up path noisy_local is the Dunbrack local
-            # template plus small sigma_T noise. S_phi learns only its correction.
-            y0 = noisy_local + y0
+            # `y0` is a residue-LOCAL offset (the frame maps it out below), so the
+            # residual base has to be local too. The input arrives global under the
+            # single-frame contract, so map it in here rather than asking the caller
+            # for a second tensor -- that second tensor is exactly what used to drift
+            # out of sync with this one.
+            y0 = to_local(noisy_coords.float(), frame_R.float(), frame_t.float()).to(y0.dtype) + y0
         if frame_R is not None and frame_t is not None:
             x0_global = to_global(y0, frame_R, frame_t)
         else:
@@ -412,6 +444,6 @@ class SideChainModule(nn.Module):
         if bb_feats is None:
             # Legacy arity: existing callers (model.py, feedback, a_direct tests)
             # unpack exactly two values. The 3rd element appears only when the
-            # caller opted into the 14-slot axis by passing bb_local.
+            # caller opted into the 14-slot axis by passing bb_coords.
             return x0_global, atom_feats
         return x0_global, atom_feats, bb_feats

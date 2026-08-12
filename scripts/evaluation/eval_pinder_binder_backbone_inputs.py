@@ -299,7 +299,7 @@ def _build_configs(args: argparse.Namespace, device: torch.device):
         sc_trunk_grad_scale=1.0,
         sc_ablation_arm="default",
         sc_frame_aware_head=None,
-        sc_local_coord_input=None,
+        sc_centre_coord_input=None,
         sc_template_residual=None,
         training_stage="backbone_only",
     )

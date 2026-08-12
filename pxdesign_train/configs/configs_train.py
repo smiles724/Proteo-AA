@@ -118,6 +118,9 @@ training_configs["loss"] = {
     # coordinates and this weights the predicted-frame-aligned global MSE.
     "weight_sc_local": 1.0,
     "weight_sc_phys": 0.1,
+    # Weight of the general steric term (sidechain.pack_loss gates whether it is
+    # computed at all). Both must be non-zero for packing to be supervised.
+    "weight_sc_pack": 1.0,
     # Legacy local-output aux weight. The global-output path uses the
     # predicted-frame pseudo-target as the primary coordinate term above.
     "weight_sc_global": 0.5,
@@ -318,11 +321,11 @@ training_configs["sidechain"] = {
     "frame_aware_head": False,
     # Ablation candidate, default OFF (feed S_phi's noisy coords as raw global). ON: feed them
     # in the residue-local frame (translation-free). docs/sidechain_config_notes.md.
-    "local_coord_input": False,
+    "centre_coord_input": False,
     # Predict a correction to the template-initialized LOCAL coordinates instead
     # of regressing the complete side chain from scratch. The output projection is
     # zero-initialized, so a new S_phi starts as the template/noisy-input baseline.
-    # Requires frame_aware_head=True and local_coord_input=True.
+    # Requires frame_aware_head=True.
     "template_residual": False,
     # Template perturbation scale (Angstrom, per coordinate). Keep it small
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
@@ -366,6 +369,31 @@ training_configs["sidechain"] = {
     # Before 2026-07-22 the code applied clash+contact to EVERY residue, including
     # correctly-typed ones; that contradicted the spec and is fixed.
     "mismatch_loss": "clash",
+    # GENERAL packing supervision, weight of the steric term over EVERY supervised
+    # side-chain atom. Distinct from `mismatch_loss`/`weight_sc_phys`, which is
+    # 0722's L_compat and is scoped to type-MISMATCHED residues -- empty under the
+    # teacher forcing Stage II and III use, so those stages currently optimise no
+    # steric term at all. The coordinate loss cannot supply one: it is a per-residue
+    # masked MSE in a local frame, so two side chains can each score perfectly and
+    # still occupy the same space.
+    #
+    # DEFAULT 0.0 (off). Turning it on changes the objective, so it must not appear
+    # underneath a running comparison; set it explicitly for the arm that wants it.
+    # S_phi is told the residue identity THREE times over: `restype` reaches it
+    # through h_res (a_token), `w_aa` reads the type distribution directly, and
+    # `sc_atom_name_ids` names the atoms -- and an atom-name multiset determines the
+    # residue type outright (only ARG has NE, only MET has SD). The third channel is
+    # always on and exact, so the first two may well be dead weight; and at Stage III
+    # the first one disappears (the binder is masked to xpb) while the second flips
+    # from a hard one-hot to a soft predicted distribution, both at once.
+    #
+    # This switch feeds `w_aa` a UNIFORM distribution instead of the type logits,
+    # holding every parameter and shape fixed. If sc_local barely moves, the channel
+    # was carrying nothing and the Stage II->III flip costs nothing either. Default
+    # True = today's behaviour.
+    "type_logits_input": True,
+    "pack_loss": 0.0,
+    "pack_arm": "clash",
     # Per-sigma alignment: feed S_phi a per-sigma h_res / aa_logits / sigma
     # (flattened to [B*N_sample, L, C]) instead of a mean/low-sigma-reduced h_res.
     # This is the intended joint-training main line. Stage II-A warmup may set

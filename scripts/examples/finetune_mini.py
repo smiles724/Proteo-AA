@@ -108,7 +108,7 @@ def build(args, device):
     if getattr(args, "no_frame_aware_head", False):
         configs.sidechain.frame_aware_head = False
     if getattr(args, "global_coord_input", False):
-        configs.sidechain.local_coord_input = False
+        configs.sidechain.centre_coord_input = False
     if getattr(args, "no_hres_inject", False):
         configs.sidechain.hres_inject = False
     if getattr(args, "a_direct", False):

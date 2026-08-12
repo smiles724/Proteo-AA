@@ -337,8 +337,9 @@ def test_layout_and_additive_switches_are_guarded_differently():
     from pxdesign_train.runner.trainer import PXDesignTrainer
 
     def _checker(**current):
-        base = dict(bb_context=True, local_coord_input=False,
-                    frame_aware_head=False, a_bs_concat=True, q_bs=True)
+        base = dict(bb_context=True, centre_coord_input=False,
+                    frame_aware_head=False, template_residual=False,
+                    a_bs_concat=True, q_bs=True)
         base.update(current)
         stub = types.SimpleNamespace(
             configs=types.SimpleNamespace(
@@ -352,8 +353,8 @@ def test_layout_and_additive_switches_are_guarded_differently():
         stub._sidechain_arch = PXDesignTrainer._sidechain_arch.__get__(stub, type(stub))
         return PXDesignTrainer._check_sidechain_arch.__get__(stub, type(stub))
 
-    saved = dict(bb_context=True, local_coord_input=False, frame_aware_head=False,
-                 a_bs_concat=True, q_bs=False)          # a Stage II checkpoint
+    saved = dict(bb_context=True, centre_coord_input=False, frame_aware_head=False,
+                 template_residual=False, a_bs_concat=True, q_bs=False)          # a Stage II checkpoint
 
     # Stage II -> Stage III turns q_bs on. This is the intended hand-off.
     _checker(q_bs=True)({"sidechain_arch": saved, "model": {}})

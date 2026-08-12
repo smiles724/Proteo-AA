@@ -522,6 +522,23 @@ class DesignFeaturizer:
             res_atoms[(chain_id[idx], res_id[idx])][str(atom_name[idx])] = idx
 
         sc_gt_local = np.zeros((n_token, MAX_SC, 3), dtype=np.float32)
+        # TWO masks, because one tensor was answering three different questions.
+        #
+        #   sc_slot_mask -- CHEMISTRY: does this residue type have an atom in this
+        #       slot? Purely type-derived, identical for every copy of a residue,
+        #       and available at inference. This is what may gate attention keys,
+        #       the coordinate output, the h_res' pooling and the template init.
+        #   sc_atom_mask -- SUPERVISION: chemistry AND the structure actually
+        #       resolved it AND its geometry is plausible. Only the losses may use
+        #       this; it depends on crystallographic completeness, which does not
+        #       exist at inference.
+        #
+        # Conflating them is why the unresolved-atom fix had a side effect: gating
+        # supervision on `is_resolved` also removed ~9.8% of atoms from S_phi's
+        # attention key set and zeroed their output, so the model trained on a key
+        # set that no inference input can reproduce -- and the atoms it dropped are
+        # exactly the flexible surface side chains packing cares about.
+        sc_slot_mask = np.zeros((n_token, MAX_SC), dtype=bool)
         sc_mask = np.zeros((n_token, MAX_SC), dtype=bool)
         sc_ids = np.zeros((n_token, MAX_SC), dtype=np.int64)
         sc_frame_R = np.tile(np.eye(3, dtype=np.float32), (n_token, 1, 1))
@@ -566,6 +583,7 @@ class DesignFeaturizer:
                 # this residue type whether or not the structure resolved it. Only
                 # the supervision mask is gated on having a real coordinate.
                 sc_ids[ti, j] = ATOM_NAME_TO_ID[nm]
+                sc_slot_mask[ti, j] = True     # chemistry only — never resolution
                 if nm in atoms and resolved[atoms[nm]]:
                     g = torch.from_numpy(coord[atoms[nm]])[None, None]  # [1,1,3]
                     sc_gt_local[ti, j] = to_local(g, R, t)[0, 0].numpy()
@@ -597,6 +615,7 @@ class DesignFeaturizer:
         return {
             "sc_gt_local": torch.from_numpy(sc_gt_local),
             "sc_atom_mask": torch.from_numpy(sc_mask),
+            "sc_slot_mask": torch.from_numpy(sc_slot_mask),
             "sc_atom_name_ids": torch.from_numpy(sc_ids),
             "sc_frame_R": torch.from_numpy(sc_frame_R),
             "sc_frame_t": torch.from_numpy(sc_frame_t),

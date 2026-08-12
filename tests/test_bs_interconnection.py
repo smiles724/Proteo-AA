@@ -83,14 +83,14 @@ def test_q_bs_backbone_q_reaches_slots_and_off_is_baseline():
     on = SideChainModule(c_res=8, c_atom=16, n_type=20, q_bs=True, c_q=8).eval()
     torch.nn.init.normal_(on.q_bs_fusion.mlp[-1].weight, std=0.1)
     with torch.no_grad():
-        y_near, *_ = on(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_local=bb_local, bb_q=bb_q_near)
-        y_far, *_ = on(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_local=bb_local, bb_q=bb_q_far)
+        y_near, *_ = on(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_coords=bb_local, bb_q=bb_q_near)
+        y_far, *_ = on(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_coords=bb_local, bb_q=bb_q_far)
     assert not torch.allclose(y_near, y_far, atol=1e-6), "backbone q must reach the side chain"
 
     off = SideChainModule(c_res=8, c_atom=16, n_type=20, q_bs=False, c_q=8).eval()
     with torch.no_grad():
-        y_a, *_ = off(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_local=bb_local, bb_q=bb_q_near)
-        y_b, *_ = off(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_local=bb_local, bb_q=bb_q_far)
+        y_a, *_ = off(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_coords=bb_local, bb_q=bb_q_near)
+        y_b, *_ = off(h, l, ids, m, noisy, torch.ones(1), ca_coords=ca, bb_coords=bb_local, bb_q=bb_q_far)
     assert torch.allclose(y_a, y_b, atol=1e-6), "q_bs off must ignore bb_q entirely"
 
 

@@ -202,14 +202,28 @@ class ProtenixDesignTrain(ProtenixDesign):
             # is rotation-invariant and encodes nothing. template_init=False restores it.
             self.sc_template_init = bool(getattr(sc_cfg, "template_init", True)) if sc_cfg is not None else True
             self.sc_frame_aware_head = bool(getattr(sc_cfg, "frame_aware_head", False)) if sc_cfg is not None else False
-            self.sc_local_coord_input = bool(getattr(sc_cfg, "local_coord_input", False)) if sc_cfg is not None else False
-            self.sc_template_residual = bool(getattr(sc_cfg, "template_residual", False)) if sc_cfg is not None else False
-            if self.sc_template_residual and not (
-                self.sc_frame_aware_head and self.sc_local_coord_input
-            ):
+            # Renamed from `local_coord_input`: the coordinate CONTRACT is now
+            # single-frame (S_phi is handed global coordinates, always), and this
+            # switch only decides whether the per-atom embedding sees them recentred
+            # on the residue CA. Rotation into a residue frame no longer happens on
+            # any input tensor, which is what made the old switch able to desync the
+            # embedding from the cross-residue geometry.
+            if sc_cfg is not None and getattr(sc_cfg, "local_coord_input", None) is not None:
                 raise ValueError(
-                    "sidechain.template_residual requires frame_aware_head=True "
-                    "and local_coord_input=True"
+                    "sidechain.local_coord_input has been replaced by "
+                    "sidechain.centre_coord_input. The old switch rotated S_phi's "
+                    "input into per-residue frames, which silently broke the "
+                    "cross-residue distance bias; the new one only subtracts CA. "
+                    "They are different parameterizations -- a checkpoint trained "
+                    "under one cannot be warm-started under the other."
+                )
+            self.sc_centre_coord_input = bool(getattr(sc_cfg, "centre_coord_input", False)) if sc_cfg is not None else False
+            self.sc_template_residual = bool(getattr(sc_cfg, "template_residual", False)) if sc_cfg is not None else False
+            if self.sc_template_residual and not self.sc_frame_aware_head:
+                raise ValueError(
+                    "sidechain.template_residual requires frame_aware_head=True: the "
+                    "residual base is a residue-local template, so the head has to "
+                    "emit local offsets for the two to be commensurate"
                 )
             self.sc_init_sigma_T = float(getattr(sc_cfg, "init_sigma_T", DEFAULT_SIGMA_T)) if sc_cfg is not None else DEFAULT_SIGMA_T
             if self.sc_template_init and not templates_available():
@@ -317,6 +331,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
                 cross_neighbors=self.sc_cross_neighbors,
                 template_residual=self.sc_template_residual,
+                centre_coord_input=self.sc_centre_coord_input,
             )
             self.sidechain_feedback = HResFeedback(c_atom=c_atom, c_res=self.sc_c_res)
 
@@ -409,6 +424,9 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_hres_inject = bool(getattr(sc_cfg, "hres_inject", True)) if sc_cfg is not None else True
             # Context (receptor/motif/ligand) awareness — see configs_train.py.
             self.sc_context_aware = bool(getattr(sc_cfg, "context_aware", True)) if sc_cfg is not None else True
+            self.sc_pack_weight = float(getattr(sc_cfg, "pack_loss", 0.0)) if sc_cfg is not None else 0.0
+            self.sc_pack_arm = str(getattr(sc_cfg, "pack_arm", "clash")) if sc_cfg is not None else "clash"
+            self.sc_type_logits_input = bool(getattr(sc_cfg, "type_logits_input", True)) if sc_cfg is not None else True
             self.sc_context_radius = float(getattr(sc_cfg, "context_radius", 10.0)) if sc_cfg is not None else 10.0
             self.sc_context_max_atoms = int(getattr(sc_cfg, "context_max_atoms", 4096)) if sc_cfg is not None else 4096
             if self.sc_q_direct and not self.sc_bb_context:
@@ -1028,7 +1046,16 @@ class ProtenixDesignTrain(ProtenixDesign):
                     h_res = h_res.unsqueeze(0)
                     aa_logits = aa_logits.unsqueeze(0)
             sc_ids = input_feature_dict["sc_atom_name_ids"]
+            # SUPERVISION mask (chemistry AND resolved AND plausible) -- losses only.
             sc_mask = input_feature_dict["sc_atom_mask"]
+            # CHEMISTRY mask (does this residue type own this slot) -- everything the
+            # FORWARD does: attention keys, output zeroing, pooling, template init.
+            # A model whose key set depends on crystallographic completeness cannot be
+            # reproduced at inference, where no `is_resolved` exists. Falls back to the
+            # supervision mask for feature dicts built before the split.
+            sc_slot = input_feature_dict.get("sc_slot_mask")
+            if sc_slot is None:
+                sc_slot = sc_mask
             # Stage III predicted-mask branch: instantiate the side-chain atom set
             # from the PREDICTED residue type (argmax of the reduced logits) instead
             # of the GT type. This is what makes post_aa safe to supervise (M2): the
@@ -1057,7 +1084,10 @@ class ProtenixDesignTrain(ProtenixDesign):
                     ptype = ptype[0]
                 pids, pmask = instantiate_from_type_indices(ptype)
                 sc_ids = pids.to(sc_ids.device)
+                # Predicted-type instantiation carries no resolution information, so
+                # chemistry and supervision coincide on this branch.
                 sc_mask = pmask.to(sc_mask.device)
+                sc_slot = sc_mask
                 sc_type_idx = ptype                              # [L] predicted type
             else:
                 # Teacher forcing: sc_ids / sc_mask come from the GT residue type,
@@ -1072,6 +1102,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             if use_per_sigma:
                 sc_ids = _tile_per_sigma(sc_ids, trailing_ndim=2)
                 sc_mask = _tile_per_sigma(sc_mask, trailing_ndim=2)
+                sc_slot = _tile_per_sigma(sc_slot, trailing_ndim=2)
                 if sc_type_idx is not None:
                     # trailing_ndim=1: the type is per TOKEN ([B, L] / [L]), so the
                     # same row-major tiling as the [B, L, A] mask above lines type
@@ -1081,10 +1112,12 @@ class ProtenixDesignTrain(ProtenixDesign):
                 if sc_ids.dim() == 2:                   # add batch dim
                     sc_ids = sc_ids.unsqueeze(0)
                     sc_mask = sc_mask.unsqueeze(0)
+                    sc_slot = sc_slot.unsqueeze(0)
                 B = h_res.shape[0]
                 if sc_ids.shape[0] != B:
                     sc_ids = sc_ids.expand(B, -1, -1)
                     sc_mask = sc_mask.expand(B, -1, -1)
+                    sc_slot = sc_slot.expand(B, -1, -1)
                 if sc_type_idx is not None:
                     if sc_type_idx.dim() == 1:          # [L] -> [1, L]
                         sc_type_idx = sc_type_idx.unsqueeze(0)
@@ -1092,8 +1125,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                         sc_type_idx = sc_type_idx.expand(B, -1)
             sc_ids = sc_ids.to(h_res.device).long()
             sc_mask = sc_mask.to(h_res.device).bool()
+            sc_slot = sc_slot.to(h_res.device).bool()
             if sc_type_idx is not None:
                 sc_type_idx = sc_type_idx.to(h_res.device).long()
+            if not getattr(self, "sc_type_logits_input", True):
+                # Ablation: hold shapes and parameters fixed, remove the information.
+                # A uniform distribution makes w_aa's contribution the mean of its 20
+                # columns -- a constant bias -- so any change in the loss is exactly
+                # what this channel was carrying.
+                aa_logits = torch.zeros_like(aa_logits)
             if getattr(self, "sc_force_gt_type_logits", False) and sc_type_idx is not None:
                 n_type = aa_logits.shape[-1]
                 valid_type = (sc_type_idx >= 0) & (sc_type_idx < n_type)
@@ -1113,7 +1153,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             # item 0 broadcast), and each sigma row still draws its own eps.
             use_template_init = getattr(self, "sc_template_init", False) and sc_type_idx is not None
             if use_template_init:
-                mask_cpu = sc_mask.detach().cpu()
+                mask_cpu = sc_slot.detach().cpu()
                 tix = sc_type_idx.detach().cpu().long()
                 assert tix.shape == mask_cpu.shape[:-1], (
                     f"template init: type {tuple(tix.shape)} not aligned with atom "
@@ -1170,7 +1210,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     )
                     self._warned_no_type_src = True
                 noisy_init = gaussian_init_local(
-                    sc_mask.detach().cpu(), sigma=self.sc_init_sigma
+                    sc_slot.detach().cpu(), sigma=self.sc_init_sigma
                 )
             noisy_init = noisy_init.to(h_res.device).to(h_res.dtype)
             # Sigma-embedding for S_phi's time input: the REAL per-sample noise
@@ -1256,20 +1296,22 @@ class ProtenixDesignTrain(ProtenixDesign):
                     if ca.shape[0] != B:
                         ca = ca.expand(B, -1, -1)
 
-            # S_phi consumes global coordinates in the same active frame used for
-            # supervision. Detaching the frame here keeps the side-chain coord
-            # objective from nudging the predicted backbone frame through the
-            # initialization path.
-            if getattr(self, "sc_local_coord_input", False):
-                # S_phi's OWN noisy side-chain atoms are fed in the residue-LOCAL frame.
-                # Feeding them as raw global coords adds t_CA (the residue's absolute
-                # position, tens of Angstrom, different per residue) on top of a ~4 A
-                # geometry, and the linear coord embedding W_xyz cannot separate them:
-                # the translation swamps the side-chain signal. Measured: 2.22 -> see
-                # arm F. Global CONTEXT (receptor, neighbours) belongs in a separate
-                # channel, not in this residue's own coordinate embedding.
-                noisy = noisy_init.to(h_res.dtype)
-            elif fR is not None and ft is not None:
+            # SINGLE FRAME CONTRACT: everything handed to S_phi is global. The
+            # template init is generated residue-locally (that is what a rotamer
+            # library gives you), so it is mapped out here, once, and nothing
+            # downstream has to know it was ever local.
+            #
+            # The scale problem this used to solve -- a raw global coordinate carries
+            # t_CA, tens to hundreds of Angstrom, on top of ~4 A of side-chain
+            # geometry, and W_xyz cannot separate them -- is now handled inside the
+            # module by `centre_coord_input`, which subtracts CA for the embedding
+            # only. That is a pure translation, so it cannot desynchronise from the
+            # coordinates used for cross-residue distances the way a residue-local
+            # input tensor did.
+            #
+            # Detaching the frame keeps the side-chain coord objective from nudging
+            # the predicted backbone frame through the initialization path.
+            if fR is not None and ft is not None:
                 noisy = to_global(noisy_init.float(), fR.detach(), ft.detach()).to(h_res.dtype)
             else:
                 noisy = noisy_init
@@ -1398,13 +1440,13 @@ class ProtenixDesignTrain(ProtenixDesign):
                             bb4 = gtbb
                     if bb4 is not None:
                         v4 = valid4[..., None].to(bb4.dtype)
-                        bb_local = to_local(
-                            (bb4 * v4).detach(), fR.detach().float(), ft.detach().float()
-                        )
-                        # An absent atom (an unresolved O) sits at the frame origin
-                        # (local 0 == CA) — a bounded fallback; its fused row is never
-                        # scattered back, because its index is -1.
-                        bb_local = (bb_local * v4).to(h_res.dtype)
+                        bb_global = (bb4 * v4).detach()
+                        # An absent atom (an unresolved O) is left at the origin by
+                        # the `* v4` above — a bounded fallback; its fused row is never
+                        # scattered back, because its index is -1. These four slots are
+                        # concatenated to the ten side-chain slots and read by ONE
+                        # Linear, so they carry the same (global) frame as those.
+                        bb_local = bb_global.to(h_res.dtype)
                         sc_res_mask = valid4[..., :3].all(dim=-1)   # frame atoms present
 
                     # ---- B->S gather (sidechain.q_bs): bb_q from this round's cached
@@ -1437,11 +1479,11 @@ class ProtenixDesignTrain(ProtenixDesign):
 
             sc_kwargs = {}
             if bb_local is not None:
-                sc_kwargs = {"bb_local": bb_local, "res_mask": sc_res_mask}
+                sc_kwargs = {"bb_coords": bb_local, "res_mask": sc_res_mask}
             if bb_q is not None:
                 sc_kwargs["bb_q"] = bb_q
             sc_out = self.sidechain_module(
-                h_res, aa_logits, sc_ids, sc_mask, noisy, t, ca_coords=ca_for_module,
+                h_res, aa_logits, sc_ids, sc_slot, noisy, t, ca_coords=ca_for_module,
                 frame_R=(fR.detach() if _fa else None),
                 frame_t=(ft.detach() if _fa else None),
                 ctx_mask=ctx_tok,
@@ -1454,7 +1496,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             else:
                 y0_global, atom_feats = sc_out
             h_res_prime = self.sidechain_feedback(
-                atom_feats, sc_mask, h_res, detach=self.sc_detach_feedback,
+                atom_feats, sc_slot, h_res, detach=self.sc_detach_feedback,
             )
             # DIRECT a-level feedback: a_sc = the SAME pooled side-chain atom
             # feature HResFeedback consumes (masked mean over the residue's atoms),
@@ -1465,7 +1507,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             if getattr(self, "sc_a_direct", False):
                 a_sc = self.a_token_fusion.pool(
                     atom_feats.detach() if self.sc_detach_feedback else atom_feats,
-                    sc_mask,
+                    sc_slot,
                 )                                   # [B*N_sample, L, c_atom] (per-sigma)
                 if use_per_sigma:
                     a_sc = a_sc.reshape(
@@ -1493,6 +1535,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             if squeeze:                             # restore the collapsed batch dim
                 y0_global = y0_global.squeeze(0)
                 sc_mask = sc_mask.squeeze(0)
+                sc_slot = sc_slot.squeeze(0)
                 h_res_prime = h_res_prime.squeeze(0)
                 if fR is not None:
                     fR = fR.squeeze(0)
@@ -1531,7 +1574,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             # `contact_loss` takes a min over that axis, so those phantoms silently
             # zeroed the runaway penalty for any side-chain atom near them.
             y_g = y0_global if y0_global.dim() == 4 else y0_global.unsqueeze(0)  # [B,L,A,3]
-            m = sc_mask if sc_mask.dim() == 3 else sc_mask.unsqueeze(0)
+            m = sc_slot if sc_slot.dim() == 3 else sc_slot.unsqueeze(0)
             if fR is not None and ft is not None and ctx_atoms is None and bb is not None and bb_valid is not None:
                 # Stage II-A warmup fallback: no receptor. GT frames live in the RAW,
                 # un-augmented coordinate frame, while x_denoised (our only source of
@@ -1627,6 +1670,52 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["sc_phys_val"] = phys["total"]
                 out["sc_phys_clash"] = phys["clash"].detach()
                 out["sc_phys_contact"] = phys["contact"].detach()
+
+            # GENERAL packing term (sidechain.pack_loss), distinct from L_compat above.
+            #
+            # `sc_phys` is 0722's mismatch regularizer: `_mismatch_subject_mask` scopes
+            # it to residues whose PREDICTED type differs from GT, so under teacher
+            # forcing -- Stage II warmup and Stage III -- the subject set is empty and
+            # it contributes exactly zero. That is deliberate for L_compat, but it also
+            # means the objective contains NO steric supervision at all in those stages:
+            # the coordinate loss is a per-residue masked MSE in a local frame, which is
+            # structurally blind to two side chains occupying the same space. Two
+            # residues can each be scored perfectly and still interpenetrate.
+            #
+            # So this scores the SAME clash/contact terms over every supervised
+            # side-chain atom. Default weight 0 -- switching it on changes the
+            # objective, and Stage III/IV comparisons must not shift underneath us --
+            # but it is the only channel through which packing can be optimised.
+            if (
+                fR is not None and ft is not None and ctx_atoms is not None
+                and float(getattr(self, "sc_pack_weight", 0.0)) > 0.0
+            ):
+                B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
+                ctx_xyz, ctx_m, ctx_g = ctx_atoms
+                sc_group = (
+                    torch.arange(L_, device=y_g.device)[:, None]
+                    .expand(L_, A_)
+                    .reshape(1, L_ * A_)
+                    .expand(B_, -1)
+                )
+                valid_flat = m.reshape(B_, L_ * A_)
+                pack = physical_loss(
+                    y_g.float().reshape(B_, L_ * A_, 3),
+                    context_coords=ctx_xyz,
+                    context_mask=ctx_m,
+                    context_group_id=ctx_g,
+                    group_id=sc_group,
+                    valid_mask=valid_flat,
+                    subject_mask=valid_flat,     # every supervised atom, not just mismatches
+                    # Steric exclusion only. 0722 calls clash the one
+                    # reliable term, and it is precisely what a per-residue
+                    # local-frame MSE cannot see; the contact hinge is
+                    # position anchoring, which the coordinate loss already does.
+                    arm=str(getattr(self, "sc_pack_arm", "clash")),
+                )
+                out["sc_pack_val"] = pack["total"]
+                out["sc_pack_clash"] = pack["clash"].detach()
+                out["sc_pack_contact"] = pack["contact"].detach()
 
         # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
         #    using the side-chain-informed h_res'. h_res' is injected into the

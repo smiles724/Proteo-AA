@@ -99,7 +99,7 @@ def test_layout_constants():
 
 
 # --------------------------------------------------------------------------
-# bb_local=None must be bit-identical to the pre-14-slot module
+# bb_coords=None must be bit-identical to the pre-14-slot module
 # --------------------------------------------------------------------------
 
 def _legacy_forward(m, h_res, logits, ids, mask, noisy, t, ca=None, R=None, tt=None):
@@ -182,7 +182,7 @@ def test_shapes_with_backbone_context():
     m = _module()
     b = _batch(["ALA", "PHE", "LYS"])
     y0, feats, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"],
-                            b["t"], ca_coords=b["ca"], bb_local=b["bb"])
+                            b["t"], ca_coords=b["ca"], bb_coords=b["bb"])
     # coordinate output stays 10-slot: backbone slots decode NO coordinates
     assert y0.shape == (1, 3, MAX_SC, 3)
     assert feats.shape == (1, 3, MAX_SC, C_ATOM)
@@ -200,7 +200,7 @@ def test_backbone_context_changes_the_sidechain_prediction():
         y_no, _ = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"], b["t"],
                     ca_coords=b["ca"])
         y_bb, _, _ = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"], b["t"],
-                       ca_coords=b["ca"], bb_local=b["bb"])
+                       ca_coords=b["ca"], bb_coords=b["bb"])
     assert not torch.allclose(y_no, y_bb)
 
 
@@ -210,7 +210,7 @@ def test_sidechain_gradient_reaches_backbone_slot_features():
     m = _module()
     b = _batch(["PHE", "LYS", "TRP"], requires_grad=True)
     _, _, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"], b["t"],
-                       ca_coords=b["ca"], bb_local=b["bb"])
+                       ca_coords=b["ca"], bb_coords=b["bb"])
     bb_feats.sum().backward()
     g = b["noisy"].grad
     assert g is not None
@@ -229,7 +229,7 @@ def test_backbone_slot_features_differ_per_atom():
     b = _batch(["PHE"])
     with torch.no_grad():
         _, _, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"],
-                           b["t"], ca_coords=b["ca"], bb_local=b["bb"])
+                           b["t"], ca_coords=b["ca"], bb_coords=b["bb"])
     v = bb_feats[0, 0]                       # [4, c_atom]
     for i in range(N_BB):
         for j in range(i + 1, N_BB):
@@ -243,7 +243,7 @@ def test_gly_zero_sidechain_atoms_does_not_nan():
     b = _batch(["GLY", "GLY", "ALA"], requires_grad=True)
     assert int(b["mask"][0, 0].sum()) == 0            # GLY really has no side chain
     y0, feats, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"],
-                            b["t"], ca_coords=b["ca"], bb_local=b["bb"])
+                            b["t"], ca_coords=b["ca"], bb_coords=b["bb"])
     assert torch.isfinite(y0).all()
     assert torch.isfinite(feats).all()
     assert torch.isfinite(bb_feats).all()
@@ -258,7 +258,7 @@ def test_gly_only_batch_does_not_nan():
     m = _module()
     b = _batch(["GLY", "GLY"])
     y0, feats, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"],
-                            b["t"], ca_coords=b["ca"], bb_local=b["bb"])
+                            b["t"], ca_coords=b["ca"], bb_coords=b["bb"])
     assert torch.isfinite(y0).all() and torch.isfinite(bb_feats).all()
 
 
@@ -269,7 +269,7 @@ def test_res_mask_false_row_does_not_nan():
     b = _batch(["PHE", "GLY", "ALA"])
     res_mask = torch.tensor([[True, True, False]])
     y0, feats, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"],
-                            b["t"], ca_coords=b["ca"], bb_local=b["bb"], res_mask=res_mask)
+                            b["t"], ca_coords=b["ca"], bb_coords=b["bb"], res_mask=res_mask)
     assert torch.isfinite(y0).all() and torch.isfinite(bb_feats).all()
 
 
@@ -281,7 +281,7 @@ def test_frame_aware_head_still_only_decodes_sidechain_slots():
     tt = torch.randn(1, 2, 3)
     y0, feats, bb_feats = m(b["h_res"], b["logits"], b["ids"], b["mask"], b["noisy"],
                             b["t"], ca_coords=b["ca"], frame_R=R, frame_t=tt,
-                            bb_local=b["bb"])
+                            bb_coords=b["bb"])
     assert y0.shape == (1, 2, MAX_SC, 3)
     assert bb_feats.shape == (1, 2, N_BB, C_ATOM)
     assert torch.isfinite(y0).all()

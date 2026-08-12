@@ -399,6 +399,13 @@ def cogenerate(
                 a_full = a_red.squeeze(0) if a_red.dim() == 3 else a_red   # [N_token, c]
                 h_c = a_full[committed]
                 l_c = logits[committed]
+                if not getattr(model, "sc_type_logits_input", True):
+                    # Mirror sidechain.type_logits_input: training zeroes the type
+                    # logits so w_aa sees a uniform distribution. Sampling a model
+                    # trained that way with the real logits would feed the channel an
+                    # input it never saw -- the exact class of mismatch this sampler
+                    # has shipped three times already.
+                    l_c = torch.zeros_like(l_c)
                 # Sigma-embedding = this step's real noise level (EDM c_noise),
                 # matching per-sigma training — not a constant.
                 # Honour sidechain.per_sigma: training feeds S_phi a CONSTANT t=1 whenever
@@ -407,16 +414,14 @@ def cogenerate(
                     sc_t = (0.25 * sig_t.reshape(1).clamp_min(1e-4).log()).to(device)
                 else:
                     sc_t = torch.ones(1, device=device)
-                # S_phi emits global side-chain coordinates. Its coordinate INPUT
-                # channel follows sidechain.local_coord_input. With the default switch
-                # off, we map the same init to global through F_hat, as training does;
-                # turning it on feeds the residue-LOCAL frame, translation-free.
-                if getattr(model, "sc_local_coord_input", False):
-                    noisy_in = noisy_local[None]
-                else:
-                    noisy_in = to_global(
-                        noisy_local[None].float(), R[None].float(), t[None].float()
-                    ).to(dtype)
+                # SINGLE FRAME CONTRACT (see SideChainModule.forward): S_phi is
+                # handed global coordinates, always. The rotamer template is
+                # generated residue-locally, so it is mapped out here exactly once,
+                # the same way the training path does it. Any recentring for the
+                # per-atom embedding happens inside the module.
+                noisy_in = to_global(
+                    noisy_local[None].float(), R[None].float(), t[None].float()
+                ).to(dtype)
                 # Frame-aware head (sidechain.frame_aware_head): hand S_phi the same
                 # rigid frame training gives it, so it regresses local offsets and the
                 # known transform maps them to global. Output space stays global.
@@ -442,8 +447,9 @@ def cogenerate(
                     v4 = (q_idx_c >= 0)                                   # [Nc, 4]
                     bb4 = xc[q_idx_c.clamp_min(0)].float()                # [Nc, 4, 3]
                     bb4 = bb4 * v4[..., None].to(bb4.dtype)
-                    bb_local = to_local(bb4, R.float(), t.float()) * v4[..., None]
-                    sc_kwargs = {"bb_local": bb_local[None].to(dtype)}
+                    # Same frame as the ten side-chain slots they are concatenated
+                    # to — `w_xyz` is a single Linear over that axis.
+                    sc_kwargs = {"bb_coords": bb4[None].to(dtype)}
                     # B->S gather (sidechain.q_bs): bb_q from THIS ROUND's cached
                     # encoder q_skip (model._q_skip_cache, populated by the
                     # `_q_skip_encoder_hook` during the `model.diffusion_module(...)`
@@ -504,9 +510,9 @@ def cogenerate(
                         # they must be finite: identity rotation at the context CA.
                         R_e = torch.cat([R.float(), torch.eye(3, device=device).expand(Nx, 3, 3)], 0)
                         t_e = torch.cat([t.float(), ctx_ca], 0)
-                        if "bb_local" in sc_kwargs:
-                            _bl = sc_kwargs["bb_local"][0]
-                            sc_kwargs["bb_local"] = torch.cat(
+                        if "bb_coords" in sc_kwargs:
+                            _bl = sc_kwargs["bb_coords"][0]
+                            sc_kwargs["bb_coords"] = torch.cat(
                                 [_bl, _bl.new_zeros(Nx, _bl.shape[-2], 3)], 0
                             )[None]
                             # Without res_mask the padded rows would get 4 VALID backbone

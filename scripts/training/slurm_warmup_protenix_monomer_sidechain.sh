@@ -68,7 +68,7 @@ fi
   --device cuda \
   --template-provider "${TEMPLATE_PROVIDER:-dunbrack_mode}" \
   --sc-frame-aware-head \
-  --sc-local-coord-input \
+  --sc-centre-coord-input \
   --sc-template-residual \
   "${LOAD_ARGS[@]}" \
   "${@}"

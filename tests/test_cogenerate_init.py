@@ -50,14 +50,16 @@ class _SpySideChain(nn.Module):
         self.calls = []
 
     def forward(self, h_res, restype_logits, atom_name_ids, atom_mask, noisy_local,
-                t, ca_coords=None, frame_R=None, frame_t=None, bb_local=None,
-                res_mask=None, ctx_mask=None):
+                t, ca_coords=None, frame_R=None, frame_t=None, bb_coords=None,
+                res_mask=None, ctx_mask=None, bb_q=None):
         self.calls.append({
             "noisy": noisy_local.detach().clone(),
             "mask": atom_mask.detach().clone(),
             "frame_R": None if frame_R is None else frame_R.detach().clone(),
             "frame_t": None if frame_t is None else frame_t.detach().clone(),
             "ctx_mask": None if ctx_mask is None else ctx_mask.detach().clone(),
+            "ca": None if ca_coords is None else ca_coords.detach().clone(),
+            "bb_coords": None if bb_coords is None else bb_coords.detach().clone(),
         })
         B, L, A = atom_name_ids.shape
         return (torch.zeros(B, L, A, 3), torch.zeros(B, L, A, C_ATOM))
@@ -65,7 +67,7 @@ class _SpySideChain(nn.Module):
 
 class _FakeModel(nn.Module):
     def __init__(self, template_init=True, sigma_T=0.3,
-                 local_coord_input=True, frame_aware_head=True,
+                 centre_coord_input=True, frame_aware_head=True,
                  context_aware=False):
         super().__init__()
         self.aa_input_source = "diffusion_internal"
@@ -74,7 +76,7 @@ class _FakeModel(nn.Module):
         self.sc_init_sigma = 1.0
         self.sc_template_init = template_init
         self.sc_init_sigma_T = sigma_T
-        self.sc_local_coord_input = local_coord_input
+        self.sc_centre_coord_input = centre_coord_input
         self.sc_frame_aware_head = frame_aware_head
         self.sc_context_aware = context_aware
         self.diffusion_module = _FakeDiffusion()
@@ -227,33 +229,53 @@ def test_sampler_sigma_T_switch_is_plumbed(monkeypatch):
 
 
 def test_sampler_coord_input_and_head_match_training(monkeypatch):
-    """The other two halves of the same distribution contract: with
-    local_coord_input=True S_phi's coordinate channel is the LOCAL init (not the
-    to_global one), and with frame_aware_head=True it receives the predicted frame —
-    both as model.py's training block does."""
-    model, calls, _ = _run(monkeypatch, template_init=True,
-                           local_coord_input=True, frame_aware_head=True)
-    call = model.sidechain_module.calls[0]
-    assert call["frame_R"] is not None and call["frame_t"] is not None, (
-        "frame_aware_head=True in training but the sampler called S_phi without a frame"
-    )
-    # Local init: coords sit within a few Angstrom of the frame origin. A global
-    # init would carry t_CA (absolute position of the residue) instead.
-    valid = call["mask"][0]
-    coords = call["noisy"][0][valid]
-    assert coords.abs().max() < 12.0
-    assert torch.allclose(coords.mean(0), torch.zeros(3), atol=8.0)
-    # And it is NOT the global mapping of the same init (which would add t_CA).
-    from pxdesign_train.sidechain.frames import to_global
-    glob = to_global(call["noisy"].float(), call["frame_R"].float(), call["frame_t"].float())
-    assert not torch.allclose(glob[0][valid], coords.float(), atol=1e-4)
+    """SINGLE FRAME CONTRACT at sampling: S_phi's coordinate channel is GLOBAL,
+    whatever `centre_coord_input` says, because that switch now only recentres the
+    embedding INSIDE the module. And with frame_aware_head=True the sampler still
+    hands over the predicted frame, as model.py's training block does."""
+    for centre in (True, False):
+        model, _, _ = _run(monkeypatch, template_init=True,
+                           centre_coord_input=centre, frame_aware_head=True)
+        call = model.sidechain_module.calls[0]
+        assert call["frame_R"] is not None and call["frame_t"] is not None, (
+            "frame_aware_head=True in training but the sampler called S_phi "
+            "without a frame"
+        )
+        # Global coordinates sit AT the residue, i.e. near its CA / frame origin --
+        # a residue-local tensor would sit near the origin of the world instead.
+        valid = call["mask"][0]
+        coords = call["noisy"][0][valid]
+        ca = call["frame_t"][0]
+        assert (coords - ca.mean(0)).abs().max() < 25.0
+        assert not torch.allclose(coords.mean(0), torch.zeros(3), atol=1e-3), (
+            "S_phi was handed residue-local coordinates; the contract is global"
+        )
 
 
 def test_sampler_calls_sphi_without_frame_when_head_not_frame_aware(monkeypatch):
     model, _, _ = _run(monkeypatch, template_init=True,
-                       local_coord_input=False, frame_aware_head=False)
+                       centre_coord_input=False, frame_aware_head=False)
     call = model.sidechain_module.calls[0]
     assert call["frame_R"] is None and call["frame_t"] is None
+
+
+def test_sampler_backbone_slots_share_the_frame_of_the_sidechain_slots(monkeypatch):
+    """`w_xyz` is one Linear over the 14-slot axis, so the four backbone context
+    rows cannot be residue-local while the ten side-chain rows are global. The
+    CA-anchored arm used to do exactly that; this pins the single-frame contract.
+    """
+    model, _, _ = _run(monkeypatch, with_bb_index=True, template_init=True,
+                       centre_coord_input=False, frame_aware_head=True)
+    call = model.sidechain_module.calls[-1]
+    bb = call["bb_coords"]
+    if bb is None:
+        return                      # this stub produced no 14-slot axis
+    # Global backbone slots put each residue's CA (column 1 of N,CA,C,O) at the
+    # residue's own frame origin. Residue-local ones would put it at zero.
+    ca = call["frame_t"][0]
+    assert torch.allclose(bb[0][:, 1].float(), ca.float(), atol=1e-3), (
+        "backbone slots are not in the same (global) frame as the side-chain slots"
+    )
 
 
 def test_cogenerate_honours_hres_inject_switch():

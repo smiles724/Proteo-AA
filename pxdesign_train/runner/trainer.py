@@ -206,6 +206,7 @@ class PXDesignTrainer:
             # PXDesignLoss defaults regardless of config).
             weight_sc_local=float(getattr(loss_cfg, "weight_sc_local", 1.0)),
             weight_sc_phys=float(getattr(loss_cfg, "weight_sc_phys", 0.1)),
+            weight_sc_pack=float(getattr(loss_cfg, "weight_sc_pack", 0.0)),
             weight_sc_global=float(getattr(loss_cfg, "weight_sc_global", 0.5)),
         )
         # Post-refinement weights are passed per-call in forward_loss.
@@ -412,6 +413,7 @@ class PXDesignTrainer:
             sc_atom_mask=out.get("sc_atom_mask"),
             sc_type_match=out.get("sc_type_match"),
             sc_phys=out.get("sc_phys_val"),
+            sc_pack=out.get("sc_pack_val"),
             sc_global=out.get("sc_global_aux"),
             post_pred_coordinate=out.get("post_pred_coordinate"),
             post_gt_coordinate_aug=out.get("post_gt_coordinate_aug"),
@@ -693,7 +695,14 @@ class PXDesignTrainer:
     # exists. Enabling one at a later stage is a normal curriculum move, not a
     # fault: the fusion starts as an exact no-op and learns from there. Warn so
     # the transition is visible in the log, but do not block it.
-    SIDECHAIN_LAYOUT_KEYS = ("bb_context", "local_coord_input", "frame_aware_head")
+    # `template_residual` belongs here and was missing: it changes what the head
+    # OUTPUT MEANS (a correction to the template, vs absolute local coordinates),
+    # so the same trained `out` weights are reinterpreted when it flips -- exactly
+    # the silent-degradation case this guard exists for.
+    SIDECHAIN_LAYOUT_KEYS = (
+        "bb_context", "centre_coord_input", "frame_aware_head", "template_residual",
+        "type_logits_input",
+    )
     SIDECHAIN_ADDITIVE_KEYS = ("a_bs_concat", "q_bs")
     SIDECHAIN_ARCH_KEYS = SIDECHAIN_LAYOUT_KEYS + SIDECHAIN_ADDITIVE_KEYS
 
@@ -729,6 +738,21 @@ class PXDesignTrainer:
                     "from scratch."
                 )
             return
+        # A checkpoint from before the single-frame refactor records the old switch.
+        # Its coordinate contract is not comparable to the current one (S_phi used to
+        # be fed residue-LOCAL coordinates, and the backbone context slots were in a
+        # different frame from the side-chain slots), so its S_phi weights cannot be
+        # warm-started here even though every tensor still has the right shape.
+        if "local_coord_input" in saved:
+            raise ValueError(
+                "Checkpoint predates the single-frame side-chain refactor (it records "
+                f"sidechain_arch.local_coord_input={saved['local_coord_input']}). S_phi "
+                "was trained on a different coordinate contract -- residue-local input "
+                "with mixed-frame backbone slots -- so warm-starting it here would load "
+                "shape-compatible weights that mean something else. Retrain S_phi, or "
+                "pass --warm-start-params-only with a prefix filter excluding "
+                "'sidechain_module.'."
+            )
         mismatched = {
             k: (saved.get(k), current[k])
             for k in current

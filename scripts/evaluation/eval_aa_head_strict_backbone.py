@@ -51,6 +51,7 @@ SUPERVISION_KEYS = {
     "design_sidechain_atom_mask",
     "sc_gt_local",
     "sc_atom_mask",
+    "sc_slot_mask",
     "sc_atom_name_ids",
     "sc_frame_R",
     "sc_frame_t",

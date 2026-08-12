@@ -60,17 +60,25 @@ TRAIN_ONLY = {
     # These two only shape the ATOM set the clash/contact terms score against, and there
     # is no coordinate loss at sampling. The cross-residue context KEYS — the part that
     # changes S_phi's forward — are not radius-filtered in either path.
+    "pack_loss": "loss-side only: weight of the general steric term. There is no "
+                 "coordinate loss at sampling, so nothing to mirror -- but note this "
+                 "is the ONE steric channel the objective has, because weight_sc_phys "
+                 "is 0722's L_compat and its subject set is empty under teacher forcing.",
+    "pack_arm": "loss-side only: which physical_loss arm the general steric term uses",
     "context_radius": "loss-side only: bounds the clash/contact atom set, no loss at inference",
     "context_max_atoms": "loss-side only: memory cap on the clash/contact atom set",
     "a_bs_concat": "internal to SideChainModule.forward (pooled + h_proj); no new sampler input",
-    "template_residual": "internal to SideChainModule.forward (y0 = noisy_local + y0), "
-                         "baked in at construction, so the sampler's call inherits it. It "
-                         "needs no new sampler input because it cannot be enabled alone: "
-                         "model.py requires frame_aware_head and local_coord_input, and "
-                         "BOTH of those are already mirrored (sc_local_coord_input feeds "
-                         "the residue-local coords that become the residual base, "
-                         "sc_frame_aware_head supplies frame_R/frame_t). forward() raises "
-                         "if the frames are absent, so a mismatch cannot be silent.",
+    "template_residual": "internal to SideChainModule.forward, baked in at "
+                         "construction, so the sampler's call inherits it. The residual "
+                         "base is derived inside forward() from the same global input "
+                         "both paths already pass, and forward() raises if the frames "
+                         "are absent, so a mismatch cannot be silent.",
+    "centre_coord_input": "internal to SideChainModule.forward and baked in at "
+                          "construction, so BOTH paths inherit it from the same module "
+                          "instance -- strictly safer than mirroring it, which is what "
+                          "its predecessor (local_coord_input) needed and what let the "
+                          "two paths drift. It only recentres the per-atom embedding; "
+                          "the coordinates crossing the interface are global either way.",
 }
 
 

@@ -64,12 +64,14 @@ class PXDesignLoss(nn.Module):
         aa_time_eps: float = 1e-2,
         weight_sc_local: float = 1.0,
         weight_sc_phys: float = 0.1,
+        weight_sc_pack: float = 0.0,
         weight_sc_global: float = 0.5,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.weight_sc_local = weight_sc_local
         self.weight_sc_phys = weight_sc_phys
+        self.weight_sc_pack = weight_sc_pack
         self.weight_sc_global = weight_sc_global
         self.weight_mse = weight_mse
         self.weight_lddt = weight_lddt
@@ -322,6 +324,7 @@ class PXDesignLoss(nn.Module):
         sc_atom_mask: Optional[torch.Tensor] = None,       # [..., L, A] bool
         sc_type_match: Optional[torch.Tensor] = None,      # [..., L] bool (pred==gt type)
         sc_phys: Optional[torch.Tensor] = None,            # precomputed physical loss scalar
+        sc_pack: Optional[torch.Tensor] = None,            # general steric term (all atoms)
         sc_global: Optional[torch.Tensor] = None,          # predicted-frame pseudo-target aux (scalar)
         post_pred_coordinate: Optional[torch.Tensor] = None,   # [..., N_sample, N_atom, 3]
         post_gt_coordinate_aug: Optional[torch.Tensor] = None, # [..., N_sample, N_atom, 3]
@@ -490,20 +493,25 @@ class PXDesignLoss(nn.Module):
             else:
                 sc_local = sidechain_local_loss(sc_pred_local, sc_gt_local, coord_mask, eps=self.eps)
             sc_phys_val = sc_phys if sc_phys is not None else total.sum() * 0.0
+            sc_pack_val = sc_pack if sc_pack is not None else total.sum() * 0.0
             if has_global_sc:
                 # In the global-output path, the predicted-frame-aligned loss is
                 # the primary coordinate loss, not a second auxiliary term.
                 sc_global_val = sc_local
-                total = total + self.weight_sc_local * sc_local + self.weight_sc_phys * sc_phys_val
+                total = (total + self.weight_sc_local * sc_local
+                         + self.weight_sc_phys * sc_phys_val
+                         + self.weight_sc_pack * sc_pack_val)
             else:
                 # Backward-compatible local path: keep the old optional aux.
                 sc_global_val = sc_global if sc_global is not None else total.sum() * 0.0
                 total = (total + self.weight_sc_local * sc_local
                          + self.weight_sc_phys * sc_phys_val
+                         + self.weight_sc_pack * sc_pack_val
                          + self.weight_sc_global * sc_global_val)
         else:
             sc_local = total.sum() * 0.0
             sc_phys_val = total.sum() * 0.0
+            sc_pack_val = total.sum() * 0.0
             sc_global_val = total.sum() * 0.0
 
         # --- Post-refinement terms (Stage II-B cycle closure) ---
@@ -532,11 +540,14 @@ class PXDesignLoss(nn.Module):
         # Both are returned NON-detached so the trainer can backprop each phase.
         if has_global_sc or has_local_sc:
             if has_global_sc:
-                loss_sc = self.weight_sc_local * sc_local + self.weight_sc_phys * sc_phys_val
+                loss_sc = (self.weight_sc_local * sc_local
+                           + self.weight_sc_phys * sc_phys_val
+                           + self.weight_sc_pack * sc_pack_val)
             else:
                 loss_sc = (
                     self.weight_sc_local * sc_local
                     + self.weight_sc_phys * sc_phys_val
+                    + self.weight_sc_pack * sc_pack_val
                     + self.weight_sc_global * sc_global_val
                 )
             loss_bb = total - loss_sc
@@ -563,6 +574,7 @@ class PXDesignLoss(nn.Module):
             "aa_mask_frac": aa_mask_frac,
             "sc_local": sc_local.detach(),
             "sc_phys": sc_phys_val.detach(),
+            "sc_pack": sc_pack_val.detach(),
             "sc_global": sc_global_val.detach(),
             "bb_post": bb_post.detach(),
             "aa_post": aa_post_ce.detach(),

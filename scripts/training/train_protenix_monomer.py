@@ -629,8 +629,8 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
         if args.sc_frame_aware_head is not None:
             configs.sidechain.frame_aware_head = bool(args.sc_frame_aware_head)
-        if args.sc_local_coord_input is not None:
-            configs.sidechain.local_coord_input = bool(args.sc_local_coord_input)
+        if args.sc_centre_coord_input is not None:
+            configs.sidechain.centre_coord_input = bool(args.sc_centre_coord_input)
         if args.sc_template_residual is not None:
             configs.sidechain.template_residual = bool(args.sc_template_residual)
     apply_sidechain_ablation_arm(configs, args.sc_ablation_arm)
@@ -724,19 +724,14 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.frame_aware_head = (
             True if args.sc_frame_aware_head is None else bool(args.sc_frame_aware_head)
         )
-        configs.sidechain.local_coord_input = (
-            True if args.sc_local_coord_input is None else bool(args.sc_local_coord_input)
+        configs.sidechain.centre_coord_input = (
+            True if args.sc_centre_coord_input is None else bool(args.sc_centre_coord_input)
         )
         configs.sidechain.template_residual = (
             True if args.sc_template_residual is None else bool(args.sc_template_residual)
         )
-        if configs.sidechain.template_residual and not (
-            configs.sidechain.frame_aware_head and configs.sidechain.local_coord_input
-        ):
-            raise ValueError(
-                "--sc-template-residual requires --sc-frame-aware-head and "
-                "--sc-local-coord-input"
-            )
+        if configs.sidechain.template_residual and not configs.sidechain.frame_aware_head:
+            raise ValueError("--sc-template-residual requires --sc-frame-aware-head")
         configs.training.trainable_param_keywords = ["sidechain_module."]
         configs.training.ema_decay = 0.0
     elif args.training_stage == "joint":
@@ -974,16 +969,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-template-init", action="store_true")
     p.add_argument("--sc-trunk-grad-scale", type=float, default=1.0)
     p.add_argument(
+        "--sc-pack-loss", type=float, default=None,
+        help="Weight of the GENERAL steric term over every supervised side-chain "
+             "atom (0 = off, the default). Separate from --sc-mismatch-loss, which "
+             "is 0722's L_compat and is empty under teacher forcing.",
+    )
+    p.add_argument(
         "--sc-frame-aware-head",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Predict local offsets and map them through the active backbone frame.",
     )
     p.add_argument(
-        "--sc-local-coord-input",
+        "--sc-centre-coord-input",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Feed S_phi residue-local rather than raw global side-chain coordinates.",
+        help="Recentre S_phi's per-atom coordinate embedding on the residue CA. "
+             "Coordinates themselves are always global (single-frame contract); this "
+             "only removes the absolute-position offset from the embedding.",
     )
     p.add_argument(
         "--sc-template-residual",
@@ -1137,7 +1140,7 @@ def main() -> None:
         if args.training_stage == "sidechain_warmup":
             print(
                 "sidechain_parameterization="
-                f"local_input={bool(configs.sidechain.local_coord_input)},"
+                f"centre_input={bool(configs.sidechain.centre_coord_input)},"
                 f"frame_aware_head={bool(configs.sidechain.frame_aware_head)},"
                 f"template_residual={bool(configs.sidechain.template_residual)}"
             )
@@ -1182,9 +1185,9 @@ def main() -> None:
         logging.info("Recent-PDB validation index: %s", eval_filtered_index)
     if args.training_stage == "sidechain_warmup":
         logging.info(
-            "Side-chain parameterization: local_input=%s, frame_aware_head=%s, "
+            "Side-chain parameterization: centre_input=%s, frame_aware_head=%s, "
             "template_residual=%s",
-            bool(configs.sidechain.local_coord_input),
+            bool(configs.sidechain.centre_coord_input),
             bool(configs.sidechain.frame_aware_head),
             bool(configs.sidechain.template_residual),
         )

@@ -87,7 +87,7 @@ export PYTHONPATH="${REPO_ROOT}:${PXDESIGN_CODE_DIR}:${PROTENIX_CODE_DIR}${PYTHO
   --dtype "${DTYPE:-bf16}" \
   --device cuda \
   --template-provider "${TEMPLATE_PROVIDER:-dunbrack_mode}" \
-  --sc-local-coord-input \
+  --sc-centre-coord-input \
   --sc-frame-aware-head \
   --sc-template-residual \
   "${@}"

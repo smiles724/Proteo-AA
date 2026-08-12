@@ -352,7 +352,7 @@ def _sphi_bb_feats(sphi, noisy, bb_local):
     logits = torch.randn(B, L, len(STD_AA_3))
     return sphi(
         h_res, logits, ids[None].expand(B, -1, -1), mask[None].expand(B, -1, -1),
-        noisy, torch.ones(B), bb_local=bb_local,
+        noisy, torch.ones(B), bb_coords=bb_local,
     )
 
 

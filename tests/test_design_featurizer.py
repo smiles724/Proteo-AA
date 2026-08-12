@@ -409,6 +409,39 @@ def test_unresolved_sidechain_atoms_are_not_supervised():
     assert int(out["sc_atom_name_ids"][0, 1]) != 0, "atom-name id must not be cleared"
 
 
+def test_slot_mask_is_chemistry_only_and_supervision_is_a_subset():
+    """The mask split. `sc_slot_mask` answers "does this residue type own this
+    slot"; `sc_atom_mask` additionally requires the structure to have resolved it.
+
+    They must not be the same tensor. Gating S_phi's FORWARD (attention keys,
+    output, pooling) on resolution trains a key set that inference cannot
+    reproduce -- there is no `is_resolved` at inference -- and the atoms it drops
+    are not random: they are the flexible surface side chains, ~9.8% of all
+    supervised atoms, which is precisely what packing is about.
+    """
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, "OG")})
+    out = _sc_targets(aa, feat, binder)
+    slot, sup = out["sc_slot_mask"], out["sc_atom_mask"]
+
+    # SER owns [CB, OG] regardless of what the crystallographer saw.
+    assert bool(slot[0, 0]) and bool(slot[0, 1]), "chemistry does not depend on resolution"
+    assert bool(slot[1, 0]) and bool(slot[1, 1])
+    # Supervision is strictly narrower here, and never wider anywhere.
+    assert bool(sup[0, 1]) is False
+    assert bool((sup & ~slot).any()) is False, "a supervised atom must own a slot"
+    assert bool((slot & ~sup).any()) is True, "the unresolved atom must separate them"
+
+    # A residue with no unresolved atoms has them agree, so the split costs nothing
+    # where resolution is complete.
+    assert bool((slot[1] == sup[1]).all())
+
+
+def test_slot_mask_matches_supervision_when_everything_is_resolved():
+    aa, feat, binder = _ser_complex(400.0)
+    out = _sc_targets(aa, feat, binder)
+    assert bool((out["sc_slot_mask"] == out["sc_atom_mask"]).all())
+
+
 def test_no_supervised_target_sits_at_the_coordinate_origin():
     """The invariant that actually matters, checked in global space.
 

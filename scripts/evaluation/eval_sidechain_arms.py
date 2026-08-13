@@ -51,6 +51,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--template-provider", default="dunbrack_mode")
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--edm-init", choices=["template", "gt"], default="template",
+        help="DIAGNOSTIC. 'gt' starts the EDM reverse loop from the noised TARGET "
+             "instead of the noised template. Not a valid inference protocol -- it "
+             "uses the answer -- and only tells you whether the arm's gap comes from "
+             "the starting distribution or from the model.",
+    )
     p.add_argument("--protenix-code-dir", default="")
     p.add_argument("--pxdesign-code-dir", default="")
     return p.parse_args()
@@ -147,6 +154,11 @@ def main() -> None:
     # Deterministic inference protocol for the EDM arm (reverse loop from
     # sigma_max, no lambda weighting). A no-op on the one-step arms.
     model.sc_edm_eval = True
+    model.sc_edm_eval_from_gt = (args.edm_init == "gt")
+    if model.sc_edm_eval_from_gt:
+        print("WARNING: --edm-init gt is a DIAGNOSTIC. The reverse loop starts from "
+              "the noised ground truth, so this number is NOT achievable at "
+              "inference and must not be reported as a result.")
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +218,16 @@ def main() -> None:
         "label": args.label,
         "checkpoint": args.checkpoint,
         "sidechain_arch": arch,
-        "protocol": "edm_reverse_loop" if arch.get("edm") else "one_step",
+        "protocol": (
+            ("edm_reverse_loop_from_noised_GT__DIAGNOSTIC"
+             if args.edm_init == "gt" else "edm_reverse_loop")
+            if arch.get("edm") else "one_step"
+        ),
+        # Stamped into the artifact so a number that cannot be reached at inference
+        # cannot be mistaken for one that can, however it is later copied around.
+        "diagnostic_uses_ground_truth_start": bool(
+            arch.get("edm") and args.edm_init == "gt"
+        ),
         "unit": "A^2 (unweighted masked mean squared displacement per atom)",
         "n_proteins": len(rows),
         "sidechain_atoms": total_atoms,

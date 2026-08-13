@@ -1290,7 +1290,19 @@ class ProtenixDesignTrain(ProtenixDesign):
                 #
                 # Under the eval protocol there IS no target to noise, so the template
                 # stays the starting point, which is exactly the inference behaviour.
-                if getattr(self, "sc_edm_eval", False):
+                # DIAGNOSTIC ONLY (sc_edm_eval_from_gt): start the reverse loop from
+                # the noised TARGET instead of the noised template. This is not a
+                # legitimate inference protocol -- it uses the answer -- and exists
+                # solely to separate two explanations for the EDM arm's gap:
+                #   (A) train/inference mismatch: it trains on GT+sigma*eps and is
+                #       deployed from template+sigma*eps, so the starting
+                #       distribution differs. Then this score improves a lot.
+                #   (B) the model simply has not learned the task well, e.g. because
+                #       it never sees the rotamer prior the one-step arms get free.
+                #       Then this score is about the same.
+                if getattr(self, "sc_edm_eval", False) and not getattr(
+                    self, "sc_edm_eval_from_gt", False
+                ):
                     x0_local = noisy_init.float()
                 else:
                     gt_local_t = input_feature_dict.get("sc_gt_local")

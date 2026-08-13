@@ -31,6 +31,11 @@ ARM_LABEL="${ARM_LABEL:-edm_global}"
 ARM_DIR="${ARM_DIR:-edm_global_from_bb_step96000}"
 STEPS="${STEPS:-2000 10000 20000 30000 42000}"
 OUT_DIR="${OUT_DIR:-$RUNS/arm_sweep_${ARM_LABEL}}"
+# "gt" is the DIAGNOSTIC start (noised ground truth). Not an inference
+# protocol; the eval script stamps the artifact accordingly.
+EDM_INIT="${EDM_INIT:-template}"
+SUFFIX=""
+[[ "${EDM_INIT}" == "gt" ]] && SUFFIX="_gtstart"
 
 cd "${REPO_ROOT}"
 mkdir -p logs/validation/sidechain_arms "${OUT_DIR}"
@@ -48,7 +53,8 @@ for step in ${STEPS}; do
   echo "=== ${ARM_LABEL} @ step${step} ==="
   "${PYTHON_BIN}" scripts/evaluation/eval_sidechain_arms.py \
     --checkpoint "${ckpt}" \
-    --label "${ARM_LABEL}_step${step}" \
+    --label "${ARM_LABEL}_step${step}${SUFFIX}" \
+    --edm-init "${EDM_INIT}" \
     --data-root "${DATA_ROOT}" \
     --output-dir "${OUT_DIR}" \
     --num-samples "${NUM_SAMPLES:-491}" \

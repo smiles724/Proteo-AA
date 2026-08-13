@@ -238,6 +238,23 @@ def main() -> None:
         "tpm", str(REPO_ROOT / "scripts" / "training" / "train_protenix_monomer.py"))
     tpm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tpm)
+    # The architecture comes from the checkpoint's own record, never from this
+    # script's defaults. Hardcoding `--training-stage sidechain_warmup` and nothing
+    # else takes that stage's DEFAULTS -- frame-aware head, template residual --
+    # which describe only one of the arms. Loading a checkpoint trained under a
+    # different one is shape-compatible and silent.
+    ckpt_head = torch.load(str(args.checkpoint), map_location="cpu", weights_only=False)
+    arch = ckpt_head.get("sidechain_arch") or {}
+    if not arch:
+        raise SystemExit(
+            f"{args.checkpoint} records no sidechain_arch, so the configuration its "
+            "S_phi was trained under is unknown and cannot be reconstructed here."
+        )
+    print(f"checkpoint_arch={json.dumps(arch, sort_keys=True)}")
+
+    def _flag(name, on):
+        return f"--sc-{name}" if on else f"--no-sc-{name}"
+
     saved_argv = sys.argv
     sys.argv = [
         "x", "--training-stage", "sidechain_warmup",
@@ -249,11 +266,24 @@ def main() -> None:
         "--eval-interval", "0", "--eval-samples", "0", "--num-workers", "0",
         "--device", args.device, "--dtype", args.dtype,
         "--template-provider", args.template_provider,
+        _flag("frame-aware-head", arch.get("frame_aware_head", False)),
+        _flag("centre-coord-input", arch.get("centre_coord_input", False)),
+        _flag("template-residual", arch.get("template_residual", False)),
+        _flag("edm", arch.get("edm", False)),
     ]
     cfg_args = tpm.parse_args()
     device = torch.device(args.device)
     configs = tpm.build_configs(cfg_args, device)
     sys.argv = saved_argv
+    configs.sidechain.bb_context = bool(arch.get("bb_context", True))
+    configs.sidechain.a_bs_concat = bool(arch.get("a_bs_concat", True))
+    configs.sidechain.q_bs = bool(arch.get("q_bs", False))
+    configs.sidechain.type_logits_input = bool(arch.get("type_logits_input", True))
+    # `checkpoint_include_prefixes` exists so Stage II can warm-start the BACKBONE
+    # and train S_phi from scratch. Applied to an EVALUATION it drops the very
+    # module being scored: the previous CASP runs logged "kept 732/1151 tensors,
+    # missing=419" and were scoring a randomly-initialised S_phi.
+    configs.training.checkpoint_include_prefixes = []
 
     schedule = CurriculumSchedule(stage1={"casp14": 1.0}, stage2={"casp14": 1.0},
                                   stage1_end_step=1, stage2_start_step=2)
@@ -267,6 +297,23 @@ def main() -> None:
         checkpoint_dir=None, load_checkpoint_path=str(args.checkpoint.resolve()),
         checkpoint_params_only=True,
     )
+
+    # Verify the thing being benchmarked actually arrived. Comparing tensors, not
+    # reading a log line: this failed silently once and the numbers looked
+    # plausible enough to be published from.
+    live = trainer.model.state_dict()
+    sc_keys = [k for k in ckpt_head["model"] if k.startswith("sidechain_module.")]
+    if not sc_keys:
+        raise SystemExit("checkpoint contains no sidechain_module weights")
+    bad = [k for k in sc_keys
+           if k not in live or not torch.equal(live[k].cpu(), ckpt_head["model"][k].cpu())]
+    if bad:
+        raise SystemExit(
+            f"{len(bad)}/{len(sc_keys)} sidechain_module tensors did not survive the "
+            f"load (e.g. {bad[:3]}). Scoring would measure an untrained S_phi."
+        )
+    print(f"verified {len(sc_keys)} sidechain_module tensors loaded")
+    del ckpt_head
 
     # Score one target at a time so a single unusable entry costs one row, not
     # the whole benchmark. sc_local is mean squared deviation in A^2, so the

@@ -113,6 +113,7 @@ def main() -> None:
     import torch
 
     from pxdesign_train.sidechain.frames import to_global
+    from pxdesign_train.sidechain.lddt import sidechain_lddt
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     arch = ckpt.get("sidechain_arch") or {}
@@ -207,11 +208,34 @@ def main() -> None:
         mse = float((se * m).sum() / n)
         total_se += float((se * m).sum())
         total_atoms += int(n)
+        # lDDT alongside RMSD: superposition-free and local, so a terminal atom
+        # swinging out costs in proportion to the contacts it breaks rather than
+        # to its displacement, and mis-packing is visible at all.
+        p3 = pred.float() if pred.dim() == 3 else pred.float().reshape(-1, *pred.shape[-2:])
+        t3 = tgt.float() if tgt.dim() == 3 else tgt.float().reshape(-1, *tgt.shape[-2:])
+        m2 = mask if mask.dim() == 2 else mask.reshape(-1, mask.shape[-1])
+        bbc = feat.get("sc_bb_coords")
+        bbi = feat.get("sc_bb_atom_idx")
+        if bbc is not None:
+            bbc = bbc.float()
+            while bbc.dim() > 3:
+                bbc = bbc[0]
+        bbm = None
+        if bbi is not None:
+            bbm = bbi.long()
+            while bbm.dim() > 2:
+                bbm = bbm[0]
+            bbm = bbm >= 0
+        ld = sidechain_lddt(p3[0] if p3.dim() == 4 else p3,
+                            t3[0] if t3.dim() == 4 else t3,
+                            m2, bb_coords=bbc, bb_mask=bbm)
+
         rows.append({
             "sample_id": batch.get("source_name", [f"item{i}"])[0]
             if isinstance(batch.get("source_name"), list) else f"item{i}",
             "index": i, "n_atoms": int(n),
             "sc_mse": round(mse, 6), "sc_rmsd_A": round(math.sqrt(mse), 6),
+            "lddt_sc_env": ld["lddt_sc_env"], "lddt_sc_sc": ld["lddt_sc_sc"],
         })
         if (i + 1) % 50 == 0:
             print(f"processed={i + 1}/{n_eval}", flush=True)
@@ -247,14 +271,21 @@ def main() -> None:
         "sample_p90_mse": _quantile(per, 0.9),
         "sample_max_mse": max(per),
     }
+    for key in ("lddt_sc_env", "lddt_sc_sc"):
+        vals = [r[key] for r in rows if r[key] == r[key]]        # drop nan
+        if vals:
+            summary[f"{key}_mean"] = sum(vals) / len(vals)
+            summary[f"{key}_median"] = _quantile(vals, 0.5)
+            summary[f"{key}_n"] = len(vals)
     (output_dir / f"arm_eval_{args.label}.json").write_text(
         json.dumps(summary, indent=2) + "\n"
     )
     with (output_dir / f"arm_eval_{args.label}_per_protein.csv").open("w") as fh:
-        fh.write("sample_id,index,n_atoms,sc_mse,sc_rmsd_A\n")
+        fh.write("sample_id,index,n_atoms,sc_mse,sc_rmsd_A,lddt_sc_env,lddt_sc_sc\n")
         for r in rows:
             fh.write(f"{r['sample_id']},{r['index']},{r['n_atoms']},"
-                     f"{r['sc_mse']},{r['sc_rmsd_A']}\n")
+                     f"{r['sc_mse']},{r['sc_rmsd_A']},"
+                     f"{r['lddt_sc_env']:.6f},{r['lddt_sc_sc']:.6f}\n")
     print(json.dumps(summary, indent=2))
 
 

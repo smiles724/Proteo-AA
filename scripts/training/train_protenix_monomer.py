@@ -603,6 +603,7 @@ def build_configs(args: argparse.Namespace, device):
     configs.training.num_workers = int(args.num_workers)
     configs.training.iters_to_accumulate = int(args.iters_to_accumulate)
     configs.training.grad_clip_norm = float(args.grad_clip_norm)
+    configs.training.resume_lr = args.resume_lr
     configs.training.trainable_param_keywords = []
 
     configs.residue_type.mask_mode = args.aa_mask_mode
@@ -975,6 +976,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--per-sigma", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--template-provider", default="dunbrack_mode")
     p.add_argument("--disable-template-init", action="store_true")
+    p.add_argument(
+        "--resume-lr", type=float, default=None,
+        help="On a FULL resume, override the restored base learning rate. "
+             "Without this the scheduler restores the old rate and --lr is "
+             "silently ignored.",
+    )
     p.add_argument("--sc-trunk-grad-scale", type=float, default=1.0)
     p.add_argument(
         "--sc-edm", action=argparse.BooleanOptionalAction, default=None,

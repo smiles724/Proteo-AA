@@ -884,6 +884,21 @@ class PXDesignTrainer:
                 self.lr_scheduler.load_state_dict(ckpt["scheduler"])
             self.step = int(ckpt.get("step", 0))
             self.global_step = int(ckpt.get("global_step", self.step))
+            # A full resume restores the scheduler, and LambdaLR recomputes lr from
+            # the base_lrs it stored -- so passing a new --lr has no effect unless we
+            # rewrite those too. Decaying the rate is the normal way to collect the
+            # last percent from a run that has stopped descending, and the
+            # alternative (params-only, which does accept a fresh lr) would silently
+            # drop `sidechain_module.` through checkpoint_include_prefixes.
+            override = getattr(self.configs.training, "resume_lr", None)
+            if override:
+                override = float(override)
+                for sched in self._schedulers:
+                    sched.base_lrs = [override] * len(sched.base_lrs)
+                for opt in ({s.optimizer for s in self._schedulers}):
+                    for g in opt.param_groups:
+                        g["lr"] = override
+                self._log(f"Resume LR override: base lr set to {override:g}")
 
     # ----- misc -----
 

@@ -662,6 +662,11 @@ class PXDesignTrainer:
             # is optimized. Recorded so the next stage can refuse to warm-start
             # across a change in them (see `_check_sidechain_arch`).
             "sidechain_arch": self._sidechain_arch(),
+            # SIDECHAIN_ARCH_KEYS are booleans by construction, but the EDM sigma
+            # range is numeric and changes what the model IS -- a checkpoint trained
+            # with sigma_max=40 evaluated under the default 4 walks a schedule it
+            # never saw. Recorded separately so an evaluator can reconstruct it.
+            "sidechain_edm_hparams": self._sidechain_edm_hparams(),
         }
         if self.train_mode == "alternating":
             state["sc_optimizer"] = self.sc_optimizer.state_dict()
@@ -715,6 +720,18 @@ class PXDesignTrainer:
         if sc is None or not getattr(self.configs, "enable_sidechain", False):
             return {}
         return {k: bool(getattr(sc, k, False)) for k in self.SIDECHAIN_ARCH_KEYS}
+
+    EDM_HPARAM_KEYS = (
+        "edm_sigma_data", "edm_p_mean", "edm_p_std",
+        "edm_sigma_min", "edm_sigma_max", "edm_infer_steps",
+    )
+
+    def _sidechain_edm_hparams(self) -> dict:
+        sc = getattr(self.configs, "sidechain", None)
+        if sc is None or not getattr(sc, "edm", False):
+            return {}
+        return {k: float(getattr(sc, k)) for k in self.EDM_HPARAM_KEYS
+                if getattr(sc, k, None) is not None}
 
     def _check_sidechain_arch(self, ckpt: dict) -> None:
         saved = ckpt.get("sidechain_arch")

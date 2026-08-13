@@ -138,6 +138,12 @@ def main() -> None:
     configs.sidechain.a_bs_concat = bool(arch.get("a_bs_concat", True))
     configs.sidechain.q_bs = bool(arch.get("q_bs", False))
     configs.sidechain.type_logits_input = bool(arch.get("type_logits_input", True))
+    # The sigma range is part of what the model is. Evaluating a sigma_max=40
+    # checkpoint on the default schedule would walk a trajectory it never saw.
+    for k, v in (ckpt.get("sidechain_edm_hparams") or {}).items():
+        setattr(configs.sidechain, k, int(v) if k.endswith("steps") else float(v))
+    if arch.get("edm"):
+        print("edm_hparams=" + json.dumps(ckpt.get("sidechain_edm_hparams") or {}, sort_keys=True))
 
     torch.manual_seed(int(args.seed))
 

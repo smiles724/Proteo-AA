@@ -642,6 +642,16 @@ def build_configs(args: argparse.Namespace, device):
             configs.sidechain.edm = bool(args.sc_edm)
         if args.sc_edm_sigma_data is not None:
             configs.sidechain.edm_sigma_data = float(args.sc_edm_sigma_data)
+        if args.sc_edm_p_mean is not None:
+            configs.sidechain.edm_p_mean = float(args.sc_edm_p_mean)
+        if args.sc_edm_p_std is not None:
+            configs.sidechain.edm_p_std = float(args.sc_edm_p_std)
+        if args.sc_edm_sigma_min is not None:
+            configs.sidechain.edm_sigma_min = float(args.sc_edm_sigma_min)
+        if args.sc_edm_sigma_max is not None:
+            configs.sidechain.edm_sigma_max = float(args.sc_edm_sigma_max)
+        if args.sc_edm_infer_steps is not None:
+            configs.sidechain.edm_infer_steps = int(args.sc_edm_infer_steps)
     apply_sidechain_ablation_arm(configs, args.sc_ablation_arm)
 
     if args.training_stage == "backbone_only":
@@ -990,6 +1000,11 @@ def parse_args() -> argparse.Namespace:
              "and is incompatible with --sc-template-residual.",
     )
     p.add_argument("--sc-edm-sigma-data", type=float, default=None)
+    p.add_argument("--sc-edm-p-mean", type=float, default=None)
+    p.add_argument("--sc-edm-p-std", type=float, default=None)
+    p.add_argument("--sc-edm-sigma-min", type=float, default=None)
+    p.add_argument("--sc-edm-sigma-max", type=float, default=None)
+    p.add_argument("--sc-edm-infer-steps", type=int, default=None)
     p.add_argument(
         "--sc-mismatch-loss", default=None,
         choices=["none", "clash", "legacy", "compat"],

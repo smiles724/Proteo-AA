@@ -693,7 +693,16 @@ class PXDesignTrainer:
     # exists. Enabling one at a later stage is a normal curriculum move, not a
     # fault: the fusion starts as an exact no-op and learns from there. Warn so
     # the transition is visible in the log, but do not block it.
-    SIDECHAIN_LAYOUT_KEYS = ("bb_context", "local_coord_input", "frame_aware_head")
+    # `template_residual` belongs here, not with the additive keys: it decides what
+    # the head's output MEANS -- absolute residue-local coordinates when OFF, a
+    # zero-initialised CORRECTION to the template when ON. The parameter shapes are
+    # identical either way, so crossing it raises nothing and the output is simply
+    # read as a different quantity. Widening the tuple costs no retraining:
+    # `_check_sidechain_arch` compares only keys present in BOTH records, so a
+    # checkpoint written before this key was guarded carries no opinion about it.
+    SIDECHAIN_LAYOUT_KEYS = (
+        "bb_context", "local_coord_input", "frame_aware_head", "template_residual",
+    )
     SIDECHAIN_ADDITIVE_KEYS = ("a_bs_concat", "q_bs")
     SIDECHAIN_ARCH_KEYS = SIDECHAIN_LAYOUT_KEYS + SIDECHAIN_ADDITIVE_KEYS
 

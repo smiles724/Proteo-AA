@@ -361,3 +361,91 @@ def test_layout_and_additive_switches_are_guarded_differently():
     # Flipping the atom axis is not.
     with pytest.raises(ValueError, match="LAYOUT changed"):
         _checker(bb_context=False)({"sidechain_arch": saved, "model": {}})
+
+
+def _arch_checker(**current):
+    """A PXDesignTrainer stub that knows only how to check the arch record."""
+    import types
+
+    from pxdesign_train.runner.trainer import PXDesignTrainer
+
+    base = dict(bb_context=True, local_coord_input=True, frame_aware_head=True,
+                template_residual=True, a_bs_concat=True, q_bs=True)
+    base.update(current)
+    stub = types.SimpleNamespace(
+        configs=types.SimpleNamespace(
+            enable_sidechain=True, sidechain=types.SimpleNamespace(**base)
+        ),
+        _log=lambda *a, **k: None,
+    )
+    for attr in ("SIDECHAIN_ARCH_KEYS", "SIDECHAIN_LAYOUT_KEYS", "SIDECHAIN_ADDITIVE_KEYS"):
+        setattr(stub, attr, getattr(PXDesignTrainer, attr))
+    stub._sidechain_arch = PXDesignTrainer._sidechain_arch.__get__(stub, type(stub))
+    return PXDesignTrainer._check_sidechain_arch.__get__(stub, type(stub))
+
+
+def test_template_residual_is_guarded_as_a_layout_switch():
+    """It changes what the head's output MEANS, so it belongs with the layout keys.
+
+    OFF the head regresses the side chain's absolute residue-local coordinates;
+    ON it regresses a zero-initialised CORRECTION to the template. Same parameter
+    shapes either way, so a checkpoint trained under one and loaded under the
+    other raises nothing at all -- the output is simply interpreted as a
+    different quantity. That is precisely the silent-degradation class the LAYOUT
+    guard exists for, and it is the one switch the guard did not cover.
+    """
+    from pxdesign_train.runner.trainer import PXDesignTrainer
+
+    assert "template_residual" in PXDesignTrainer.SIDECHAIN_LAYOUT_KEYS
+
+
+def test_crossing_template_residual_refuses_the_warm_start():
+    saved = dict(bb_context=True, local_coord_input=True, frame_aware_head=True,
+                 template_residual=True, a_bs_concat=True, q_bs=False)
+    with pytest.raises(ValueError, match="LAYOUT changed"):
+        _arch_checker(template_residual=False)({"sidechain_arch": saved, "model": {}})
+
+
+def test_a_checkpoint_recorded_before_the_key_existed_still_loads():
+    """Widening the guard must not invalidate checkpoints already on disk.
+
+    `_check_sidechain_arch` only compares keys present in BOTH records, so a
+    checkpoint written before `template_residual` was guarded carries no opinion
+    about it and is accepted unchanged. Adding the key therefore costs no
+    retraining -- it only protects checkpoints written from here on.
+    """
+    saved = dict(bb_context=True, local_coord_input=True, frame_aware_head=True,
+                 a_bs_concat=True, q_bs=False)          # predates the key
+    _arch_checker(template_residual=True)({"sidechain_arch": saved, "model": {}})
+
+
+def test_arm_bb_context_defaults_to_the_14_slot_layout():
+    """No arm selected -> the main line, which is 14-slot."""
+    from pxdesign_train.configs.configs_train import arm_bb_context
+
+    for unset in (None, "", "default"):
+        assert arm_bb_context(unset) is True
+
+
+def test_arm_bb_context_follows_the_arm():
+    """`no-bbctx` is the ONE 10-slot arm; it must survive into the stage bundle.
+
+    The stage bundles run AFTER `apply_sidechain_ablation_arm`, so a bundle that
+    assigns `bb_context` from a literal silently un-does the arm -- which is how
+    `no-bbctx` came to be a no-op in Stage II. Deriving the value from the arm is
+    what lets both stages pin the layout explicitly (no reliance on the base
+    config default) without overriding the ablation.
+    """
+    from pxdesign_train.configs.configs_train import SC_ABLATION_ARMS, arm_bb_context
+
+    assert arm_bb_context("no-bbctx") is False
+    assert arm_bb_context("full") is True
+    for name, cfg in SC_ABLATION_ARMS.items():
+        assert arm_bb_context(name) is bool(cfg["bb_context"]), name
+
+
+def test_arm_bb_context_rejects_an_unknown_arm():
+    from pxdesign_train.configs.configs_train import arm_bb_context
+
+    with pytest.raises(ValueError, match="unknown"):
+        arm_bb_context("bbctx")          # renamed to no-bbctx; must not resolve

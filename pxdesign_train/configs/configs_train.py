@@ -262,6 +262,30 @@ def stage2_checkpoint_group(arm: str) -> str:
     return "14-slot" if arm in ARMS_NEEDING_14_SLOT_STAGE2 else "10-slot"
 
 
+def arm_bb_context(arm: str) -> bool:
+    """The atom-axis layout (14-slot vs 10-slot) an arm requires.
+
+    Exists so a training stage can PIN `sidechain.bb_context` without either of
+    the two ways of getting it wrong. `bb_context` is a guarded LAYOUT key, so a
+    stage that leaves it unset silently inherits the base-config default and
+    breaks the moment that default moves. But a stage that assigns it a literal
+    is worse: `apply_sidechain_ablation_arm` runs BEFORE the stage bundles, so a
+    literal overwrites whatever the arm asked for -- which is how `no-bbctx`, the
+    single 10-slot arm, became a no-op in Stage II.
+
+    Resolving it from the arm gives both stages the same explicit value while
+    leaving the ablation intact. Arms in different layout groups still need
+    different Stage II checkpoints; see `stage2_checkpoint_group`.
+    """
+    if arm in (None, "", "default"):
+        return True
+    if arm not in SC_ABLATION_ARMS:
+        raise ValueError(
+            f"unknown side-chain ablation arm {arm!r}; choose one of {sorted(SC_ABLATION_ARMS)}"
+        )
+    return bool(SC_ABLATION_ARMS[arm]["bb_context"])
+
+
 def apply_sidechain_ablation_arm(configs, arm: str):
     """Apply a named side-chain feedback ablation arm to a config object/dict."""
     if arm in (None, "", "default"):

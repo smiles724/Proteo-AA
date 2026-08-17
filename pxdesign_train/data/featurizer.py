@@ -539,8 +539,20 @@ class DesignFeaturizer:
             sc_frame_t[ti] = t[0].numpy()
             # Indices and coords come from the SAME by-name lookup in the SAME
             # order, so a gather at sc_bb_atom_idx reproduces sc_bb_coords exactly.
+            #
+            # An UNRESOLVED backbone atom is marked ABSENT (index -1) rather than
+            # indexed-with-a-placeholder. Every consumer of these four slots decides
+            # validity from `sc_bb_atom_idx >= 0`, which is true whenever the atom
+            # NAME exists, so an unresolved-but-named atom used to pass as real while
+            # carrying (0,0,0). Marking it absent routes it to the bounded fallback
+            # that was already intended: v4 zeroes it and bb_local becomes 0, i.e.
+            # the frame origin (== CA). It keeps q_bs's gather and the physical
+            # loss's bb_valid consistent too, since both key off the same index.
+            #
+            # After the frame guard above this can only ever be O -- a residue
+            # missing any of N/CA/C is dropped whole.
             for bi, bn in enumerate(XPB_BACKBONE_ATOM_NAMES):  # (N, CA, C, O)
-                if bn in atoms:
+                if bn in atoms and resolved[atoms[bn]]:
                     sc_bb_atom_idx[ti, bi] = atoms[bn]
                     sc_bb_coords[ti, bi] = coord[atoms[bn]]
             for j, nm in enumerate(sidechain_atoms(str(res_name[ai]))):

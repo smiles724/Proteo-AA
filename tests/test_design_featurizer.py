@@ -495,3 +495,57 @@ def test_no_supervised_local_target_becomes_a_lever_arm():
         "a supervised target sits further than 10 A from its own frame origin -- "
         "the frame was built from a placeholder coordinate"
     )
+
+
+def test_an_unresolved_backbone_O_takes_the_absent_atom_path():
+    """An unresolved O must be marked ABSENT (index -1), not merely zero-valued.
+
+    The 14-slot axis carries four backbone slots (N, CA, C, O) as context, and
+    every consumer decides their validity from `sc_bb_atom_idx >= 0` -- the atom
+    INDEX, which exists whenever the atom name does. An unresolved-but-named O
+    therefore passed as valid while carrying the (0,0,0) placeholder, and the code
+    comment describing the bounded fallback ("an absent atom sits at the frame
+    origin") already conflated the two cases.
+
+    The two stages are harmed differently, and neither through a loss target:
+
+      * Stage II reads sc_bb_coords directly. Those are the raw deposited
+        coordinates, never augmented, so the slot is the literal (0,0,0) and
+        to_local puts it at -R^T.t -- the full distance from the deposition
+        origin to this residue, hundreds of Angstrom for a 7us9-like placement.
+        Its w_xyz activation is enormous.
+      * Stage III gathers x_denoised, which is NOT the same failure.
+        centre_random_augmentation re-applies coordinate_mask after the rotation
+        and translation (Protenix utils.py:91-93), so the row is zeroed in the
+        augmented frame and x_noisy is pure sigma-scale noise sitting near the
+        centred protein -- bounded, not a large excursion. But coordinate_mask
+        also excludes it from the coordinate loss, so nothing ever supervises it:
+        the slot carries an unconstrained noise coordinate.
+
+    The intra-residue block has no distance bias to suppress either of them (the
+    cross-residue block does, by construction), so both mix into all fourteen of
+    that residue's atom features.
+
+    Marking it absent routes it to the fallback the comment already promised:
+    v4 zeroes it, bb_local becomes 0 == the frame origin == CA. It also keeps
+    q_bs's gather and the physical loss's bb_valid consistent, since both key off
+    the same index.
+
+    After the N/CA/C guard this can only ever be O -- a residue missing any frame
+    atom is dropped whole.
+    """
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, "O")})
+    out = _sc_targets(aa, feat, binder)
+    idx = out["sc_bb_atom_idx"]          # [L, 4] = (N, CA, C, O)
+
+    assert int(idx[0, 3]) == -1, (
+        "an unresolved O is still indexed, so every consumer keying off "
+        "`sc_bb_atom_idx >= 0` treats a placeholder coordinate as real"
+    )
+    assert float(out["sc_bb_coords"][0, 3].abs().max()) == 0.0
+
+    # The residue is otherwise intact: its frame atoms are resolved, so it keeps
+    # its frame and its side chain stays supervised. Only the O slot drops out.
+    assert (idx[0, :3] >= 0).all(), "resolved frame atoms must survive"
+    assert bool(out["sc_atom_mask"][0, :2].all()), "SER's CB/OG stay supervised"
+    assert int(idx[1, 3]) >= 0, "residue 1 is fully resolved and must be untouched"

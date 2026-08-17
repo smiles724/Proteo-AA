@@ -442,3 +442,56 @@ def test_missing_is_resolved_annotation_still_rejects_placeholder_coords():
     assert bool(out["sc_atom_mask"][0, 1]) is False, (
         "zero-coordinate atom must be rejected even with no is_resolved annotation"
     )
+
+
+@pytest.mark.parametrize("frame_atom", ["N", "CA", "C"])
+def test_residue_with_an_unresolved_frame_atom_is_excluded(frame_atom):
+    """A residue whose N/CA/C was never measured has no usable local frame.
+
+    Same root cause as the side-chain case above -- name presence was checked,
+    `is_resolved` was not -- but it does NOT show up as a masked atom, because the
+    side-chain atoms themselves may be perfectly well resolved. What is broken is
+    the frame they hang off: `t` is CA and the basis comes from N/CA/C, so a
+    (0,0,0) placeholder among those three puts the whole residue's local geometry
+    in a frame belonging to nothing.
+
+    Stage II hides this completely. The coordinate loss rebuilds the target with
+    the SAME frame it was stored under, and `to_global(to_local(x, R, t), R, t)`
+    is exactly x for any orthonormal R -- the bad frame cancels. Stage III does
+    not cancel: there the target is rebuilt through the PREDICTED frame, so the
+    round trip no longer closes and `gt_local` acts as a lever arm. With a
+    placeholder CA it grows from ~3 A to |x_true| (hundreds of A), which
+    multiplies the backbone's own angular error by two orders of magnitude.
+
+    Excluding the residue is the same treatment a missing atom NAME already gets,
+    so this is a widened guard rather than new behaviour.
+    """
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, frame_atom)})
+    out = _sc_targets(aa, feat, binder)
+    mask = out["sc_atom_mask"].bool()
+
+    assert not bool(mask[0].any()), (
+        f"residue 0's {frame_atom} is unresolved, so it has no usable frame and "
+        "must not be supervised at all"
+    )
+    # SER owns exactly two side-chain slots (CB, OG); the rest of MAX_SC is padding.
+    assert bool(mask[1, :2].all()), "residue 1 is fully resolved and must be untouched"
+
+
+def test_no_supervised_local_target_becomes_a_lever_arm():
+    """`gt_local` must stay within side-chain reach for every supervised slot.
+
+    States the invariant without naming which atom went missing: a local
+    coordinate of hundreds of Angstrom means the frame origin is not on this
+    residue, and in Stage III that magnitude multiplies the predicted backbone's
+    angular error.
+    """
+    aa, feat, binder = _ser_complex(400.0, unresolved_slots={(0, "CA")})
+    out = _sc_targets(aa, feat, binder)
+    gt, mask = out["sc_gt_local"].float(), out["sc_atom_mask"].bool()
+
+    assert mask.any(), "residue 1 is intact and should still be supervised"
+    assert (gt[mask].norm(dim=-1) < 10.0).all(), (
+        "a supervised target sits further than 10 A from its own frame origin -- "
+        "the frame was built from a placeholder coordinate"
+    )

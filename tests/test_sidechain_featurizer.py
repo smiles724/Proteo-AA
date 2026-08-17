@@ -15,14 +15,22 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "Protenix")))
 def _ala_atom_array():
     biotite = pytest.importorskip("biotite.structure")
     names = ["N", "CA", "C", "O", "CB"]
+    # Offset off the coordinate ORIGIN on purpose. This array carries no
+    # `is_resolved` annotation, so the featurizer falls back to treating an
+    # exactly-zero coordinate as a placeholder -- with CA at (0,0,0) the residue
+    # would look like it has no measured frame atom and be dropped entirely. The
+    # residue's absolute position is incidental to what this file tests (which
+    # slot CB lands in, and its local coordinate), and every assertion below
+    # recomputes its expectation from this same array, so translating is free.
+    _OFFSET = np.array([10.0, 10.0, 10.0], dtype=np.float32)
     coords = np.array(
         [[-1.0, 0.0, 0.0],   # N
-         [0.0, 0.0, 0.0],    # CA (origin)
+         [0.0, 0.0, 0.0],    # CA (frame origin)
          [1.0, 0.5, 0.0],    # C
          [1.2, 1.6, 0.0],    # O
          [0.2, -0.8, 0.9]],  # CB (the side-chain atom)
         dtype=np.float32,
-    )
+    ) + _OFFSET
     aa = biotite.AtomArray(length=5)
     aa.coord = coords
     aa.chain_id = np.array(["A"] * 5)

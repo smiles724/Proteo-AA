@@ -38,6 +38,7 @@ This module does NOT:
 
 Callers compose: parse → crop → Protenix-featurize → DesignFeaturizer.
 """
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -141,6 +142,10 @@ class DesignFeaturizer:
     Args:
         selection: how to pick the binder and sample hotspots.
     """
+
+    # Set once the frame guard has reported; keeps a per-example diagnostic from
+    # printing on every item of every epoch (this runs inside the dataloader).
+    _warned_no_frame = False
 
     def __init__(self, selection: DesignSelection) -> None:
         self.selection = selection
@@ -500,11 +505,31 @@ class DesignFeaturizer:
         # 0:3 are valid — never test validity with `.all()` over all four columns.
         sc_bb_atom_idx = np.full((n_token, 4), -1, dtype=np.int64)
 
+        n_no_frame = 0
         for ti, ai in enumerate(rep_idx):
             if not binder[ai]:
                 continue
             atoms = res_atoms[(chain_id[ai], res_id[ai])]
-            if not all(a in atoms for a in ("N", "CA", "C")):
+            # The frame atoms must be PRESENT and RESOLVED. Name presence alone was
+            # the same oversight that made unresolved side-chain atoms supervised
+            # targets above, but here it does not show up as a masked atom: the side
+            # chain may be perfectly well resolved while the frame it hangs off is
+            # built from a (0,0,0) placeholder. `t` is CA and the basis comes from
+            # N/CA/C, so one placeholder among the three puts the whole residue's
+            # local geometry in a frame belonging to nothing.
+            #
+            # Stage II hides this: the coordinate loss rebuilds the target with the
+            # SAME frame it was stored under, and to_global(to_local(x, R, t), R, t)
+            # is exactly x for any orthonormal R, so the bad frame cancels. Stage III
+            # does not cancel — there the target is rebuilt through the PREDICTED
+            # frame — and `gt_local` then acts as a lever arm: with a placeholder CA
+            # it grows from ~3 A to |x_true| (hundreds of A), multiplying the
+            # backbone's own angular error by two orders of magnitude.
+            #
+            # Skipping is the treatment a missing atom NAME already got, so this
+            # widens an existing guard rather than introducing a new behaviour.
+            if not all(a in atoms and resolved[atoms[a]] for a in ("N", "CA", "C")):
+                n_no_frame += 1
                 continue
             n = torch.from_numpy(coord[atoms["N"]])[None]
             ca = torch.from_numpy(coord[atoms["CA"]])[None]
@@ -529,6 +554,19 @@ class DesignFeaturizer:
                     g = torch.from_numpy(coord[atoms[nm]])[None, None]  # [1,1,3]
                     sc_gt_local[ti, j] = to_local(g, R, t)[0, 0].numpy()
                     sc_mask[ti, j] = True
+
+        # Say how much the frame guard actually costs, ONCE per process. Whether
+        # the Stage II checkpoint is worth retraining on the corrected data turns
+        # on this number, and nobody has measured it — the 9.84% figure in the
+        # unresolved-atom guard above counts side-chain atoms, not frame atoms.
+        if n_no_frame and not DesignFeaturizer._warned_no_frame:
+            DesignFeaturizer._warned_no_frame = True
+            n_binder_tok = int(sum(1 for ai in rep_idx if binder[ai]))
+            logging.getLogger(__name__).info(
+                "side-chain targets: %d/%d binder tokens dropped for having an "
+                "unresolved N/CA/C (no usable local frame). Logged once per process.",
+                n_no_frame, n_binder_tok,
+            )
 
         return {
             "sc_gt_local": torch.from_numpy(sc_gt_local),

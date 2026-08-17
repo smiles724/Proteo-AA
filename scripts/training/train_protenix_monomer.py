@@ -584,6 +584,7 @@ def build_configs(args: argparse.Namespace, device):
     from protenix.config.config import parse_configs
     from pxdesign_train.configs.configs_train import (
         apply_sidechain_ablation_arm,
+        arm_bb_context,
         training_configs,
     )
 
@@ -686,7 +687,9 @@ def build_configs(args: argparse.Namespace, device):
         # slightly wider intra-residue attention (14x14 instead of 10x10), and the
         # four backbone slots are keys only -- never decoded, never in the loss.
         # Leaving it off here would force a second Stage II run for every q arm.
-        configs.sidechain.bb_context = True
+        # Resolved from the arm, not written as a literal: the arm was already
+        # applied above, so a literal here would silently un-do `no-bbctx`.
+        configs.sidechain.bb_context = arm_bb_context(args.sc_ablation_arm)
         # B->S wiring, asymmetric on purpose:
         #   a_bs_concat=True  -- B's a_token summarises a residue from its four
         #       BACKBONE atoms; S_phi's pooled feature summarises the same residue
@@ -765,8 +768,38 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
         configs.sidechain.force_gt_type_logits = False
+        # Same resolution as Stage II: pinned, but from the arm rather than a
+        # literal, so `no-bbctx` survives into Stage III too.
+        configs.sidechain.bb_context = arm_bb_context(args.sc_ablation_arm)
+        # The three GUARDED layout switches, declared exactly as Stage II declares
+        # them. They are not optional here: an unset switch is not "left alone", it
+        # takes the base-config default (all three False), while the Stage II
+        # checkpoint being warm-started was trained with all three True. Two of them
+        # sit in SIDECHAIN_LAYOUT_KEYS, so that mismatch makes the warm-start RAISE
+        # and Stage III never starts; the third (template_residual) changes what the
+        # head's output means and would have gone through silently.
+        configs.sidechain.frame_aware_head = (
+            True if args.sc_frame_aware_head is None else bool(args.sc_frame_aware_head)
+        )
+        configs.sidechain.local_coord_input = (
+            True if args.sc_local_coord_input is None else bool(args.sc_local_coord_input)
+        )
+        configs.sidechain.template_residual = (
+            True if args.sc_template_residual is None else bool(args.sc_template_residual)
+        )
+        if configs.sidechain.template_residual and not (
+            configs.sidechain.frame_aware_head and configs.sidechain.local_coord_input
+        ):
+            raise ValueError(
+                "--sc-template-residual requires --sc-frame-aware-head and "
+                "--sc-local-coord-input"
+            )
         # Warm-start from the Stage II checkpoint: backbone, conditioning and the
-        # side-chain module all carry over, so no prefix filter.
+        # side-chain module all carry over, so no prefix filter. An empty
+        # trainable_param_keywords means NO filter (both modules trainable), which
+        # is what lets train_mode='alternating' actually engage -- Stage I and
+        # Stage II each leave only one module trainable and fall back to a single
+        # optimizer.
         configs.training.checkpoint_include_prefixes = []
         configs.training.trainable_param_keywords = []
         if args.training_stage == "predicted_mask":
@@ -994,7 +1027,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--sc-ablation-arm",
         default="default",
-        choices=["default", "no", "a-indirect", "a-direct", "bbctx", "q", "a-direct+q"],
+        # NO argparse `choices` on purpose. The names live in SC_ABLATION_ARMS,
+        # which cannot be imported here -- parse_args() runs before
+        # _bootstrap_paths() puts Protenix on sys.path. The hand-maintained
+        # copy that used to sit here drifted to 6 of the 21 arms and still
+        # offered "bbctx", a name renamed to "no-bbctx" long ago. Validation
+        # happens in build_configs, where apply_sidechain_ablation_arm raises
+        # with the full list -- before any training starts.
+        help="side-chain feedback ablation arm; 'default' leaves the config "
+             "untouched. Names are the keys of SC_ABLATION_ARMS in "
+             "pxdesign_train/configs/configs_train.py.",
     )
 
     p.add_argument("--use-msa", action="store_true")

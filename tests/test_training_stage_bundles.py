@@ -216,3 +216,45 @@ def test_adoption_survives_an_unreadable_checkpoint(tmp_path):
     bad = tmp_path / "not_a_checkpoint.pt"
     bad.write_text("this is not a torch archive")
     assert mod.adopt_sidechain_arch_from_checkpoint(_fake_configs(), _fake_args(bad)) == {}
+
+
+def test_aa_head_on_stage2_freezes_everything_but_the_head(source):
+    """Train the AA head on a frozen Stage II model, in the Stage III configuration.
+
+    An AA head is not portable across configurations. A head trained by
+    `aa_head_warmup` (enable_sidechain and enable_coevolution both False) produced
+    aa_ce 54-76 at chance accuracy when grafted into Stage III (both True) -- and
+    that held even for a donor whose backbone was byte-identical (636/636) to the
+    Stage II trunk. So this bundle fits the head to the feature path it will
+    actually run in, while the backbone and S_phi stay fixed.
+    """
+    start = source.index('elif args.training_stage == "aa_head_on_stage2"')
+    block = source[start:source.index("    elif args.training_stage in (", start)]
+
+    # Stage III's feature path, so the head is fitted to what it will see.
+    assert "configs.enable_sidechain = True" in block
+    assert "configs.enable_coevolution = True" in block
+    assert "configs.sidechain.predicted_frame = True" in block
+    assert "configs.sidechain.per_sigma = True" in block
+
+    # ...but only the head learns.
+    assert 'configs.training.trainable_param_keywords = ["design_residue_type_head."]' in block
+    assert "configs.residue_type.trunk_grad_scale = 0.0" in block
+
+    # Only the AA objective is live: the modules the other losses would train are
+    # frozen, so they contribute no gradient.
+    assert "configs.loss.weight_aa = 1.0" in block
+    for zeroed in ("weight_mse", "weight_lddt", "weight_disto", "weight_sc_local",
+                   "weight_sc_phys", "weight_sc_global", "weight_bb_post", "weight_aa_post"):
+        assert f"configs.loss.{zeroed} = 0.0" in block, zeroed
+
+    # Loads the Stage II checkpoint whole (backbone + conditioning + S_phi) and
+    # honours the layout it recorded.
+    assert "configs.training.checkpoint_include_prefixes = []" in block
+    assert "adopt_sidechain_arch_from_checkpoint(configs, args)" in block
+
+
+def test_aa_head_on_stage2_is_a_selectable_stage(source):
+    block = source[source.index("--training-stage"):]
+    block = block[:block.index(")")]
+    assert '"aa_head_on_stage2"' in block

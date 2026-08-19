@@ -781,6 +781,49 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_sc_global = 0.0
         configs.loss.weight_bb_post = 0.0
         configs.loss.weight_aa_post = 0.0
+    elif args.training_stage == "aa_head_on_stage2":
+        # Train ONLY the AA head, on a frozen Stage II model, IN THE STAGE III
+        # CONFIGURATION. This exists because an AA head is not portable across
+        # configurations: `aa_head_warmup` trains one with enable_sidechain and
+        # enable_coevolution OFF, and grafting that head into Stage III (both ON)
+        # produced confidently-wrong predictions -- aa_ce 54-76 at chance accuracy,
+        # measured with BOTH a joint donor and an aa_head_warmup donor whose
+        # backbone was byte-identical (636/636) to the Stage II trunk. Identical
+        # weights were not enough; the head has to be fitted to the feature path it
+        # will be used in.
+        #
+        # So: same machinery as Stage III (side chain on, refinement pass on,
+        # predicted frames, per-sigma), but the backbone and S_phi are frozen and
+        # only design_residue_type_head learns. The checkpoint this writes therefore
+        # carries all three components -- trained backbone, trained S_phi, and an AA
+        # head fitted to them -- which is the single-file Stage III start that no
+        # existing checkpoint provided.
+        configs.loss.weight_mse = 0.0
+        configs.loss.weight_lddt = 0.0
+        configs.loss.weight_disto = 0.0
+        configs.loss.weight_aa = 1.0
+        # The refinement pass still runs (it is part of the feature path we are
+        # fitting to) but its losses are zeroed: the modules they would train are
+        # frozen, so they contribute no gradient and only noise to the logs.
+        configs.loss.weight_bb_post = 0.0
+        configs.loss.weight_aa_post = 0.0
+        configs.loss.weight_sc_local = 0.0
+        configs.loss.weight_sc_phys = 0.0
+        configs.loss.weight_sc_global = 0.0
+        configs.enable_sidechain = True
+        configs.enable_coevolution = True
+        configs.sidechain.predicted_frame = True
+        configs.sidechain.per_sigma = True
+        configs.sidechain.template_init = True
+        configs.sidechain.template_provider = args.template_provider
+        configs.sidechain.force_gt_type_logits = False
+        # Frozen trunk: no gradient path from the AA loss into the backbone.
+        configs.residue_type.trunk_grad_scale = 0.0
+        # Load the Stage II checkpoint whole -- backbone, conditioning and S_phi.
+        configs.training.checkpoint_include_prefixes = []
+        configs.training.trainable_param_keywords = ["design_residue_type_head."]
+        configs.training.ema_decay = 0.0
+        adopt_sidechain_arch_from_checkpoint(configs, args)
     elif args.training_stage in ("coevolution", "predicted_mask"):
         # Paper Stage III (coevolution) and Stage IV (predicted_mask). Neither had
         # an entry here: `joint` above is BB + AA head with the side chain OFF, so
@@ -931,6 +974,14 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
         args.enable_coevolution = False
+    elif args.training_stage == "aa_head_on_stage2":
+        args.disable_sidechain = False
+        args.disable_aa_loss = False
+        args.aa_mask_mode = "all"
+        args.enable_coevolution = True
+        args.predicted_frame = True
+        args.per_sigma = True
+        args.trunk_grad_scale = 0.0
     elif args.training_stage in ("coevolution", "predicted_mask"):
         args.disable_sidechain = False
         args.disable_aa_loss = False
@@ -947,7 +998,7 @@ def parse_args() -> argparse.Namespace:
         default="backbone_only",
         choices=[
             "backbone_only", "aa_head_warmup", "sidechain_warmup", "joint",
-            "coevolution", "predicted_mask",
+            "aa_head_on_stage2", "coevolution", "predicted_mask",
         ],
         help="Training objective bundle. backbone_only is the default pretraining "
              "stage; 'coevolution' is paper Stage III (both modules + the "

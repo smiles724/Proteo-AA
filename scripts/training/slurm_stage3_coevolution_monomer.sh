@@ -31,10 +31,18 @@ RUN_ROOT="${RUN_ROOT:-/hai/scratch/yfsun/proteo_aa_runs/protenix_monomer_stage3_
 # useful for smoke-testing the machinery.
 LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-}"
 WARM_START_PARAMS_ONLY="${WARM_START_PARAMS_ONLY:-1}"
+# A Stage II checkpoint carries the backbone and S_phi but a chance-level AA head
+# (Stage II excluded it from the warm start and then froze it). Point this at a
+# joint/aa-head run to compose all three trained components.
+AA_HEAD_CHECKPOINT="${AA_HEAD_CHECKPOINT:-}"
 SMOKE="${SMOKE:-0}"
 
 if [[ -n "${LOAD_CHECKPOINT}" && ! -f "${LOAD_CHECKPOINT}" ]]; then
   echo "ERROR: LOAD_CHECKPOINT does not exist: ${LOAD_CHECKPOINT}" >&2
+  exit 2
+fi
+if [[ -n "${AA_HEAD_CHECKPOINT}" && ! -f "${AA_HEAD_CHECKPOINT}" ]]; then
+  echo "ERROR: AA_HEAD_CHECKPOINT does not exist: ${AA_HEAD_CHECKPOINT}" >&2
   exit 2
 fi
 
@@ -68,6 +76,9 @@ if [[ -n "${LOAD_CHECKPOINT}" ]]; then
   if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
     LOAD_ARGS+=(--warm-start-params-only)
   fi
+fi
+if [[ -n "${AA_HEAD_CHECKPOINT}" ]]; then
+  LOAD_ARGS+=(--load-aa-head-from "${AA_HEAD_CHECKPOINT}")
 fi
 
 "${PYTHON_BIN}" -u scripts/training/train_protenix_monomer.py \

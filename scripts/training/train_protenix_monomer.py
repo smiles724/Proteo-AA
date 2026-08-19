@@ -733,9 +733,26 @@ def build_configs(args: argparse.Namespace, device):
         # diffusion conditioning, the atom pair bias and the token transformer —
         # so h_res in this stage would be a different quantity than the h_res of
         # Stage I / III, and any w_res learnt here could not transfer.
+        # `design_residue_type_head` is carried for the same reason, and dropping it
+        # is what made Stage III start from a chance-level AA head. Stage II does not
+        # train it (weight_aa=0, and it is not in trainable_param_keywords) and does
+        # not depend on it (force_gt_type_logits feeds S_phi the true types), so
+        # loading it only preserves what the donor had -- but NOT loading it meant
+        # every Stage II checkpoint saved a fresh random AA head, and Stage III
+        # inherits the whole file. Measured on a Stage III smoke off such a
+        # checkpoint: aa_ce 2.991 vs ln(20)=2.996, aa_acc ~5%, i.e. chance.
+        #
+        # Grafting a trained AA head in afterwards is NOT equivalent: the head is
+        # coupled to the trunk it was trained against. Overlaying the joint run's
+        # head onto this lineage's backbone (which differ by ~8% median relative
+        # weight difference) drove aa_ce to ~50 at unchanged chance accuracy --
+        # confidently wrong. Carrying the head along the lineage keeps it consistent
+        # with the backbone it was trained with; `--load-aa-head-from` exists for
+        # deliberate grafts, not as a substitute for this.
         configs.training.checkpoint_include_prefixes = [
             "diffusion_module.",
             "design_condition_embedder.",
+            "design_residue_type_head.",
         ]
         # Stable Stage II-A parameterization: S_phi reads residue-local template
         # coordinates and predicts a zero-initialized local correction. The known
@@ -955,6 +972,19 @@ def parse_args() -> argparse.Namespace:
         "--warm-start-params-only",
         action="store_true",
         help="When used with --load-checkpoint, load only model parameters instead of exact training state.",
+    )
+    p.add_argument(
+        "--load-aa-head-from",
+        default="",
+        help="Overlay the residue-type (AA) head from a SECOND checkpoint, applied "
+             "after --load-checkpoint. No single checkpoint has all three trained "
+             "components: a Stage II side-chain run carries the backbone and S_phi "
+             "but re-initialised the AA head and froze it (chance-level: aa_ce ~2.99 "
+             "vs ln(20)=2.996), while a `joint` run has a trained AA head but never "
+             "builds S_phi. Stage III needs all three, so compose: --load-checkpoint "
+             "<stage II> --load-aa-head-from <joint>. Only valid with "
+             "--warm-start-params-only; overlaying onto a full resume would roll back "
+             "the AA head this run already trained.",
     )
     p.add_argument("--filtered-index", default="")
     p.add_argument("--rebuild-index", action="store_true")
@@ -1340,6 +1370,7 @@ def main() -> None:
         checkpoint_dir=str(output_dir / "checkpoints"),
         load_checkpoint_path=args.load_checkpoint or None,
         checkpoint_params_only=bool(args.warm_start_params_only),
+        overlay_aa_head_path=args.load_aa_head_from or None,
         max_steps=int(args.max_steps),
     )
 

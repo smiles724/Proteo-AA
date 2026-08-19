@@ -109,6 +109,7 @@ class PXDesignTrainer:
         checkpoint_dir: Optional[str] = None,
         load_checkpoint_path: Optional[str] = None,
         checkpoint_params_only: bool = True,
+        overlay_aa_head_path: Optional[str] = None,
     ) -> None:
         self.configs = configs
         self.components = components
@@ -132,6 +133,89 @@ class PXDesignTrainer:
 
         if load_checkpoint_path:
             self.load_checkpoint(load_checkpoint_path, params_only=checkpoint_params_only)
+        if overlay_aa_head_path:
+            # AFTER the primary load, on purpose: this overwrites the AA head the
+            # primary checkpoint supplied.
+            if load_checkpoint_path and not checkpoint_params_only:
+                raise ValueError(
+                    "Refusing to overlay an AA head on top of a FULL resume "
+                    f"({load_checkpoint_path}). A resume restores the AA head this "
+                    "run already trained, and overlaying would silently roll it back "
+                    "to the donor's weights while the optimizer state kept going. "
+                    "Overlay only when warm-starting (params-only)."
+                )
+            self.overlay_module_from_checkpoint(
+                overlay_aa_head_path, self.AA_HEAD_PREFIXES, label="AA head",
+            )
+
+    # Modules that make up the residue-type (AA) head. `backbone_aa_encoder.` is
+    # deliberately absent: an older aa_head_warmup lineage saved one, but the
+    # current model does not build it, so overlaying it would only produce
+    # "unexpected key" noise.
+    AA_HEAD_PREFIXES = ("design_residue_type_head.",)
+
+    def overlay_module_from_checkpoint(
+        self, path: str, prefixes: tuple[str, ...], label: str = "module",
+    ) -> list[str]:
+        """Copy just `prefixes` out of another checkpoint, over the loaded weights.
+
+        WHY THIS EXISTS. No single checkpoint in this project carries all three
+        trained components. A Stage II side-chain run has the backbone and S_phi but
+        re-initialised the AA head and froze it (measured: aa_ce 2.99 vs ln(20)
+        2.996, aa_acc ~5% -- chance). A `joint` run has the backbone and a trained AA
+        head but never constructs S_phi, so it has no side-chain weights at all.
+        Stage III needs all three, so it composes: load Stage II wholesale, then
+        overlay the AA head from a joint/aa-head run.
+
+        A partial `load_state_dict(..., strict=False)` leaves every key it is not
+        given untouched, which is what makes the overlay additive rather than a
+        second full load.
+
+        Raises if nothing matched -- a silent no-op here would leave a chance-level
+        AA head in a run whose command line says otherwise.
+        """
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        state = ckpt.get("model", ckpt)
+        if not self.use_ddp and any(k.startswith("module.") for k in state):
+            state = {k.removeprefix("module."): v for k, v in state.items()}
+
+        model_state = self.model.state_dict()
+        take, absent, mismatched = {}, [], []
+        for key, value in state.items():
+            if not key.startswith(prefixes):
+                continue
+            current = model_state.get(key)
+            if current is None:
+                absent.append(key)
+            elif torch.is_tensor(value) and current.shape != value.shape:
+                mismatched.append((key, tuple(value.shape), tuple(current.shape)))
+            else:
+                take[key] = value
+
+        if not take:
+            raise ValueError(
+                f"{path} supplied no usable {label} tensors for prefixes {prefixes}. "
+                f"({len(absent)} keys are not in this model, {len(mismatched)} have "
+                "the wrong shape.) Nothing was overlaid -- check that this checkpoint "
+                f"actually contains a trained {label}."
+            )
+
+        self.model.load_state_dict(take, strict=False)
+        self._log(
+            f"Overlaid {len(take)} {label} tensor(s) from {path} "
+            f"(prefixes {prefixes})"
+        )
+        if absent:
+            self._log(
+                f"  {len(absent)} {label} key(s) in that checkpoint are not in this "
+                f"model and were ignored: {absent[:3]}"
+            )
+        if mismatched:
+            self._log(
+                f"  {len(mismatched)} {label} key(s) had incompatible shapes and were "
+                f"ignored: {[(k, a, b) for k, a, b in mismatched[:3]]}"
+            )
+        return sorted(take)
 
     # ----- init helpers -----
 

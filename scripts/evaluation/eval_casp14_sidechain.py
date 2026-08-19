@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Side-chain packing benchmark on CASP14 targets.
+"""Side-chain packing benchmark on CASP targets (CASP14/15/16).
 
 THE TASK, as side-chain-packing papers define it: give the model the
 experimentally determined backbone and the true amino-acid sequence, ask it to
@@ -15,18 +15,28 @@ predicted side-chain atoms and the GT geometry mapped through the residue frame
 just `sqrt(sc_local)`, and the per-protein breakdown gives it per target. Writing
 a second scoring path would risk disagreeing with the number training optimised.
 
-TARGET SOURCE. The CASP14 public natives (`casp14.targets.T.public_*.tar.gz`)
-carry no PDB identifier and leave the chain-ID column blank, and a coordinate-only
-CIF converted from them lacks the mmCIF categories Protenix's parser requires
-(`pdbx_struct_assembly`, populated `label_seq_id`, ...). This script therefore
-scores the deposited PDB entry for each target, which is the same experimental
-structure and parses natively. `--mapping` supplies target -> (pdb_id, chain);
-build it with `map_casp14_targets.py`.
+TARGET SOURCE — two paths, and `--manifest` is the one to use.
+
+  `--manifest` (PREFERRED): score the CASP natives directly, via the mmCIFs that
+  `casp_natives_to_cif.py` builds. Works for every edition and involves no
+  target->PDB mapping at all.
+
+  `--mapping`: score the DEPOSITED PDB entry instead. Only viable where our local
+  seqres/mmCIF snapshots cover the edition (i.e. CASP14 — they are 2022-vintage,
+  so CASP16 is out of reach), and it depends on sequence matching, which on CASP14
+  mapped ten unrelated targets to one polymerase before a length filter was added.
+
+EDITION LABELLING. This script is edition-agnostic, so the report title and the
+output filename come from `--label` (or are derived from the input path). They used
+to be hardcoded to "CASP14", which meant the CASP15 and CASP16 runs both printed
+"=== CASP14 side-chain packing ===" and wrote `casp14_sidechain.json` — mislabelled
+results, and two editions sharing one output directory would silently overwrite.
 
 CAVEAT THE CALLER MUST WEIGH. Our training index is
-`weightedPDB_indices_before_2021-09-30`, and CASP14 targets were released in 2020,
-so these structures are very likely INSIDE the training pool. Treat the result as
-a sanity check against published packing numbers, NOT as held-out generalisation.
+`weightedPDB_indices_before_2021-09-30`. CASP14 (2020) is very likely INSIDE that
+pool — measured: 15/17 mapped entries were — so treat CASP14 as a sanity check
+against published numbers, not as held-out generalisation. CASP15 (2022) and
+CASP16 (2024) post-date the cutoff and are genuinely held out.
 `--report-train-overlap` marks which targets appear in the training index.
 """
 from __future__ import annotations
@@ -71,7 +81,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--template-provider", default="dunbrack_mode")
     p.add_argument("--report-train-overlap", action="store_true",
                    help="flag targets present in the pre-2021-09-30 training index")
+    p.add_argument("--label", default=None,
+                   help="Edition label for the report and the output filename (e.g. CASP16). "
+                        "Defaults to the manifest/mapping's parent directory name. This script "
+                        "scores any CASP edition, so a hardcoded label silently mislabels "
+                        "results -- CASP15 and CASP16 runs both printed 'CASP14'.")
     return p.parse_args()
+
+
+def resolve_label(args) -> str:
+    """Edition label, derived from the input path when not given explicitly."""
+    if args.label:
+        return args.label
+    src = args.manifest or args.mapping
+    for part in reversed(src.resolve().parts):
+        if part.lower().startswith("casp"):
+            return part.upper()
+    return "CASP"
 
 
 def build_target_list(args) -> tuple[list[dict], list[dict]]:
@@ -345,7 +371,9 @@ def main() -> None:
 
     per_target.sort(key=lambda x: (x["sidechain_rmsd_A"] is None, x["sidechain_rmsd_A"]))
     good = [p["sidechain_rmsd_A"] for p in per_target if p["sidechain_rmsd_A"] is not None]
+    label = resolve_label(args)
     summary = {
+        "edition": label,
         "checkpoint": str(args.checkpoint.resolve()),
         "n_targets_scored": len(per_target),
         "n_targets_excluded": len(excluded),
@@ -362,23 +390,31 @@ def main() -> None:
         summary["train_index_overlap"] = train_index_overlap(args, targets)
 
     out = {"summary": summary, "per_target": per_target}
-    (args.output_dir / "casp14_sidechain.json").write_text(json.dumps(out, indent=2) + "\n")
+    # Filename carries the edition too, so two runs in one output dir cannot
+    # overwrite each other and a stray file cannot be mistaken for CASP14.
+    out_path = args.output_dir / f"{label.lower()}_sidechain.json"
+    out_path.write_text(json.dumps(out, indent=2) + "\n")
 
-    print("\n=== CASP14 side-chain packing (GT backbone + GT sequence) ===")
-    print(f"{'target':<10}{'pdb':<7}{'len':>5}  {'sc_local(A^2)':>13}  {'RMSD(A)':>8}")
+    print(f"\n=== {label} side-chain packing (GT backbone + GT sequence) ===")
+    # Widened, and the source column is suppressed when it just repeats the target
+    # (the direct-native path sets pdb_id = target, which printed 'T1137s8-D1T1137s8-D1').
+    same = all(p["pdb_id"] == p["target"] for p in per_target)
+    head = f"{'target':<12}{'len':>6}" if same else f"{'target':<12}{'source':<9}{'len':>6}"
+    print(head + f"  {'sc_local(A^2)':>13}  {'RMSD(A)':>8}")
     for p in per_target:
         rmsd = "n/a" if p["sidechain_rmsd_A"] is None else f"{p['sidechain_rmsd_A']:.3f}"
-        print(f"{p['target']:<10}{p['pdb_id']:<7}{str(p['native_len']):>5}  "
-              f"{p['sc_local_A2']:>13.4f}  {rmsd:>8}")
+        left = (f"{p['target']:<12}" if same
+                else f"{p['target']:<12}{str(p['pdb_id']):<9}")
+        print(left + f"{str(p['native_len']):>6}  {p['sc_local_A2']:>13.4f}  {rmsd:>8}")
     if excluded:
         print(f"\nEXCLUDED {len(excluded)} target(s) — not covered by this number:")
         for e in excluded:
-            print(f"  {e['target']:<10}{e['reason']}")
+            print(f"  {e['target']:<12}{e['reason']}")
     print(f"\ntargets scored              : {summary['n_targets_scored']}")
     if summary["sidechain_rmsd_A_mean_over_targets"]:
         print(f"side-chain RMSD (mean/target): {summary['sidechain_rmsd_A_mean_over_targets']:.3f} A")
         print(f"side-chain RMSD (median)     : {summary['sidechain_rmsd_A_median_over_targets']:.3f} A")
-    print(f"wrote {args.output_dir / 'casp14_sidechain.json'}")
+    print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":

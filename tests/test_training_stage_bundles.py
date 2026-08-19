@@ -91,3 +91,128 @@ def test_every_stage_sets_the_dataset_args_it_needs(source):
         assert f'"{stage}"' in block, (
             f"{stage} has a config bundle but no dataset-arg bundle"
         )
+
+
+# ---------------------------------------------------------------------------
+# Stage II -> Stage III layout handoff
+# ---------------------------------------------------------------------------
+
+def test_coevolution_adopts_the_checkpoint_layout(source):
+    """Wiring guard: the Stage III/IV bundle must consult the checkpoint's layout.
+
+    Stage III continues a Stage II side-chain module, so S_phi's input layout
+    belongs to that checkpoint, not to this stage's defaults. Without this call the
+    bundle fell back to the config defaults and disagreed with every real Stage II
+    checkpoint (centre_coord_input False vs True -> `_check_sidechain_arch` aborts;
+    q_bs True vs False -> an untrained fusion channel switched on silently).
+    """
+    start = source.index('elif args.training_stage in ("coevolution", "predicted_mask")')
+    block = source[start:source.index("    return configs", start)]
+    assert "adopt_sidechain_arch_from_checkpoint(configs, args)" in block, (
+        "Stage III/IV must adopt the warm-start checkpoint's side-chain layout"
+    )
+
+
+def _load_entry():
+    """Import the training entry, skipping where its heavy deps are absent."""
+    pytest.importorskip("torch")
+    pytest.importorskip("protenix")
+    pytest.importorskip("pxdesign")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("tpm_for_test", ENTRY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _fake_args(ckpt, **over):
+    import argparse as _a
+
+    ns = _a.Namespace(
+        load_checkpoint=str(ckpt) if ckpt else None,
+        sc_centre_coord_input=None, sc_frame_aware_head=None,
+        sc_template_residual=None, sc_edm=None,
+    )
+    for k, v in over.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _fake_configs(**over):
+    import types
+
+    # The defaults that disagreed with real Stage II checkpoints.
+    sc = types.SimpleNamespace(
+        bb_context=True, centre_coord_input=False, frame_aware_head=False,
+        template_residual=False, type_logits_input=True, edm=False,
+        a_bs_concat=True, q_bs=True,
+    )
+    for k, v in over.items():
+        setattr(sc, k, v)
+    return types.SimpleNamespace(sidechain=sc)
+
+
+ARCH = {
+    "bb_context": True, "centre_coord_input": True, "frame_aware_head": False,
+    "template_residual": False, "type_logits_input": True, "edm": False,
+    "a_bs_concat": True, "q_bs": False,
+}
+
+
+def test_adoption_matches_the_checkpoint_and_unblocks_warm_start(tmp_path):
+    """The exact failure job 101060 hit: centre_coord_input True vs False."""
+    mod = _load_entry()
+    import torch
+
+    ckpt = tmp_path / "stage2.pt"
+    torch.save({"sidechain_arch": dict(ARCH)}, ckpt)
+
+    cfg = _fake_configs()
+    changed = mod.adopt_sidechain_arch_from_checkpoint(cfg, _fake_args(ckpt))
+
+    assert changed == {"centre_coord_input": True, "q_bs": False}
+    # Every key now agrees, which is what `_check_sidechain_arch` requires.
+    for key, want in ARCH.items():
+        assert bool(getattr(cfg.sidechain, key)) == want, key
+
+
+def test_an_explicit_cli_flag_beats_the_checkpoint(tmp_path):
+    """Adopting over an explicit flag would be worse than the mismatch it fixes."""
+    mod = _load_entry()
+    import torch
+
+    ckpt = tmp_path / "stage2.pt"
+    torch.save({"sidechain_arch": dict(ARCH)}, ckpt)
+
+    cfg = _fake_configs()
+    changed = mod.adopt_sidechain_arch_from_checkpoint(
+        cfg, _fake_args(ckpt, sc_centre_coord_input=False)
+    )
+    assert "centre_coord_input" not in changed
+    assert bool(cfg.sidechain.centre_coord_input) is False
+    # Keys without an explicit flag are still adopted.
+    assert bool(cfg.sidechain.q_bs) is False
+
+
+def test_adoption_is_a_no_op_without_a_checkpoint_or_a_record(tmp_path):
+    """Training Stage III from scratch, or from a checkpoint that predates the
+    record, must not be blocked -- and must not silently invent a layout."""
+    mod = _load_entry()
+    import torch
+
+    cfg = _fake_configs()
+    assert mod.adopt_sidechain_arch_from_checkpoint(cfg, _fake_args(None)) == {}
+    assert bool(cfg.sidechain.centre_coord_input) is False   # untouched
+
+    old = tmp_path / "no_record.pt"
+    torch.save({"model": {}}, old)
+    assert mod.adopt_sidechain_arch_from_checkpoint(_fake_configs(), _fake_args(old)) == {}
+
+
+def test_adoption_survives_an_unreadable_checkpoint(tmp_path):
+    """A bad path is the loader's error to raise later, not a crash in config build."""
+    mod = _load_entry()
+    bad = tmp_path / "not_a_checkpoint.pt"
+    bad.write_text("this is not a torch archive")
+    assert mod.adopt_sidechain_arch_from_checkpoint(_fake_configs(), _fake_args(bad)) == {}

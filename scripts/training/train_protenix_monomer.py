@@ -794,7 +794,100 @@ def build_configs(args: argparse.Namespace, device):
         else:
             configs.sidechain.predicted_mask = False
             configs.sidechain.route_by_type = False
+        # Stage III/IV continue a Stage II side-chain module, so S_phi's input
+        # LAYOUT has to be whatever that checkpoint was trained with -- not this
+        # stage's defaults. Adopt it from the checkpoint's own record.
+        adopt_sidechain_arch_from_checkpoint(configs, args)
     return configs
+
+
+# CLI flags that pin an arch key directly. If the user passed one, it wins over
+# whatever the checkpoint recorded -- adopting silently over an explicit flag
+# would be worse than the mismatch we are fixing.
+_ARCH_KEY_TO_CLI_ARG = {
+    "centre_coord_input": "sc_centre_coord_input",
+    "frame_aware_head": "sc_frame_aware_head",
+    "template_residual": "sc_template_residual",
+    "edm": "sc_edm",
+}
+
+
+def adopt_sidechain_arch_from_checkpoint(configs, args: argparse.Namespace) -> dict:
+    """Make S_phi's layout match the warm-start checkpoint's recorded `sidechain_arch`.
+
+    WHY THIS IS NEEDED. `sidechain_warmup` pins its own layout (bb_context,
+    a_bs_concat, q_bs) and threads centre_coord_input/frame_aware_head from the
+    CLI. The coevolution bundle pinned NONE of them, so it fell back to the
+    config defaults -- which do not match what Stage II trains with. Measured
+    against a real Stage II checkpoint (fixed_global_decay_from_50k/step65000):
+
+        centre_coord_input  checkpoint=True  stage-III default=False  -> FATAL
+        q_bs                checkpoint=False stage-III default=True   -> silent
+
+    The first is a layout key, so `_check_sidechain_arch` aborts the run: Stage III
+    could not warm-start from its own Stage II checkpoint at all (job 101060 died
+    in 38s on exactly this). The second is an additive key, so it only logs -- it
+    would have switched on a fusion channel that has no trained weights, a
+    curriculum change nobody asked for.
+
+    Hardcoding Stage II's values here would fix today's pair and rot the moment an
+    arm trains a different layout, and this project runs many arms. The checkpoint
+    already records the layout for precisely this purpose, so honour it.
+
+    Returns the keys actually changed, for logging by the caller.
+    """
+    ckpt_path = getattr(args, "load_checkpoint", None)
+    if not ckpt_path:
+        return {}
+    try:
+        import torch
+
+        # map_location="meta" so no tensor storage is materialised; we only want
+        # the small metadata dict that sits alongside the weights.
+        saved = torch.load(str(ckpt_path), map_location="meta", weights_only=False)
+    except Exception as exc:  # noqa: BLE001 — a bad path is the loader's error to raise
+        logging.warning(
+            "could not read %s to adopt its side-chain layout (%s: %s); leaving the "
+            "configured layout as-is. If it disagrees with the checkpoint, "
+            "_check_sidechain_arch will refuse the load.",
+            ckpt_path, type(exc).__name__, exc,
+        )
+        return {}
+
+    arch = (saved or {}).get("sidechain_arch") or {}
+    if not arch:
+        logging.warning(
+            "%s records no sidechain_arch, so its S_phi layout is unknown and cannot "
+            "be adopted. Pass the --sc-* flags that produced it, or expect "
+            "_check_sidechain_arch to refuse the load.", ckpt_path,
+        )
+        return {}
+
+    adopted, kept = {}, {}
+    for key, value in arch.items():
+        cli_arg = _ARCH_KEY_TO_CLI_ARG.get(key)
+        if cli_arg is not None and getattr(args, cli_arg, None) is not None:
+            if bool(getattr(configs.sidechain, key, False)) != bool(value):
+                kept[key] = (bool(value), bool(getattr(configs.sidechain, key, False)))
+            continue
+        if bool(getattr(configs.sidechain, key, False)) != bool(value):
+            adopted[key] = bool(value)
+            setattr(configs.sidechain, key, bool(value))
+
+    if adopted:
+        logging.info(
+            "Adopted S_phi layout from %s: %s (Stage III continues that module, so "
+            "its input layout is not this stage's to choose)",
+            ckpt_path, ", ".join(f"{k}={v}" for k, v in sorted(adopted.items())),
+        )
+    if kept:
+        logging.warning(
+            "Explicit CLI flag(s) disagree with %s and were KEPT: %s. The load will "
+            "be refused if any of these is a layout key.",
+            ckpt_path,
+            ", ".join(f"{k}: checkpoint={a} using={b}" for k, (a, b) in sorted(kept.items())),
+        )
+    return adopted
 
 
 def apply_training_stage_args(args: argparse.Namespace) -> None:

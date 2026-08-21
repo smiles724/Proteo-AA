@@ -969,7 +969,7 @@ class ProtenixDesignTrain(ProtenixDesign):
         )
 
         # 2. One-step denoising under EDM training noise.
-        x_gt_aug, x_denoised, sigma = sample_diffusion_training(
+        x_gt_aug, x_denoised, sigma, x_noisy = sample_diffusion_training(
             noise_sampler=self.training_noise_sampler,
             denoise_net=self.diffusion_module,
             label_dict=label_dict,
@@ -1930,7 +1930,17 @@ class ProtenixDesignTrain(ProtenixDesign):
                 and self._q_bb_idx_cache is not None
             )
             try:
-                x_gt_aug_post, x_denoised_post, sigma_post = sample_diffusion_training(
+                # PAIRED with the first pass, not a fresh draw. `h_res'` is not
+                # rotation-invariant (it descends from `q = c_l + W r_noisy`), so a
+                # new augmentation would hand the refinement pass a summary computed
+                # under a different rotation -- the fusion's best response is then to
+                # ignore its orientation-carrying components, silently capping the
+                # channel. A new sigma would also put `bb_post` on a different noise
+                # level than `mse`, making their difference a report on which sigma
+                # each drew rather than on whether the side chain helped. Reusing
+                # leaves exactly one difference between the passes: `s_trunk_refine`
+                # plus the armed a/q hooks.
+                x_gt_aug_post, x_denoised_post, sigma_post, _ = sample_diffusion_training(
                     noise_sampler=self.training_noise_sampler,
                     denoise_net=self.diffusion_module,
                     label_dict=label_dict,
@@ -1939,6 +1949,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     s_trunk=s_trunk_refine,
                     z_trunk=z,
                     N_sample=N_sample,
+                    reuse_draw=(x_gt_aug, sigma, x_noisy),
                 )
             finally:
                 self._a_direct_active = False

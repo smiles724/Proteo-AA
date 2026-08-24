@@ -1,29 +1,13 @@
-"""The Stage III refinement pass must denoise the SAME draw as the first pass.
+"""Stage III refinement must continue from the first backbone prediction.
 
 `sample_diffusion_training` draws the augmentation, the sigma and the Gaussian
-noise INSIDE itself. Stage III calls it twice -- once for B_pre and once for the
-side-chain-informed B_post -- so the second call re-randomised all three. The two
-passes therefore denoised different rotations of the structure at different noise
-levels, which breaks the refinement pass in two separate ways:
+noise inside itself for an ordinary training call. B_post must bypass that sampling
+path and receive B_pre's `x_denoised` as its coordinate input. It retains the first
+pass's augmented target, uses the explicit fixed refinement sigma shared with
+inference, and does not add noise to the prediction before refining it.
 
-  * `h'_res` is not rotation-invariant (it descends from `q = c_l + W r_noisy`,
-    a linear map of the NOISY GLOBAL coordinates). Computed under rotation A and
-    injected into a forward that lives under rotation B, its orientation-carrying
-    components are noise from the second pass's point of view, and the fusion's
-    best move is to learn to ignore them. That silently caps how much the
-    feedback channel can carry.
-
-  * `mse` (first pass) and `bb_post` (second pass) land on different sigmas, so
-    their difference is dominated by which noise level each happened to draw
-    rather than by whether the side-chain feedback helped. The one number Stage
-    III exists to produce is unreadable.
-
-Reusing the draw fixes both, and turns the pair into a controlled comparison:
-same structure, same rotation, same sigma, same noise -- the only difference is
-whether the backbone saw the side chain.
-
-Inference does not have this problem: it carries `h_res_prime_inject` across
-steps of ONE sampling trajectory, where the frame never changes.
+The expected flow is therefore `x_noisy -> B_pre -> x_denoised -> B_post`, with
+side-chain feedback additionally active in B_post.
 """
 import os
 import sys
@@ -66,8 +50,8 @@ def _args(n_atom=7):
     )
 
 
-def test_the_two_passes_are_independent_draws_without_reuse():
-    """Characterisation: this is the behaviour the reuse path exists to replace."""
+def test_ordinary_calls_draw_independently_without_precomputed_input():
+    """Ordinary one-step training calls still sample their own training states."""
     from pxdesign_train.generator import sample_diffusion_training
 
     net = _Recorder()
@@ -83,47 +67,70 @@ def test_the_two_passes_are_independent_draws_without_reuse():
     assert not torch.allclose(aug_a, aug_b), "augmentation happened to repeat"
 
 
-def test_reuse_gives_the_second_pass_the_identical_draw():
-    """Same structure, same rotation, same sigma, same noise -- only s_trunk differs."""
+def test_precomputed_input_refines_the_first_pass_prediction():
+    """B_post sees B_pre's output, not B_pre's original noisy coordinate input."""
     from pxdesign_train.generator import sample_diffusion_training
 
     net = _Recorder()
     kw = _args()
     torch.manual_seed(0)
-    aug, _, sigma, noisy = sample_diffusion_training(
+    aug, pred, sigma, noisy = sample_diffusion_training(
         denoise_net=net, s_trunk=torch.zeros(7, 1), **kw
     )
-    aug2, _, sigma2, noisy2 = sample_diffusion_training(
-        denoise_net=net, s_trunk=torch.ones(7, 1), reuse_draw=(aug, sigma, noisy), **kw
+    aug2, _, sigma2, refinement_input = sample_diffusion_training(
+        denoise_net=net,
+        s_trunk=torch.ones(7, 1),
+        precomputed_input=(aug, sigma, pred),
+        **kw,
     )
 
     assert torch.equal(aug, aug2)
     assert torch.equal(sigma, sigma2)
-    assert torch.equal(noisy, noisy2)
-    # And the network really was handed the same tensors, not just told about them.
-    assert torch.equal(net.calls[0][0], net.calls[1][0]), "x_noisy differed"
+    assert torch.equal(pred, refinement_input)
+    assert not torch.equal(noisy, refinement_input)
+    # The denoiser API calls its coordinate argument x_noisy, but B_post receives
+    # the already-denoised prediction in that slot.
+    assert torch.equal(net.calls[1][0], pred)
     assert torch.equal(net.calls[0][1], net.calls[1][1]), "sigma differed"
 
 
-def test_reuse_does_not_consume_randomness():
-    """The reuse path must not draw at all -- otherwise it perturbs the RNG stream
+def test_precomputed_input_does_not_consume_randomness():
+    """The refinement path must not draw -- otherwise it perturbs the RNG stream
     and two runs that differ only in this flag stop being comparable."""
     from pxdesign_train.generator import sample_diffusion_training
 
     kw = _args()
     torch.manual_seed(0)
-    aug, _, sigma, noisy = sample_diffusion_training(
+    aug, pred, sigma, _ = sample_diffusion_training(
         denoise_net=_Recorder(), s_trunk=torch.zeros(7, 1), **kw
     )
     state = torch.get_rng_state()
     sample_diffusion_training(
         denoise_net=_Recorder(), s_trunk=torch.ones(7, 1),
-        reuse_draw=(aug, sigma, noisy), **kw
+        precomputed_input=(aug, sigma, pred), **kw
     )
     assert torch.equal(state, torch.get_rng_state())
 
 
-def test_stage_iii_wires_the_refinement_pass_to_the_first_draw():
+def test_precomputed_input_keeps_the_coordinate_gradient_path():
+    """B_post input stays differentiable; the helper must not detach B_pre output."""
+    from pxdesign_train.generator import sample_diffusion_training
+
+    refinement_input = torch.randn(2, 7, 3, requires_grad=True)
+    target = torch.randn_like(refinement_input)
+    sigma = torch.ones(2)
+    _, refined, _, _ = sample_diffusion_training(
+        denoise_net=_Recorder(),
+        s_trunk=torch.ones(7, 1),
+        precomputed_input=(target, sigma, refinement_input),
+        **_args(),
+    )
+    refined.sum().backward()
+    assert refinement_input.grad is not None
+    assert torch.count_nonzero(refinement_input.grad) == refinement_input.numel()
+
+
+def test_stage_iii_wires_refinement_to_the_first_prediction():
     """Wiring guard: the capability is useless if the model does not pass it.
 
     Source-level because importing the model pulls in the whole Protenix stack;
@@ -132,9 +139,25 @@ def test_stage_iii_wires_the_refinement_pass_to_the_first_draw():
     model = (pathlib.Path(__file__).resolve().parents[1]
              / "pxdesign_train" / "model.py").read_text()
     start = model.index("x_gt_aug_post, x_denoised_post, sigma_post")
-    block = model[start:model.index(")", model.index("sample_diffusion_training(", start))]
-    assert "reuse_draw=" in block, (
-        "the refinement pass still re-randomises: h'_res would be computed under "
-        "one rotation and consumed under another, and bb_post would land on a "
-        "different sigma than mse"
+    block = model[start:start + 1200]
+    assert "precomputed_input=(x_gt_aug, refinement_sigma, x_denoised)" in block, (
+        "the refinement pass must receive B_pre's x_denoised directly instead "
+        "of drawing noise or reprocessing B_pre's original x_noisy"
     )
+    assert "refinement_sigma = torch.full_like" in model
+    assert "sigma, self.sc_refinement_sigma" in model
+    assert "s + self.refinement_pass_embedding" in model, (
+        "B_post needs an explicit pass identity because x_hat_0 and x_sigma have "
+        "different semantics and conditioning"
+    )
+
+
+def test_refinement_pass_embedding_is_zero_initialized_and_in_the_bb_group():
+    """Warm starts remain a no-op, and alternating training updates it with BB."""
+    model = (pathlib.Path(__file__).resolve().parents[1]
+             / "pxdesign_train" / "model.py").read_text()
+    trainer = (pathlib.Path(__file__).resolve().parents[1]
+               / "pxdesign_train" / "runner" / "trainer.py").read_text()
+    assert "self.refinement_pass_embedding = torch.nn.Parameter(" in model
+    assert "torch.zeros(c_trunk)" in model
+    assert 'sc if "sidechain_module" in name else bb' in trainer

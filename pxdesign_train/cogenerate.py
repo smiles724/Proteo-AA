@@ -1,13 +1,11 @@
 """
 Joint sequence-structure co-generation.
 
-Merges PXDesign-d (structure) and the ProteinMPNN stage (sequence) into ONE
-reverse process: at every denoising step we run the DiffusionModule once (which
-denoises coordinates AND, via the forward hook, exposes the structure-aware
-`a_token`), take an EDM step on the coordinates, and use `a_token` to predict
-residue identities. Because the AA head reads the SAME a_token that sees the
-binder's own noisy backbone, sequence is generated conditioned on the structure
-being generated — the co-design the author asked for.
+The sampler has two phases. First, the ordinary EDM trajectory generates an
+initial backbone B_0. Then an explicit co-evolution loop repeatedly applies
+S(B_k) followed by B_refine(B_k, feedback_k) to obtain B_(k+1). The refinement
+loop carries the latest predicted backbone directly: it neither re-noises it nor
+takes an Euler step between refinement rounds.
 
 By default (`seq_mode="complete_unmask"`) the design region is kept fully masked
 and re-predicted in full every step, with the final sequence read out at the last
@@ -44,6 +42,7 @@ def cogenerate(
     stop_on_seq_stable: bool = False,
     seq_patience: int = 3,
     seq_mode: str = "complete_unmask",
+    refinement_steps: int = 3,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -69,6 +68,9 @@ def cogenerate(
         valid comparison this ablation needs a checkpoint trained with
         `mask_mode="time_dependent"` (an all-masked model never saw partial sequences).
 
+    `refinement_steps` is the number of post-diffusion S -> B_refine updates.
+    It is used only when `sidechain_cycle` and co-evolution are enabled.
+
     Returns {coordinate, sequence (aa20 per design token, -1 elsewhere),
              trajectory}.
     """
@@ -80,6 +82,14 @@ def cogenerate(
     if seq_mode not in ("complete_unmask", "sequential"):
         raise ValueError(
             f"seq_mode must be 'complete_unmask' or 'sequential', got {seq_mode!r}"
+        )
+    if refinement_steps < 0:
+        raise ValueError(f"refinement_steps must be >= 0, got {refinement_steps}")
+    if sc_start_frac != 1.0:
+        raise ValueError(
+            "sc_start_frac no longer applies to the two-phase sampler; side-chain "
+            "co-evolution starts after B_0 is generated. Leave it at 1.0 and use "
+            "refinement_steps to control the refinement rollout."
         )
     model.eval()
 
@@ -126,7 +136,6 @@ def cogenerate(
     )
     x = noise_schedule[0] * torch.randn(1, N_atom, 3, device=device, dtype=dtype)
     counts = _unmask_counts(int(positions.numel()), N_step)
-    counts = counts + [0] * (max(0, len(noise_schedule) - 1 - len(counts)))
 
     trajectory = []
     final_aa_probs = None
@@ -193,7 +202,36 @@ def cogenerate(
     _prev_seq: tuple = ()          # sequence-stabilization tracking (paper termination)
     _seq_stable = 0
 
-    for step, (sig_t, sig_next) in enumerate(zip(noise_schedule[:-1], noise_schedule[1:])):
+    diffusion_transitions = list(zip(noise_schedule[:-1], noise_schedule[1:]))
+    # B_refine uses the same explicit conditioning value as training B_post. It is
+    # a refinement-mode label AND the EDM residual scale; no noise of this
+    # magnitude is added back to B_k. In particular, never use
+    # `noise_schedule[-2]` merely because B_0 came from the sampler's final step.
+    # For the 200-step sigma_data=16 schedule that value is ~0.007689, giving
+    #
+    #   D(x; sigma) = 0.99999977*x + 0.007689*F,
+    #
+    # which makes ordinary refinement updates nearly identity and lies in an
+    # extreme tail of the training noise distribution. The fixed value 2.0 gives
+    # c_skip=0.9846 and c_out=1.985. c_out is not a hard displacement cap because
+    # F is unbounded, but it is the practical update scale. Keeping this constant
+    # in train and inference also prevents sigma from pretending to be the physical
+    # noise level of an already-denoised B_k.
+    refine_sigma = noise_schedule.new_tensor(
+        float(getattr(model, "sc_refinement_sigma", 2.0))
+    )
+    n_refine = int(refinement_steps) if sc_enabled else 0
+    iterations = [
+        ("diffusion", i, sig_t, sig_next)
+        for i, (sig_t, sig_next) in enumerate(diffusion_transitions)
+    ] + [
+        ("refinement", i, refine_sigma, refine_sigma)
+        for i in range(n_refine)
+    ]
+    counts = counts + [0] * max(0, len(iterations) - len(counts))
+
+    for step, (phase, phase_step, sig_t, sig_next) in enumerate(iterations):
+        is_refinement = phase == "refinement"
         feat["restype"] = restype.unsqueeze(0) if input_feature_dict["restype"].dim() == 3 else restype
         sigma = sig_t.reshape(1).to(dtype)
 
@@ -209,19 +247,22 @@ def cogenerate(
                 feat, chunk_size=chunk_size
             )
 
-        # Persist side-chain-informed h_res' into the trunk for this step — but ONLY when
-        # the INDIRECT channel is enabled. Training honours sidechain.hres_inject
-        # (model.py: the refinement pass still runs, it just carries no side-chain info);
-        # if sampling ignored it, then every arm trained WITHOUT the indirect channel
-        # (no / a-direct / bbctx / q) would silently get it back at inference, and the
-        # information-flow ablation would be measuring a model it never trained.
+        # The diffusion phase generates B_0 without side-chain feedback. Every
+        # subsequent call is B_refine(B_k, feedback_k), matching the one-cycle
+        # training forward. The latest B_k is passed directly as x_noisy below.
         s_trunk_step = s_trunk
         if (
+            is_refinement
+            and
             sc_enabled
             and getattr(model, "sc_hres_inject", True)
             and h_res_prime_inject is not None
         ):
             s_trunk_step = s_trunk + model.hres_injector(h_res_prime_inject).to(s_trunk.dtype)
+        if is_refinement:
+            pass_embedding = getattr(model, "refinement_pass_embedding", None)
+            if pass_embedding is not None:
+                s_trunk_step = s_trunk_step + pass_embedding.to(s_trunk.dtype)
 
         # Arm the direct a-level injection for THIS backbone call only. a_sc_inject is the
         # side-chain summary from the PREVIOUS step, mirroring how h_res_prime_inject
@@ -232,7 +273,7 @@ def cogenerate(
         # no_grad -> there is no recompute, so the registry is dead weight; left
         # uncleared it strong-references every step's q_skip for the whole sampling run.
         model._q_inject_calls = {}
-        model._a_sc_cache = a_sc_inject
+        model._a_sc_cache = a_sc_inject if is_refinement else None
         # One flag arms BOTH a-level injection points: `sc_a_direct` (hook on
         # layernorm_a, after the global attention) and `sc_a_direct_pre` (pre-hook
         # on the DiffusionTransformer, before it). Only the hooks the model
@@ -243,6 +284,7 @@ def cogenerate(
                 getattr(model, "sc_a_direct", False)
                 or getattr(model, "sc_a_direct_pre", False)
             )
+            and is_refinement
             and a_sc_inject is not None
         )
         # Same for the ATOM-level channel (sidechain.q_direct): the decoder pre-hook
@@ -250,10 +292,12 @@ def cogenerate(
         # S_phi produced at the PREVIOUS step ("only available after the first-round").
         # Without this the trained QAtomFusion would be dead weight at sampling — the
         # exact train/inference mismatch a_direct was just fixed for.
-        model._q_sc_cache = q_sc_inject
-        model._q_bb_idx_cache = q_idx_inject
+        model._q_sc_cache = q_sc_inject if is_refinement else None
+        model._q_bb_idx_cache = q_idx_inject if is_refinement else None
         model._q_direct_active = bool(
-            getattr(model, "sc_q_direct", False) and q_sc_inject is not None
+            is_refinement
+            and getattr(model, "sc_q_direct", False)
+            and q_sc_inject is not None
         )
         try:
             x_denoised = model.diffusion_module(
@@ -264,9 +308,18 @@ def cogenerate(
         finally:
             model._a_direct_active = False
             model._q_direct_active = False
-        # EDM Euler reverse step on coordinates.
-        d = (x - x_denoised) / sig_t
-        x = x + (sig_next - sig_t) * d
+        if is_refinement:
+            # The co-evolution state is the latest predicted backbone itself.
+            # No Euler transition and no fresh noise exist inside this loop.
+            x = x_denoised
+        else:
+            # Ordinary EDM generation of the initial backbone B_0.
+            d = (x - x_denoised) / sig_t
+            x = x + (sig_next - sig_t) * d
+            if phase_step == len(diffusion_transitions) - 1 and sc_enabled:
+                # Start refinement from the denoiser's final clean prediction,
+                # even for custom schedules whose terminal sigma is non-zero.
+                x = x_denoised
 
         # Structure-aware sequence step from the captured a_token.
         a = model._a_token_cache
@@ -309,19 +362,17 @@ def cogenerate(
             # all trajectory); the final sequence is this prediction at the last step.
             sampled[positions] = pred[positions]
 
-        # --- side-chain step: decode side chains for committed residues, pool ->
-        #     h_res', persist for the next backbone step. ---
-        # DEFAULT sc_start_frac=1.0 -> S runs on EVERY denoising step. This matches
-        # training, where the Side-Chain Module sees B's one-step clean estimate
-        # x0^bb at ALL sampled sigmas (no sigma/step gating in the train forward);
-        # gating S to only late steps at inference would be a train/inference
-        # mismatch S was never trained under. sc_start_frac<1.0 is kept as an
-        # ablation knob (delay S to the last `sc_start_frac` of the trajectory,
-        # gated on STEP fraction — the Karras rho=7 schedule collapses sigma too
-        # fast for a sigma-threshold to mean "late").
-        _n_steps = len(noise_schedule) - 1
-        _sc_from = int(round((1.0 - sc_start_frac) * _n_steps))
-        if sc_enabled and step >= _sc_from:
+        # Seed S_0 from the final diffusion prediction B_0, then recompute S_k
+        # after every refinement result B_k. Earlier noisy diffusion states never
+        # enter the co-evolution loop. `sc_start_frac` is retained for API
+        # compatibility but no longer gates this explicit post-diffusion phase.
+        last_diffusion = (
+            not is_refinement
+            and phase_step == len(diffusion_transitions) - 1
+        )
+        run_sidechain = sc_enabled and (last_diffusion or is_refinement)
+        committed = []
+        if run_sidechain:
             # Tokens whose current predicted type feeds the side-chain cycle this step.
             # sequential: only frozen (committed) tokens qualify. complete_unmask:
             # nothing is frozen, so every design token with a frame + current argmax
@@ -609,17 +660,19 @@ def cogenerate(
 
         trajectory.append({
             "step": step,
+            "phase": phase,
+            "phase_step": phase_step,
             "sigma": float(sig_t),
             "mask_frac": (float(still[positions].float().mean()) if seq_mode == "sequential"
                           else 1.0) if positions.numel() else 0.0,
             "mean_conf": float(conf[positions].mean()) if positions.numel() else 0.0,
-            "sc_committed": len(committed) if (sc_enabled and step >= _sc_from) else 0,
+            "sc_committed": len(committed) if run_sidechain else 0,
         })
 
         # Paper: terminate the iterative refinement when the predicted sequence
         # stabilizes for `seq_patience` steps. Off by default -> keep the full fixed
         # EDM schedule.
-        if stop_on_seq_stable:
+        if stop_on_seq_stable and (is_refinement or not sc_enabled):
             cur = tuple(sampled[positions].cpu().tolist())
             if step > 0 and cur == _prev_seq:
                 _seq_stable += 1

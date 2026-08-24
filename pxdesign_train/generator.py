@@ -34,7 +34,9 @@ def sample_diffusion_training(
     diffusion_chunk_size: Optional[int] = None,
     inplace_safe: bool = False,
     attn_chunk_size: Optional[int] = None,
-    reuse_draw: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    precomputed_input: Optional[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """One denoising step for training.
 
@@ -56,32 +58,31 @@ def sample_diffusion_training(
         s_inputs / s_trunk / z_trunk: from `DesignConditionEmbedder`.
         N_sample: how many independent (rotation, noise) draws per macro-batch
             item. The PXDesign report's "diffusion batch size 8" maps to N_sample=8.
-        reuse_draw: `(x_gt_aug, sigma, x_noisy)` from an earlier call. Skips steps
-            1-3 and denoises that exact state again -- for Stage III, whose second
-            (side-chain-informed) pass must be the SAME sample as the first or the
-            two losses are not comparable and the feedback arrives in the wrong
-            frame. None keeps the independent-draw behaviour.
+        precomputed_input: `(x_gt_aug, sigma, x_input)` supplied by the caller.
+            Skips steps 1-3 and denoises `x_input` directly. Stage III uses this
+            to feed the first backbone pass's prediction into the refinement pass
+            in the same coordinate frame, with an explicit caller-provided fixed
+            refinement condition.
+            None keeps the ordinary independently sampled training behaviour.
 
     Returns:
         x_gt_aug   [..., N_sample, N_atom, 3]   rotated/centred GT coords
         x_denoised [..., N_sample, N_atom, 3]   model prediction
-        sigma      [..., N_sample]              the σ drawn for each sample
-        x_noisy    [..., N_sample, N_atom, 3]   what the net actually denoised;
-            returned so a paired second call can reuse it via `reuse_draw`
+        sigma      [..., N_sample]              sampled σ, or the supplied condition
+        x_input    [..., N_sample, N_atom, 3]   what the net actually received;
+            this is `x_noisy` for an ordinary sampled pass, but may be a previous
+            pass's prediction when `precomputed_input` is used
     """
     batch_shape = label_dict["coordinate"].shape[:-2]
     device = label_dict["coordinate"].device
     dtype = label_dict["coordinate"].dtype
 
-    if reuse_draw is not None:
-        # Stage III's refinement pass. Denoising a FRESH draw would put `h_res'`
-        # -- which is not rotation-invariant, descending from `q = c_l + W r_noisy`
-        # -- under a different rotation than the forward consuming it, and would
-        # land `bb_post` on a different sigma than `mse`, so the pair stops being
-        # a comparison. Reusing keeps the only difference between the two passes
-        # the one under study: whether the backbone saw the side chain.
-        # Deliberately draws nothing, so toggling this cannot shift the RNG stream.
-        x_gt_aug, sigma, x_noisy = reuse_draw
+    if precomputed_input is not None:
+        # Stage III refinement starts from B_pre's prediction, not from another
+        # noisy draw and not from B_pre's original noisy input. Keep the first
+        # pass's augmented target and sigma so the coordinate frame and diffusion
+        # conditioning remain aligned. Deliberately draw nothing here.
+        x_gt_aug, sigma, x_input = precomputed_input
     else:
         # 1. Augment: random rotation + translation of GT, then centre on the masked CoM.
         x_gt_aug = centre_random_augmentation(
@@ -95,12 +96,12 @@ def sample_diffusion_training(
 
         # 3. Add Gaussian noise of scale σ.
         noise = torch.randn_like(x_gt_aug, dtype=dtype) * sigma[..., None, None]
-        x_noisy = x_gt_aug + noise
+        x_input = x_gt_aug + noise
 
     # 4. Denoise.  pair_z / p_lm / c_l are None — DiffusionModule computes them.
     if diffusion_chunk_size is None:
         x_denoised = denoise_net(
-            x_noisy=x_noisy,
+            x_noisy=x_input,
             t_hat_noise_level=sigma,
             input_feature_dict=input_feature_dict,
             s_inputs=s_inputs,
@@ -117,7 +118,7 @@ def sample_diffusion_training(
         for i in range(n_chunks):
             lo, hi = i * diffusion_chunk_size, min((i + 1) * diffusion_chunk_size, N_sample)
             x_chunk = denoise_net(
-                x_noisy=x_noisy[..., lo:hi, :, :],
+                x_noisy=x_input[..., lo:hi, :, :],
                 t_hat_noise_level=sigma[..., lo:hi],
                 input_feature_dict=input_feature_dict,
                 s_inputs=s_inputs,
@@ -131,4 +132,4 @@ def sample_diffusion_training(
             chunks.append(x_chunk)
         x_denoised = torch.cat(chunks, dim=-3)
 
-    return x_gt_aug, x_denoised, sigma, x_noisy
+    return x_gt_aug, x_denoised, sigma, x_input

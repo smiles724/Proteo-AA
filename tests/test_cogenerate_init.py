@@ -10,6 +10,7 @@ spy on the two initializers.
 """
 import torch
 import torch.nn as nn
+import pytest
 
 from pxdesign_train.cogenerate import cogenerate, _AA3
 from pxdesign_train.sampler import build_aa20_to_restype36
@@ -39,8 +40,14 @@ class _FakeDiffusion(nn.Module):
     def __init__(self):
         super().__init__()
         self.diffusion_conditioning = _FakeDiffusion._Cond()
+        self.calls = []
 
     def forward(self, x_noisy=None, **kw):
+        self.calls.append({
+            "x": x_noisy.detach().clone(),
+            "sigma": kw["t_hat_noise_level"].detach().clone(),
+            "s_trunk": kw["s_trunk"].detach().clone(),
+        })
         return x_noisy * 0.5           # any denoiser; coords stay finite
 
 
@@ -82,6 +89,9 @@ class _FakeModel(nn.Module):
         self.diffusion_module = _FakeDiffusion()
         self.sidechain_module = _SpySideChain()
         self._a_token_cache = torch.randn(1, N_TOKEN, C)
+        # Make refinement identity visible in the behavioural test. The real
+        # parameter starts at zero and is learned during Stage III.
+        self.refinement_pass_embedding = nn.Parameter(torch.ones(C))
 
     def get_condition_embedding(self, feat, chunk_size=None):
         s = torch.zeros(1, N_TOKEN, C)
@@ -162,7 +172,7 @@ def _run(monkeypatch, with_bb_index=False, **model_kw):
     torch.manual_seed(0)
     model = _FakeModel(**model_kw)
     out = cogenerate(model, _feat(with_bb_index), N_step=2,
-                     sidechain_cycle=True, sc_start_frac=0.5)
+                     sidechain_cycle=True)
     return model, calls, out
 
 
@@ -213,6 +223,58 @@ def test_sampler_uses_template_init_with_predicted_type(monkeypatch):
     assert c["mask"].shape == (2, MAX_SC)
     assert int(c["mask"][0].sum()) == len(sidechain_atoms("TRP"))
     assert int(c["mask"][1].sum()) == len(sidechain_atoms("ALA"))
+
+
+def test_inference_generates_b0_then_recurrently_refines_latest_backbone(monkeypatch):
+    """Inference is diffusion(B0), then S(Bk) -> B_refine(Bk), not inner EDM."""
+    import protenix.model.protenix as pxm
+    monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
+
+    torch.manual_seed(0)
+    model = _FakeModel()
+    out = cogenerate(
+        model,
+        _feat(with_bb_index=True),
+        N_step=2,
+        sidechain_cycle=True,
+        refinement_steps=3,
+    )
+
+    calls = model.diffusion_module.calls
+    assert len(calls) == 5, "two EDM calls followed by three B_refine calls"
+
+    # The first refinement consumes the final denoiser prediction B0 directly,
+    # not the Euler-mixed sampler state. Every later round consumes the previous
+    # refinement prediction in the same way.
+    assert torch.equal(calls[2]["x"], calls[1]["x"] * 0.5)
+    assert torch.equal(calls[3]["x"], calls[2]["x"] * 0.5)
+    assert torch.equal(calls[4]["x"], calls[3]["x"] * 0.5)
+    assert torch.equal(out["coordinate"], calls[4]["x"].squeeze(0) * 0.5)
+
+    # Refinement draws/adds no fresh noise and uses the explicit fixed sigma shared
+    # with training B_post, rather than the tiny tail of the EDM schedule. The pass
+    # identity is absent during EDM and present on every recurrent B_refine call.
+    for i in (2, 3, 4):
+        assert calls[i]["sigma"].item() == 2.0
+    assert torch.count_nonzero(calls[0]["s_trunk"]) == 0
+    assert torch.count_nonzero(calls[1]["s_trunk"]) == 0
+    for i in (2, 3, 4):
+        assert torch.count_nonzero(calls[i]["s_trunk"]) == calls[i]["s_trunk"].numel()
+
+    phases = [row["phase"] for row in out["trajectory"]]
+    assert phases == ["diffusion", "diffusion", "refinement", "refinement", "refinement"]
+
+
+def test_retired_sc_start_frac_fails_loudly(monkeypatch):
+    """A former ablation knob must not silently become a no-op."""
+    import protenix.model.protenix as pxm
+    monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
+
+    with pytest.raises(ValueError, match="sc_start_frac no longer applies"):
+        cogenerate(
+            _FakeModel(), _feat(with_bb_index=True), N_step=2,
+            sidechain_cycle=True, sc_start_frac=0.5,
+        )
 
 
 def test_sampler_falls_back_to_gaussian_when_disabled(monkeypatch):

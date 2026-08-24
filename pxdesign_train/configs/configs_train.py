@@ -419,6 +419,24 @@ training_configs["sidechain"] = {
     # rather than the GT backbone, and the coordinate loss compares S_phi's global
     # output to stopgrad(F_hat) y_gt_local. Warmup (Stage II-A) uses GT frames.
     "predicted_frame": True,
+    # B_post is a refinement operator over B_pre's already-denoised prediction,
+    # not an ordinary noisy-state denoiser. This sigma does NOT add 2 A of noise:
+    # it is the fixed refinement-mode conditioning and the EDM residual scale,
+    # shared exactly by training B_post and every inference B_refine call.
+    #
+    # Do NOT replace it with the final non-zero Karras value
+    # (`noise_schedule[-2]`, about 0.007689 for 200 steps). EDM returns
+    #
+    #   D(x; sigma) = c_skip*x + c_out*F,
+    #   c_out = sigma_data*sigma / sqrt(sigma_data^2 + sigma^2).
+    #
+    # With sigma_data=16, the tail value gives c_skip=0.99999977 and
+    # c_out=0.007689, so ordinary network outputs make repeated refinement nearly
+    # an identity map. c_out is a scale, not a mathematical displacement bound
+    # (F is unbounded), but this regime effectively suppresses Angstrom-sized
+    # feedback corrections. sigma=2 instead gives c_skip=0.9846 and c_out=1.985,
+    # matching the 1--3 A backbone-error scale without materially shrinking x.
+    "refinement_sigma": 2.0,
     "weight_sc_global": 0.5,   # legacy local-output aux weight
     # M1: exclude binder side-chain atoms from the backbone (L_bb) target so
     # B_theta is backbone-only and S_phi is the sole side-chain generator.

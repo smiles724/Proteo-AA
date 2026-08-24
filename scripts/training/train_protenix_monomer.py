@@ -625,6 +625,7 @@ def build_configs(args: argparse.Namespace, device):
     else:
         configs.sidechain.predicted_frame = bool(args.predicted_frame)
         configs.sidechain.per_sigma = bool(args.per_sigma)
+        configs.sidechain.refinement_sigma = float(args.refinement_sigma)
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.template_init = not args.disable_template_init
         configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
@@ -833,6 +834,9 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_aa = 1.0
         configs.enable_sidechain = True
         configs.enable_coevolution = True
+        # TODO(stage-contract): Stage III teacher forcing should eventually set
+        # predicted_frame=False; Stage IV inference matching keeps True. This is
+        # intentionally only marked here for now, not changed in this patch.
         configs.sidechain.predicted_frame = True
         configs.sidechain.per_sigma = True
         configs.sidechain.template_init = True
@@ -987,6 +991,11 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
         args.enable_coevolution = True
+        # TODO(stage-contract): split this by stage once the curriculum switch is
+        # activated. Under the agreed naming, Stage III/co-evolution should use
+        # GT backbone frames (False), while Stage IV/predicted_mask should use
+        # predicted frames (True). Keep the current behaviour for this change;
+        # inference-loop correction is independent of that curriculum toggle.
         args.predicted_frame = True
         args.per_sigma = True
 
@@ -1156,6 +1165,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--enable-coevolution", action="store_true")
     p.add_argument(
         "--predicted-frame", action=argparse.BooleanOptionalAction, default=True
+    )
+    p.add_argument(
+        "--refinement-sigma", type=float, default=2.0,
+        help=(
+            "Fixed EDM conditioning/residual scale for B_post in both training "
+            "and inference; refinement adds no noise (default: 2.0 A)."
+        ),
     )
     p.add_argument("--per-sigma", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--template-provider", default="dunbrack_mode")

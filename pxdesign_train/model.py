@@ -303,6 +303,12 @@ class ProtenixDesignTrain(ProtenixDesign):
             # (x_denoised) + a stop-grad global pseudo-target aux loss. Warmup uses
             # GT frames (predicted_frame=False).
             self.sc_predicted_frame = bool(getattr(sc_cfg, "predicted_frame", True)) if sc_cfg is not None else True
+            self.sc_refinement_sigma = float(getattr(sc_cfg, "refinement_sigma", 2.0)) if sc_cfg is not None else 2.0
+            if self.sc_refinement_sigma <= 0:
+                raise ValueError(
+                    "sidechain.refinement_sigma must be > 0, got "
+                    f"{self.sc_refinement_sigma}"
+                )
             self.sc_weight_global = float(getattr(sc_cfg, "weight_sc_global", 0.5)) if sc_cfg is not None else 0.5
             sc_grad_scale = float(getattr(sc_cfg, "trunk_grad_scale", 1.0)) if sc_cfg is not None else 1.0
             sc_arch = str(getattr(sc_cfg, "architecture", "light")) if sc_cfg is not None else "light"
@@ -374,6 +380,15 @@ class ProtenixDesignTrain(ProtenixDesign):
             if self.enable_coevolution:
                 c_trunk = int(getattr(configs, "c_s", 384))
                 self.hres_injector = HResInjector(c_hres=self.sc_c_res, c_trunk=c_trunk)
+                # The shared DiffusionModule sees two semantically different modes:
+                # B_pre receives x_sigma at a sampled physical noise level, while
+                # B_post receives B_pre's x_hat_0 under a fixed refinement sigma.
+                # Give the refinement call an explicit identity instead of asking
+                # the network to infer the pass from coordinate statistics. Zero-init
+                # preserves warm-start behaviour; the BB phase learns the marker.
+                self.refinement_pass_embedding = torch.nn.Parameter(
+                    torch.zeros(c_trunk)
+                )
                 self.w_bb_post = float(getattr(sc_cfg, "weight_bb_post", 1.0)) if sc_cfg is not None else 1.0
                 self.w_aa_post = float(getattr(sc_cfg, "weight_aa_post", 1.0)) if sc_cfg is not None else 1.0
 
@@ -1908,10 +1923,13 @@ class ProtenixDesignTrain(ProtenixDesign):
             # arm that answers "does the co-evolution channel buy anything?" -- it is NOT
             # the same as enable_coevolution=False, which removes the refinement pass
             # entirely and would confound "second pass" with "side-chain feedback".
+            # Explicit pass identity is independent of the feedback ablation:
+            # even a no-feedback B_post still receives x_hat_0 rather than x_sigma.
+            s_trunk_refine = s + self.refinement_pass_embedding.to(s.dtype)
             if getattr(self, "sc_hres_inject", True):
-                s_trunk_refine = s + self.hres_injector(h_res_prime).to(s.dtype)
-            else:
-                s_trunk_refine = s
+                s_trunk_refine = (
+                    s_trunk_refine + self.hres_injector(h_res_prime).to(s.dtype)
+                )
             # DIRECT a-level feedback (sidechain.a_direct): arm the layernorm_a hook
             # for the duration of THIS call only. The first pass above ran with the
             # flag down (and with _a_sc_cache=None), so a'_bb = a_bb + MLP(...) can
@@ -1930,16 +1948,23 @@ class ProtenixDesignTrain(ProtenixDesign):
                 and self._q_bb_idx_cache is not None
             )
             try:
-                # PAIRED with the first pass, not a fresh draw. `h_res'` is not
-                # rotation-invariant (it descends from `q = c_l + W r_noisy`), so a
-                # new augmentation would hand the refinement pass a summary computed
-                # under a different rotation -- the fusion's best response is then to
-                # ignore its orientation-carrying components, silently capping the
-                # channel. A new sigma would also put `bb_post` on a different noise
-                # level than `mse`, making their difference a report on which sigma
-                # each drew rather than on whether the side chain helped. Reusing
-                # leaves exactly one difference between the passes: `s_trunk_refine`
-                # plus the armed a/q hooks.
+                # Continue from the structure produced by B_pre. This is iterative
+                # refinement, not a second prediction of the original noisy state:
+                #
+                #   x_noisy -> B_pre -> x_denoised -> B_post -> x_denoised_post
+                #
+                # B_post also receives the side-chain feedback through
+                # s_trunk_refine and the armed a/q hooks. Reusing x_gt_aug preserves
+                # the first pass's coordinate frame. Do NOT reuse B_pre's randomly
+                # sampled physical sigma here: B_post's input is already x_hat_0,
+                # not x_sigma. Train and inference instead share one explicit
+                # refinement sigma so they learn/execute the same transition.
+                # `torch.full_like` below changes only DiffusionModule conditioning
+                # and EDM c_skip/c_out; it does NOT add noise to x_denoised. The
+                # coordinate input remains B_pre's prediction exactly.
+                refinement_sigma = torch.full_like(
+                    sigma, self.sc_refinement_sigma
+                )
                 x_gt_aug_post, x_denoised_post, sigma_post, _ = sample_diffusion_training(
                     noise_sampler=self.training_noise_sampler,
                     denoise_net=self.diffusion_module,
@@ -1949,7 +1974,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     s_trunk=s_trunk_refine,
                     z_trunk=z,
                     N_sample=N_sample,
-                    reuse_draw=(x_gt_aug, sigma, x_noisy),
+                    precomputed_input=(x_gt_aug, refinement_sigma, x_denoised),
                 )
             finally:
                 self._a_direct_active = False

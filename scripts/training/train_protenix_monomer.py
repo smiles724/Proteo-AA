@@ -813,7 +813,10 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_sc_global = 0.0
         configs.enable_sidechain = True
         configs.enable_coevolution = True
-        configs.sidechain.predicted_frame = True
+        # Fit the head on Stage III's teacher-forced geometry path: S_phi reads
+        # GT backbone frames while its learned h/a/q and type-logit features still
+        # come from B_pre. Stage IV switches the geometry to predicted frames.
+        configs.sidechain.predicted_frame = False
         configs.sidechain.per_sigma = True
         configs.sidechain.template_init = True
         configs.sidechain.template_provider = args.template_provider
@@ -834,10 +837,16 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.weight_aa = 1.0
         configs.enable_sidechain = True
         configs.enable_coevolution = True
-        # TODO(stage-contract): Stage III teacher forcing should eventually set
-        # predicted_frame=False; Stage IV inference matching keeps True. This is
-        # intentionally only marked here for now, not changed in this patch.
-        configs.sidechain.predicted_frame = True
+        # Curriculum boundary confirmed with Fang:
+        #   Stage III/co-evolution: S_phi gets GT backbone coordinates/frames,
+        #     but B_pre still supplies its learned h/a/q + type-logit features.
+        #   Stage IV/predicted_mask: geometry and atom set are both predicted,
+        #     matching inference-time inputs.
+        # This switch changes only data routing, not parameter shapes/layout, and
+        # B_post still refines B_pre's predicted x_hat_0 in both stages.
+        configs.sidechain.predicted_frame = (
+            args.training_stage == "predicted_mask"
+        )
         configs.sidechain.per_sigma = True
         configs.sidechain.template_init = True
         configs.sidechain.template_provider = args.template_provider
@@ -983,7 +992,9 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
         args.enable_coevolution = True
-        args.predicted_frame = True
+        # This head is fitted to the Stage III feature path, whose S_phi geometry
+        # is teacher-forced from GT backbone frames.
+        args.predicted_frame = False
         args.per_sigma = True
         args.trunk_grad_scale = 0.0
     elif args.training_stage in ("coevolution", "predicted_mask"):
@@ -991,12 +1002,10 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
         args.enable_coevolution = True
-        # TODO(stage-contract): split this by stage once the curriculum switch is
-        # activated. Under the agreed naming, Stage III/co-evolution should use
-        # GT backbone frames (False), while Stage IV/predicted_mask should use
-        # predicted frames (True). Keep the current behaviour for this change;
-        # inference-loop correction is independent of that curriculum toggle.
-        args.predicted_frame = True
+        # Stage III teacher-forces only S_phi's backbone geometry. Stage IV opens
+        # that input to the predicted frame; learned B_pre features remain live in
+        # both stages.
+        args.predicted_frame = args.training_stage == "predicted_mask"
         args.per_sigma = True
 
 

@@ -108,11 +108,16 @@ It is no longer a pure per-step measurement of the feedback channel. To isolate
 feedback quality, compare two `B_post` calls that both start from the same
 `x_denoised^(1)`, with the feedback channels off versus on.
 
-## Remaining separate choice
+## Stage III/IV curriculum boundary
 
-This cycle contract does not decide whether `S_phi` itself receives GT or
-predicted backbone geometry during training. That is the separate Stage III
-teacher-forcing versus Stage IV inference-matching choice. The current stage
-routing still sets `predicted_frame=True` for both and is marked with
-`TODO(stage-contract)` at both assignment sites; this inference change does not
-silently alter that curriculum yet.
+Stage III now teacher-forces `S_phi`'s backbone geometry: `predicted_frame=False`
+selects GT backbone coordinates/frames (and GT phi/psi for template init), while
+the learned `h_res`/`a`/`q` and residue-type logits still come from `B_pre`.
+The side-chain atom set is GT (`predicted_mask=False`). `B_post` itself continues
+to refine `B_pre`'s predicted `x_hat_0`; it never receives the GT backbone as its
+coordinate input.
+
+Stage IV switches `predicted_frame=True` and `predicted_mask=True`, so both the
+geometry and atom set match inference-time predictions. This is a routing-only
+curriculum switch and does not change parameter shapes or the Stage II checkpoint
+layout.

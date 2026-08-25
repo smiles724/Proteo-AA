@@ -13,6 +13,7 @@ in the full Protenix training stack at import time, and what is being asserted
 is the configuration contract, not runtime behaviour.
 """
 import ast
+import argparse
 import pathlib
 
 import pytest
@@ -57,9 +58,10 @@ def test_coevolution_turns_on_the_machinery_it_is_named_for(source):
     block = source[start:source.index("    return configs", start)]
     assert "configs.enable_sidechain = True" in block
     assert "configs.enable_coevolution = True" in block
-    assert "configs.sidechain.predicted_frame = True" in block
+    assert 'args.training_stage == "predicted_mask"' in block
     assert "configs.sidechain.per_sigma = True" in block
-    # teacher-forced GT logits belong to the Stage II warmup, not here
+    # Stage III teacher-forces geometry/atom composition, while the AA logits
+    # remain a learned feature supplied by B_pre as Fang specified.
     assert "configs.sidechain.force_gt_type_logits = False" in block
 
 
@@ -71,8 +73,13 @@ def test_joint_stage_still_declares_itself_sidechain_free(source):
     assert "configs.enable_coevolution = False" in block
 
 
-def test_stage_iv_is_stage_iii_plus_predicted_atom_sets(source):
-    """The only thing separating IV from III is where the atom set comes from."""
+def test_stage_iv_opens_predicted_geometry_and_atom_sets(source):
+    """Stage III uses GT geometry/atom sets; Stage IV matches inference inputs."""
+    bundle = source[
+        source.index('elif args.training_stage in ("coevolution", "predicted_mask")'):
+        source.index("    return configs")
+    ]
+    assert 'args.training_stage == "predicted_mask"' in bundle
     start = source.index('if args.training_stage == "predicted_mask"')
     block = source[start:start + 900]
     assert "configs.sidechain.predicted_mask = True" in block
@@ -91,6 +98,41 @@ def test_every_stage_sets_the_dataset_args_it_needs(source):
         assert f'"{stage}"' in block, (
             f"{stage} has a config bundle but no dataset-arg bundle"
         )
+
+
+def test_stage_iii_iv_frame_curriculum_is_explicit_in_both_bundles(source):
+    """III teacher-forces geometry; IV alone opens predicted frames."""
+    config_start = source.index(
+        'elif args.training_stage in ("coevolution", "predicted_mask")'
+    )
+    config_block = source[config_start:source.index("    return configs", config_start)]
+    assert (
+        'configs.sidechain.predicted_frame = (\n'
+        '            args.training_stage == "predicted_mask"\n'
+        '        )'
+    ) in config_block
+
+    apply_start = source.index("def apply_training_stage_args")
+    apply_block = source[apply_start:source.index("def parse_args", apply_start)]
+    assert (
+        'args.predicted_frame = args.training_stage == "predicted_mask"'
+        in apply_block
+    )
+
+
+@pytest.mark.parametrize(
+    ("training_stage", "want_predicted_frame"),
+    [("coevolution", False), ("predicted_mask", True)],
+)
+def test_stage_iii_iv_frame_curriculum_at_runtime(
+    training_stage: str, want_predicted_frame: bool
+) -> None:
+    mod = _load_entry()
+    args = argparse.Namespace(training_stage=training_stage)
+
+    mod.apply_training_stage_args(args)
+
+    assert args.predicted_frame is want_predicted_frame
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +276,7 @@ def test_aa_head_on_stage2_freezes_everything_but_the_head(source):
     # Stage III's feature path, so the head is fitted to what it will see.
     assert "configs.enable_sidechain = True" in block
     assert "configs.enable_coevolution = True" in block
-    assert "configs.sidechain.predicted_frame = True" in block
+    assert "configs.sidechain.predicted_frame = False" in block
     assert "configs.sidechain.per_sigma = True" in block
 
     # ...but only the head learns.

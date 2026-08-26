@@ -1,9 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-PINDER_ROOT="${PINDER_ROOT:-/hai/scratch/yfsun/pinder/2024-02}"
-BASE_URL="https://storage.googleapis.com/pinder/2024-02"
-PYTHON_BIN="${PYTHON_BIN:-/hai/users/y/f/yfsun/miniconda3/envs/ml/bin/python}"
+# Paths derive from PROTEOAA_DATA_ROOT so this runs unmodified elsewhere.
+# See docs/datasets.md.
+PROTEOAA_DATA_ROOT="${PROTEOAA_DATA_ROOT:-/hai/scratch/yfsun}"
+PINDER_RELEASE="${PINDER_RELEASE:-2024-02}"
+PINDER_ROOT="${PINDER_ROOT:-${PROTEOAA_DATA_ROOT}/pinder/${PINDER_RELEASE}}"
+BASE_URL="${PINDER_BASE_URL:-https://storage.googleapis.com/pinder/${PINDER_RELEASE}}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
 
 mkdir -p \
   "${PINDER_ROOT}/raw" \

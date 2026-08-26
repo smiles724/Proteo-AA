@@ -358,6 +358,9 @@ def _apply_aa_eval_args(args: argparse.Namespace) -> None:
     args.training_stage = args.model_stage
     args.data_mode = "monomer"
     args.disable_sidechain = True
+    # An AA-head eval is exactly the measurement the leaky input destroys
+    # (~96% vs ~6% accuracy), so it is pinned off here rather than exposed.
+    args.allow_binder_sidechain_leakage = False
     args.enable_coevolution = False
     args.disable_aa_loss = False
     args.aa_mask_mode = "all"
@@ -505,8 +508,13 @@ def main() -> None:
         build_components,
         build_configs,
         build_monomer_index,
+        fill_missing_args,
     )
 
+    # Flags `build_configs`/`build_components` read but this parser omits; filled
+    # from the training parser's defaults (see `fill_missing_args`). Runs first so
+    # `_apply_aa_eval_args`'s deliberate pins always win.
+    fill_missing_args(args)
     _apply_aa_eval_args(args)
     repo_root = _bootstrap_paths(args)
     os.environ.setdefault("PROTENIX_ROOT_DIR", str(Path(args.data_root).resolve()))

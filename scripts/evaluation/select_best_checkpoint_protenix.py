@@ -345,6 +345,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-aa-loss", action="store_true")
 
     p.add_argument("--disable-sidechain", action="store_true")
+    # Declared explicitly, even though `fill_missing_args` would supply the same
+    # default, so the leakage-safe setting is visible in this script's own --help
+    # rather than only in the training script's.
+    p.add_argument(
+        "--allow-binder-sidechain-leakage", action="store_true",
+        help="LEAKAGE ABLATION ONLY; leave off. Keeps the binder's native "
+             "side-chain atom rows in the model input, which decodes residue "
+             "identity into a_token.",
+    )
     p.add_argument("--enable-coevolution", action="store_true")
     p.add_argument(
         "--predicted-frame", action=argparse.BooleanOptionalAction, default=True
@@ -381,8 +390,13 @@ def main() -> None:
         build_components,
         build_configs,
         build_monomer_index,
+        fill_missing_args,
     )
 
+    # `build_configs`/`build_components` read flags this script's parser does not
+    # define. Take their defaults from the training parser rather than growing a
+    # copy of it here, which is what kept breaking (see `fill_missing_args`).
+    fill_missing_args(args)
     apply_training_stage_args(args)
     repo_root = _bootstrap_paths(args)
     os.environ.setdefault("PROTENIX_ROOT_DIR", str(Path(args.data_root).resolve()))

@@ -963,6 +963,75 @@ def adopt_sidechain_arch_from_checkpoint(configs, args: argparse.Namespace) -> d
     return adopted
 
 
+# The S->B feedback channels, and the top-level module each one instantiates.
+# Presence of the module in a checkpoint's state dict is the evidence that the
+# channel was on when those weights were trained.
+_FEEDBACK_CHANNEL_MODULES = {
+    "a_direct_pre": "a_token_fusion_pre",
+    "a_direct": "a_token_fusion",
+    "q_direct": "q_atom_fusion",
+}
+
+
+def adopt_feedback_channels_from_checkpoint(configs, ckpt_path) -> dict:
+    """Switch the S->B feedback channels to match what the checkpoint carries.
+
+    `sidechain_arch` records S_phi's own INPUT layout, but not the S->B feedback
+    channels -- those come from `--sc-ablation-arm`, and the arm is not written
+    into the checkpoint. So a consumer that picks a different arm than the run
+    that produced the weights builds a different model and never learns it did:
+    the extra tensors land in `unexpected` (which nothing checks) and the missing
+    channels are simply absent from the forward pass.
+
+    Measured: `eval_aa_head_strict_backbone.py` defaults to arm "no" -- correct
+    for the `joint` stage, where the side chain is off entirely -- and scoring an
+    `aa_head_on_stage2` checkpoint under it dropped `a_token_fusion_pre` and
+    `q_atom_fusion` (16 tensors, "unexpected=16"). That is precisely the
+    fitted-to-a-different-feature-path error `aa_head_on_stage2` exists to avoid.
+
+    The state dict answers the question directly, so ask it rather than the arm.
+
+    CALL THIS ONLY WHEN REPRODUCING A FITTED MODEL, i.e. from an evaluator scoring
+    weights that already exist. It is deliberately NOT called from `build_configs`,
+    because on the TRAINING side the checkpoint is a donor, not a specification:
+    Stage III/IV -- and `aa_head_on_stage2` itself -- warm-start from a Stage II
+    checkpoint that has no fusion modules at all and are *supposed* to switch
+    these channels on. They are zero-initialised, so enabling one is an exact
+    no-op at step 0 and a normal curriculum move. Wiring this into the training
+    path would silently delete the co-evolution channels those stages exist to
+    train, which is a worse bug than the one it fixes.
+    """
+    try:
+        import torch
+
+        # map_location="meta": only the key names are needed, no storage.
+        saved = torch.load(str(ckpt_path), map_location="meta", weights_only=False)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "could not read %s to reconcile its S->B feedback channels (%s: %s); "
+            "the configured channels are left as-is and may not match the weights.",
+            ckpt_path, type(exc).__name__, exc,
+        )
+        return {}
+    state = (saved or {}).get("model") or {}
+    if not state:
+        return {}
+    prefixes = {k.removeprefix("module.").split(".", 1)[0] for k in state}
+    adopted = {}
+    for flag, module_name in _FEEDBACK_CHANNEL_MODULES.items():
+        present = module_name in prefixes
+        if bool(getattr(configs.sidechain, flag, False)) != present:
+            setattr(configs.sidechain, flag, present)
+            adopted[flag] = present
+    if adopted:
+        logging.info(
+            "Adopted S->B feedback channels from %s's weights: %s (the ablation arm "
+            "is not recorded in the checkpoint, so the module set is the evidence)",
+            ckpt_path, ", ".join(f"{k}={v}" for k, v in sorted(adopted.items())),
+        )
+    return adopted
+
+
 def apply_training_stage_args(args: argparse.Namespace) -> None:
     if args.training_stage == "backbone_only":
         args.disable_sidechain = True
@@ -1009,6 +1078,35 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.per_sigma = True
 
 
+# Dataset locations, resolved once so no default is written as a literal path.
+#
+# WHY. These defaults were absolute paths under /hai/scratch/yfsun, which made
+# the repo unrunnable by anyone else without editing argparse defaults in place --
+# and the same literals appear in ~40 places across scripts/, so "just edit it"
+# meant editing it many times and missing some. One root variable now drives all
+# of them, and every individual path stays independently overridable for layouts
+# that do not nest the way this one does.
+#
+#   PROTEOAA_DATA_ROOT   parent of every dataset      (default /hai/scratch/yfsun)
+#   PROTENIX_DATA_ROOT   Protenix training data       (default $PROTEOAA_DATA_ROOT/protenix_data)
+#   PINDER_ROOT          PINDER release root          (default $PROTEOAA_DATA_ROOT/pinder/2024-02)
+#
+# See docs/datasets.md for what each one has to contain and where to get it.
+_DATA_ROOT = os.environ.get("PROTEOAA_DATA_ROOT", "/hai/scratch/yfsun")
+DEFAULT_PROTENIX_DATA_ROOT = os.environ.get(
+    "PROTENIX_DATA_ROOT", os.path.join(_DATA_ROOT, "protenix_data")
+)
+DEFAULT_PINDER_ROOT = os.environ.get(
+    "PINDER_ROOT", os.path.join(_DATA_ROOT, "pinder", "2024-02")
+)
+DEFAULT_PINDER_CIF_CACHE = os.environ.get(
+    "PINDER_CIF_CACHE", os.path.join(DEFAULT_PINDER_ROOT, "cif_cache")
+)
+DEFAULT_PINDER_ARCHIVE = os.environ.get(
+    "PINDER_ARCHIVE", os.path.join(DEFAULT_PINDER_ROOT, "raw", "pdbs.zip")
+)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -1029,7 +1127,7 @@ def parse_args() -> argparse.Namespace:
         choices=["monomer", "mixed_monomer_complex"],
         help="monomer keeps the original stage-1 data. mixed_monomer_complex adds protein-protein interfaces with a curriculum.",
     )
-    p.add_argument("--data-root", default="/hai/scratch/yfsun/protenix_data")
+    p.add_argument("--data-root", default=DEFAULT_PROTENIX_DATA_ROOT)
     p.add_argument("--source-index", default="")
     p.add_argument("--output-dir", default=_default_output_dir())
     p.add_argument(
@@ -1073,17 +1171,17 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pinder-root",
-        default="/hai/scratch/yfsun/pinder/2024-02",
+        default=DEFAULT_PINDER_ROOT,
         help="PINDER release root containing pdbs/.",
     )
     p.add_argument(
         "--pinder-cif-cache",
-        default="/hai/scratch/yfsun/pinder/2024-02/cif_cache",
+        default=DEFAULT_PINDER_CIF_CACHE,
         help="Persistent cache for lazy PINDER PDB-to-mmCIF conversion.",
     )
     p.add_argument(
         "--pinder-archive",
-        default="/hai/scratch/yfsun/pinder/2024-02/raw/pdbs.zip",
+        default=DEFAULT_PINDER_ARCHIVE,
         help="Official structure archive used when a selected PDB has not been extracted.",
     )
     p.add_argument("--complex-limit-index", type=int, default=0)
@@ -1238,7 +1336,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--sc-ablation-arm",
         default="default",
-        choices=["default", "no", "a-indirect", "a-direct", "bbctx", "q", "a-direct+q"],
+        # No `choices=` on purpose. SC_ABLATION_ARMS is the registry (21 arms) and
+        # `apply_sidechain_ablation_arm` already rejects an unknown name with the
+        # valid list in the message. The hardcoded list here had drifted to 7 and
+        # was the ONLY thing blocking the other 15 -- `a-bs`, the arm that differs
+        # from the Stage III default in nothing but the two S->B feedback channels
+        # (a_direct_pre, q_direct), and therefore the only clean control for "does
+        # the side chain help the backbone", failed at argparse with
+        # "invalid choice: 'a-bs'". Importing the registry here is not an option:
+        # parse_args runs before `_bootstrap_paths`, so `pxdesign_train` (and its
+        # protenix import) is not yet on sys.path. Deferring to the one validator
+        # that can see the registry keeps the CLI from drifting again.
+        help="Side-chain feedback ablation arm; see SC_ABLATION_ARMS in "
+             "pxdesign_train/configs/configs_train.py for the full list.",
     )
 
     p.add_argument("--use-msa", action="store_true")
@@ -1249,6 +1359,39 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--protenix-code-dir", default="")
     p.add_argument("--pxdesign-code-dir", default="")
     return p.parse_args()
+
+
+def fill_missing_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Back-fill every option this parser defines that `args` does not carry.
+
+    WHY THIS EXISTS. `build_configs` and `build_components` are shared with the
+    evaluation scripts, but each of those defines its OWN argparse parser holding
+    the subset of flags it needs. So every time a new option is added here and
+    read in one of those two functions, every eval script breaks with
+    `AttributeError: 'Namespace' object has no attribute '<new_flag>'` -- at
+    import-adjacent setup time, i.e. after the job has been queued, scheduled and
+    has loaded its dataset index. Measured: five eval scripts died this way on
+    `allow_binder_sidechain_leakage`, and the next run died on `resume_lr`,
+    one attribute at a time.
+
+    Chasing them one at a time is the wrong fix; the eval parsers cannot be
+    expected to track this one. Filling the gap from THIS parser's own defaults
+    makes the contract "the training parser's defaults apply unless the caller
+    overrides them", which is what the eval scripts already assume.
+
+    Only ABSENT attributes are filled -- anything the caller set, including a
+    deliberate `False`, is left exactly as it is.
+    """
+    saved = sys.argv
+    try:
+        sys.argv = [saved[0] if saved else "train_protenix_monomer.py"]
+        defaults = parse_args()
+    finally:
+        sys.argv = saved
+    for key, value in vars(defaults).items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    return args
 
 
 def dry_run_components(components, n_items: int) -> None:

@@ -180,6 +180,81 @@ def build_target_list(args) -> tuple[list[dict], list[dict]]:
     return out, excluded
 
 
+def score_target_direct(trainer, loader, torch, to_global, sidechain_lddt, seed: int) -> dict:
+    """Atom-weighted side-chain MSE + lDDT for one target, from a direct forward.
+
+    WHY A SECOND SCORING PATH ALONGSIDE `trainer.evaluate()`. `sc_local` is the
+    loss the trainer optimises, and reading RMSD off it keeps this benchmark
+    consistent with training -- that is why it stays. But it carries no atom
+    count (so per-target means cannot be pooled) and no lDDT, and lDDT is the
+    metric that distinguishes correct packing from correct-per-atom-displacement
+    (see `pxdesign_train/sidechain/lddt.py`). This function is byte-for-byte the
+    scoring block of `eval_sidechain_arms.py`, so the CASP numbers and the
+    491-protein validation numbers come out of the SAME code -- which is what
+    makes putting them in one table legitimate.
+    """
+    out_row = {"n_atoms": 0, "sc_mse": float("nan"), "sc_rmsd_A": float("nan"),
+               "lddt_sc_env": float("nan"), "lddt_sc_sc": float("nan")}
+    for batch in loader:
+        batch = trainer._to_device(batch)
+        feat, label = batch["input_feature_dict"], batch["label_dict"]
+        torch.manual_seed(int(seed))
+        with torch.no_grad():
+            out = trainer.model(feat, label, mode="train")
+        pred = out.get("sc_pred_global")
+        if pred is None:
+            raise RuntimeError("model returned no sc_pred_global")
+        gt_local = feat["sc_gt_local"].float()
+        mask = out["sc_atom_mask"].bool()
+        fR, ft = out["sc_frame_R"].float(), out["sc_frame_t"].float()
+        tgt = to_global(gt_local, fR, ft)
+        while pred.dim() > tgt.dim():
+            pred = pred.mean(dim=0)
+        se = ((pred.float() - tgt) ** 2).sum(dim=-1)
+        m = mask.to(se.dtype).expand_as(se)
+        n = float(m.sum())
+        if n == 0:
+            raise RuntimeError("target has no unmasked side-chain atoms")
+        mse = float((se * m).sum() / n)
+
+        p3 = pred.float() if pred.dim() == 3 else pred.float().reshape(-1, *pred.shape[-2:])
+        t3 = tgt.float() if tgt.dim() == 3 else tgt.float().reshape(-1, *tgt.shape[-2:])
+        m2 = mask if mask.dim() == 2 else mask.reshape(-1, mask.shape[-1])
+        bbc = feat.get("sc_bb_coords")
+        if bbc is not None:
+            bbc = bbc.float()
+            while bbc.dim() > 3:
+                bbc = bbc[0]
+        bbm = None
+        bbi = feat.get("sc_bb_atom_idx")
+        if bbi is not None:
+            bbm = bbi.long()
+            while bbm.dim() > 2:
+                bbm = bbm[0]
+            bbm = bbm >= 0
+        ld = sidechain_lddt(p3[0] if p3.dim() == 4 else p3,
+                            t3[0] if t3.dim() == 4 else t3,
+                            m2, bb_coords=bbc, bb_mask=bbm)
+        out_row = {
+            "n_atoms": int(n), "sc_mse": mse, "sc_rmsd_A": math.sqrt(mse),
+            "lddt_sc_env": float(ld["lddt_sc_env"]),
+            "lddt_sc_sc": float(ld["lddt_sc_sc"]),
+        }
+        break                        # one-item loader: one target, one row
+    return out_row
+
+
+def _quantile(values: list[float], q: float) -> float:
+    v = sorted(values)
+    if not v:
+        return float("nan")
+    if len(v) == 1:
+        return v[0]
+    i = q * (len(v) - 1)
+    lo, hi = math.floor(i), math.ceil(i)
+    return v[lo] + (v[hi] - v[lo]) * (i - lo)
+
+
 def train_index_overlap(args, targets: list[dict]) -> dict:
     """Which scored PDB entries appear in the training index (contamination)."""
     import pandas as pd
@@ -344,8 +419,18 @@ def main() -> None:
     # Score one target at a time so a single unusable entry costs one row, not
     # the whole benchmark. sc_local is mean squared deviation in A^2, so the
     # side-chain RMSD is its square root.
+    from pxdesign_train.sidechain.frames import to_global
+    from pxdesign_train.sidechain.lddt import sidechain_lddt
+
+    # A one-step arm is decoded once from its template init; an EDM arm must walk
+    # its reverse loop. Same switch `eval_sidechain_arms.py` sets, and a no-op on
+    # the one-step arms -- without it an EDM checkpoint would be scored at a random
+    # training sigma instead of at inference.
+    trainer.model.sc_edm_eval = True
+    trainer.model.sc_edm_eval_from_gt = False
+
     per_target = []
-    for entry in targets:
+    for t_i, entry in enumerate(targets):
         name = entry["target"]
         try:
             trainer.eval_dl = make_loader(entry)
@@ -355,14 +440,35 @@ def main() -> None:
                 raise RuntimeError("evaluate() returned no per-protein row")
             sc = float(rows[0].get("sc_local", float("nan")))
             rmsd = math.sqrt(sc) if sc == sc and sc >= 0 else None
+            # Fail-soft, deliberately: this is the ADDITIONAL scoring path. If it
+            # breaks, the target still has its sc_local/RMSD row -- the number this
+            # benchmark has always reported -- rather than being pushed into
+            # `excluded` and silently dropped from the primary result too.
+            try:
+                direct = score_target_direct(
+                    trainer, make_loader(entry), torch, to_global, sidechain_lddt,
+                    seed=t_i,
+                )
+            except Exception as exc:                  # noqa: BLE001
+                logging.warning("  MSE/lDDT failed for %-9s: %s: %s",
+                                name, type(exc).__name__, str(exc)[:160])
+                direct = {"n_atoms": 0, "sc_mse": float("nan"),
+                          "sc_rmsd_A": float("nan"),
+                          "lddt_sc_env": float("nan"), "lddt_sc_sc": float("nan")}
             per_target.append({
                 "target": name, "pdb_id": entry["pdb_id"], "chain": entry.get("chain"),
                 "native_len": entry.get("native_len"),
                 "sc_local_A2": sc, "sidechain_rmsd_A": rmsd,
+                **{k: direct[k] for k in
+                   ("n_atoms", "sc_mse", "sc_rmsd_A", "lddt_sc_env", "lddt_sc_sc")},
                 "set_metrics": {k: float(v) for k, v in m.items()},
             })
-            logging.info("  scored %-9s %s  sc_local=%.4f  RMSD=%.3f A",
-                         name, entry["pdb_id"], sc, rmsd if rmsd else float("nan"))
+            logging.info(
+                "  scored %-9s %s  sc_local=%.4f  RMSD=%.3f A  mse=%.4f  "
+                "lddt_env=%.4f lddt_sc=%.4f",
+                name, entry["pdb_id"], sc, rmsd if rmsd else float("nan"),
+                direct["sc_mse"], direct["lddt_sc_env"], direct["lddt_sc_sc"],
+            )
         except Exception as exc:                      # noqa: BLE001 — isolate the target
             excluded.append({"target": name, "pdb_id": entry["pdb_id"],
                              "chain": entry.get("chain"),
@@ -386,6 +492,34 @@ def main() -> None:
         "sidechain_rmsd_A_mean_over_targets": (sum(good) / len(good)) if good else None,
         "sidechain_rmsd_A_median_over_targets": (sorted(good)[len(good) // 2]) if good else None,
     }
+    # The direct-forward block DOES carry per-target atom counts, so the pooled
+    # atom-weighted number the caveat above rules out for `sc_local` is available
+    # here -- and it is the number directly comparable to the 491-protein
+    # validation `atom_weighted_mse`. Both conventions are reported rather than
+    # one being picked silently: macro (each target counts once, the packing-paper
+    # convention) and atom-weighted (what a consumer of the model feels).
+    scored = [p for p in per_target if p.get("n_atoms")]
+    if scored:
+        tot_atoms = sum(int(p["n_atoms"]) for p in scored)
+        tot_se = sum(float(p["sc_mse"]) * int(p["n_atoms"]) for p in scored)
+        mses = [float(p["sc_mse"]) for p in scored]
+        summary.update({
+            "unit": "A^2 (unweighted masked mean squared displacement per atom)",
+            "n_targets_with_direct_score": len(scored),
+            "sidechain_atoms": tot_atoms,
+            "atom_weighted_mse": tot_se / max(1, tot_atoms),
+            "atom_weighted_rmsd_A": math.sqrt(tot_se / max(1, tot_atoms)),
+            "mse_mean_over_targets": sum(mses) / len(mses),
+            "mse_median_over_targets": _quantile(mses, 0.5),
+            "rmsd_A_from_mse_mean_over_targets":
+                sum(float(p["sc_rmsd_A"]) for p in scored) / len(scored),
+        })
+        for key in ("lddt_sc_env", "lddt_sc_sc"):
+            vals = [float(p[key]) for p in scored if p[key] == p[key]]   # drop nan
+            if vals:
+                summary[f"{key}_mean"] = sum(vals) / len(vals)
+                summary[f"{key}_median"] = _quantile(vals, 0.5)
+                summary[f"{key}_n"] = len(vals)
     if args.report_train_overlap:
         summary["train_index_overlap"] = train_index_overlap(args, targets)
 
@@ -394,18 +528,37 @@ def main() -> None:
     # overwrite each other and a stray file cannot be mistaken for CASP14.
     out_path = args.output_dir / f"{label.lower()}_sidechain.json"
     out_path.write_text(json.dumps(out, indent=2) + "\n")
+    # Flat per-target CSV alongside the JSON, matching the column names
+    # `eval_sidechain_arms.py` writes, so the two benchmarks can be concatenated.
+    csv_path = args.output_dir / f"{label.lower()}_sidechain_per_target.csv"
+    with csv_path.open("w") as fh:
+        fh.write("target,pdb_id,native_len,n_atoms,sc_local_A2,sidechain_rmsd_A,"
+                 "sc_mse,sc_rmsd_A,lddt_sc_env,lddt_sc_sc\n")
+        for p in per_target:
+            fh.write(
+                f"{p['target']},{p['pdb_id']},{p.get('native_len')},"
+                f"{p.get('n_atoms', '')},{p['sc_local_A2']},"
+                f"{p['sidechain_rmsd_A']},{p.get('sc_mse', '')},"
+                f"{p.get('sc_rmsd_A', '')},{p.get('lddt_sc_env', '')},"
+                f"{p.get('lddt_sc_sc', '')}\n"
+            )
 
     print(f"\n=== {label} side-chain packing (GT backbone + GT sequence) ===")
     # Widened, and the source column is suppressed when it just repeats the target
     # (the direct-native path sets pdb_id = target, which printed 'T1137s8-D1T1137s8-D1').
     same = all(p["pdb_id"] == p["target"] for p in per_target)
     head = f"{'target':<12}{'len':>6}" if same else f"{'target':<12}{'source':<9}{'len':>6}"
-    print(head + f"  {'sc_local(A^2)':>13}  {'RMSD(A)':>8}")
+    print(head + f"  {'sc_local(A^2)':>13}  {'RMSD(A)':>8}"
+                 f"  {'MSE(A^2)':>9}  {'lddt_env':>8}  {'lddt_sc':>8}")
     for p in per_target:
         rmsd = "n/a" if p["sidechain_rmsd_A"] is None else f"{p['sidechain_rmsd_A']:.3f}"
         left = (f"{p['target']:<12}" if same
                 else f"{p['target']:<12}{str(p['pdb_id']):<9}")
-        print(left + f"{str(p['native_len']):>6}  {p['sc_local_A2']:>13.4f}  {rmsd:>8}")
+        def _f(key, w, prec=4):
+            v = p.get(key)
+            return f"{v:>{w}.{prec}f}" if isinstance(v, float) and v == v else f"{'n/a':>{w}}"
+        print(left + f"{str(p['native_len']):>6}  {p['sc_local_A2']:>13.4f}  {rmsd:>8}"
+                     f"  {_f('sc_mse', 9)}  {_f('lddt_sc_env', 8)}  {_f('lddt_sc_sc', 8)}")
     if excluded:
         print(f"\nEXCLUDED {len(excluded)} target(s) — not covered by this number:")
         for e in excluded:
@@ -414,7 +567,17 @@ def main() -> None:
     if summary["sidechain_rmsd_A_mean_over_targets"]:
         print(f"side-chain RMSD (mean/target): {summary['sidechain_rmsd_A_mean_over_targets']:.3f} A")
         print(f"side-chain RMSD (median)     : {summary['sidechain_rmsd_A_median_over_targets']:.3f} A")
+    if "atom_weighted_mse" in summary:
+        print(f"side-chain MSE (atom-weighted): {summary['atom_weighted_mse']:.4f} A^2  "
+              f"(RMSD {summary['atom_weighted_rmsd_A']:.4f} A over "
+              f"{summary['sidechain_atoms']} atoms)")
+        print(f"side-chain MSE (mean/target)  : {summary['mse_mean_over_targets']:.4f} A^2")
+        for key in ("lddt_sc_env", "lddt_sc_sc"):
+            if f"{key}_mean" in summary:
+                print(f"{key:<14} (mean/target) : {summary[f'{key}_mean']:.4f}  "
+                      f"(median {summary[f'{key}_median']:.4f}, n={summary[f'{key}_n']})")
     print(f"wrote {out_path}")
+    print(f"wrote {csv_path}")
 
 
 if __name__ == "__main__":

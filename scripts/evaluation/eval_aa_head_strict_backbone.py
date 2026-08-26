@@ -335,7 +335,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--protenix-code-dir", default="")
     p.add_argument("--pxdesign-code-dir", default="")
-    p.add_argument("--model-stage", choices=["aa_head_warmup", "joint"], default="joint")
+    # `aa_head_on_stage2` is not interchangeable with `joint` here. A head fitted
+    # in that stage was trained with enable_sidechain + enable_coevolution ON and
+    # the refinement pass running; scoring it under `joint` (both OFF) feeds it a
+    # different feature path than it was fitted to, which that stage's docstring
+    # records as producing confidently-wrong output rather than a mild drop. So
+    # the stage has to be selectable, not approximated by `joint`.
+    p.add_argument(
+        "--model-stage",
+        choices=["aa_head_warmup", "joint", "aa_head_on_stage2"],
+        default="joint",
+    )
 
     # Shared config/data builder arguments.
     p.add_argument("--max-steps", type=int, default=1)
@@ -359,6 +369,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--trunk-grad-scale", type=float, default=0.0)
     p.add_argument("--disable-aa-loss", action="store_true", default=False)
     p.add_argument("--disable-sidechain", action="store_true", default=True)
+    # This script's whole point is the leakage-safe input, so it stays OFF.
+    # Declared here (not just left to `fill_missing_args`) so that shows in --help.
+    p.add_argument(
+        "--allow-binder-sidechain-leakage", action="store_true",
+        help="LEAKAGE ABLATION ONLY; leave off. The `full_topology_scrub` "
+             "condition below already covers the leaky input.",
+    )
     p.add_argument("--enable-coevolution", action="store_true", default=False)
     p.add_argument("--predicted-frame", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--per-sigma", action=argparse.BooleanOptionalAction, default=True)
@@ -391,12 +408,24 @@ def main() -> None:
         _recent_index_path,
         apply_training_stage_args,
         build_components,
+        adopt_feedback_channels_from_checkpoint,
         build_configs,
         build_monomer_index,
+        fill_missing_args,
     )
 
+    # Flags `build_configs`/`build_components` read but this parser omits; filled
+    # from the training parser's defaults (see `fill_missing_args`). Runs before
+    # the explicit assignments below so none of them can be overwritten.
+    fill_missing_args(args)
     args.training_stage = args.model_stage
     args.data_mode = "monomer"
+    # `build_configs` reads `load_checkpoint` (not `checkpoint`) when it adopts the
+    # recorded `sidechain_arch` for the aa_head_on_stage2 stage. Left unset, S_phi
+    # would be built with the stage's default layout instead of the one the
+    # checkpoint was trained under -- which `_check_sidechain_arch` either aborts
+    # on or, for the additive keys, lets through silently.
+    args.load_checkpoint = str(args.checkpoint)
     apply_training_stage_args(args)
     repo_root = _bootstrap_paths(args)
     os.environ.setdefault("PROTENIX_ROOT_DIR", str(Path(args.data_root).resolve()))
@@ -461,6 +490,17 @@ def main() -> None:
     from pxdesign_train.runner.trainer import PXDesignTrainer, TrainerComponents
 
     configs = build_configs(args, device)
+    # This script SCORES an existing head, so the model it builds has to be the one
+    # that head was fitted to -- including the S->B feedback channels, which are
+    # set by `--sc-ablation-arm` and are NOT recorded in `sidechain_arch`. This
+    # parser's arm default is "no", correct for `joint` (side chain off entirely)
+    # and wrong for `aa_head_on_stage2`, where it dropped `a_token_fusion_pre` and
+    # `q_atom_fusion` from the forward pass while the weights sat unused in
+    # `unexpected`. Read the channels off the checkpoint instead of the arm.
+    adopted_channels = adopt_feedback_channels_from_checkpoint(configs, checkpoint)
+    if adopted_channels:
+        print("adopted_feedback_channels=" + ",".join(
+            f"{k}={v}" for k, v in sorted(adopted_channels.items())))
     configs.training.diffusion_batch_size = int(args.diffusion_samples)
     eval_components = TrainerComponents(
         train_dataset=components.train_dataset,

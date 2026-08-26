@@ -273,6 +273,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
     p.add_argument("--disable-aa-loss", action="store_true", default=True)
     p.add_argument("--disable-sidechain", action="store_true", default=True)
+    # Off: this export writes N/CA/C/O backbones for ProteinMPNN, so native side
+    # chains have no business reaching the model input.
+    p.add_argument(
+        "--allow-binder-sidechain-leakage", action="store_true",
+        help="LEAKAGE ABLATION ONLY; leave off.",
+    )
     p.add_argument("--enable-coevolution", action="store_true", default=False)
     p.add_argument(
         "--predicted-frame", action=argparse.BooleanOptionalAction, default=True
@@ -302,10 +308,14 @@ def main() -> None:
         build_components,
         build_configs,
         build_monomer_index,
+        fill_missing_args,
     )
     from pxdesign_train.runner.trainer import TrainerComponents
 
     _seed_everything(int(args.seed))
+    # Flags `build_configs`/`build_components` read but this parser omits; filled
+    # from the training parser's defaults (see `fill_missing_args`).
+    fill_missing_args(args)
     apply_training_stage_args(args)
     repo_root = _bootstrap_paths(args)
     os.environ.setdefault("PROTENIX_ROOT_DIR", str(Path(args.data_root).resolve()))

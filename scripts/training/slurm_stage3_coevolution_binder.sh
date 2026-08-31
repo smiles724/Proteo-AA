@@ -48,8 +48,14 @@
 
 set -euo pipefail
 
-source ~/.bashrc
-conda activate ml
+source /hai/users/s/h/shenjm/miniconda3/etc/profile.d/conda.sh
+conda activate proteoaa
+
+# Complex crops vary substantially in shape.  Without expandable CUDA segments,
+# the caching allocator can strand tens of GiB in unusable reserved blocks after
+# enough differently sized batches (job 107381 had 38.95 GiB reserved but
+# unallocated when a 1.41 GiB attention tensor was requested).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # --- where things live ------------------------------------------------------
 # Set PROTEOAA_DATA_ROOT and PROTEOAA_CODE_ROOT and nothing else needs changing;
@@ -98,22 +104,30 @@ done
 [[ -x "${PYTHON_BIN}" ]] || { echo "ERROR: PYTHON_BIN not executable: ${PYTHON_BIN}" >&2; exit 2; }
 
 # --- warm start -------------------------------------------------------------
-# Both are REQUIRED, unlike the monomer script's optional-empty default. A Stage
-# II checkpoint carries a chance-level AA head (Stage II excluded the head from
-# its warm start and then froze it at random init -- measured: CE 3.00 = ln 20,
-# accuracy at the majority-class floor, and `strict_random` scoring the same as
-# `strict_native`). Starting Stage III off that head wastes the run, so the
-# script refuses rather than letting it happen silently.
+# Both are REQUIRED for the initial warm start, unlike the monomer script's
+# optional-empty default. A Stage II checkpoint carries a chance-level AA head
+# (Stage II excluded the head from its warm start and then froze it at random
+# init -- measured: CE 3.00 = ln 20, accuracy at the majority-class floor, and
+# `strict_random` scoring the same as `strict_native`). Starting Stage III off
+# that head wastes the run, so the script refuses rather than letting it happen
+# silently. A full resume already contains Stage III's trained AA head and must
+# not overlay the original donor again.
 LOAD_CHECKPOINT="${LOAD_CHECKPOINT:?set LOAD_CHECKPOINT to a Stage II side-chain checkpoint}"
-AA_HEAD_CHECKPOINT="${AA_HEAD_CHECKPOINT:?set AA_HEAD_CHECKPOINT to a run that trained design_residue_type_head}"
 WARM_START_PARAMS_ONLY="${WARM_START_PARAMS_ONLY:-1}"
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
+  AA_HEAD_CHECKPOINT="${AA_HEAD_CHECKPOINT:?set AA_HEAD_CHECKPOINT to a run that trained design_residue_type_head}"
+else
+  AA_HEAD_CHECKPOINT="${AA_HEAD_CHECKPOINT:-}"
+fi
 
 # --- complex data sources ---------------------------------------------------
 COMPLEX_PROVIDER="${COMPLEX_PROVIDER:-both}"
 PINDER_RELEASE="${PINDER_RELEASE:-2024-02}"
 PINDER_ROOT="${PINDER_ROOT:-${PROTEOAA_DATA_ROOT}/pinder/${PINDER_RELEASE}}"
 PINDER_MANIFEST="${PINDER_MANIFEST:-${PINDER_ROOT}/indices/pinder_ppi_complex.parquet}"
-PINDER_CIF_CACHE="${PINDER_CIF_CACHE:-${PINDER_ROOT}/cif_cache}"
+PINDER_CACHE_ROOT="${PINDER_CACHE_ROOT:-/hai/scratch/shenjm/pinder}"
+PINDER_CIF_CACHE="${PINDER_CIF_CACHE:-${PINDER_CACHE_ROOT}/cif_cache}"
+PINDER_PDB_CACHE="${PINDER_PDB_CACHE:-${PINDER_CACHE_ROOT}/${PINDER_RELEASE}/pdbs}"
 PINDER_ARCHIVE="${PINDER_ARCHIVE:-${PINDER_ROOT}/raw/pdbs.zip}"
 
 # Mixture. PINDER carries the larger complex share because 85% of its dimers fit
@@ -143,10 +157,18 @@ if [[ "${COMPLEX_PROVIDER}" == "pinder" || "${COMPLEX_PROVIDER}" == "both" ]]; t
     --pinder-manifest "${PINDER_MANIFEST}"
     --pinder-root "${PINDER_ROOT}"
     --pinder-cif-cache "${PINDER_CIF_CACHE}"
+    --pinder-pdb-cache "${PINDER_PDB_CACHE}"
     --pinder-archive "${PINDER_ARCHIVE}"
   )
   for f in "${PINDER_MANIFEST}" "${PINDER_ARCHIVE}"; do
     [[ -f "$f" ]] || { echo "ERROR: missing PINDER input ${f}" >&2; exit 2; }
+  done
+  mkdir -p "${PINDER_CIF_CACHE}" "${PINDER_PDB_CACHE}"
+  for d in "${PINDER_CIF_CACHE}" "${PINDER_PDB_CACHE}"; do
+    [[ -w "${d}" ]] || {
+      echo "ERROR: PINDER cache is not writable: ${d}" >&2
+      exit 2
+    }
   done
 fi
 COMPLEX_ARGS+=(
@@ -177,9 +199,14 @@ else
   ITERS_TO_ACCUMULATE="${ITERS_TO_ACCUMULATE:-8}"
 fi
 
-for f in "${LOAD_CHECKPOINT}" "${AA_HEAD_CHECKPOINT}"; do
-  [[ -f "$f" ]] || { echo "ERROR: checkpoint does not exist: ${f}" >&2; exit 2; }
-done
+[[ -f "${LOAD_CHECKPOINT}" ]] || {
+  echo "ERROR: checkpoint does not exist: ${LOAD_CHECKPOINT}" >&2
+  exit 2
+}
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" && ! -f "${AA_HEAD_CHECKPOINT}" ]]; then
+  echo "ERROR: AA-head checkpoint does not exist: ${AA_HEAD_CHECKPOINT}" >&2
+  exit 2
+fi
 
 mkdir -p "${REPO_ROOT}/logs/training/stage3_binder" "${RUN_ROOT}"
 cd "${REPO_ROOT}"
@@ -191,15 +218,34 @@ export PYTHONPATH="${REPO_ROOT}:${PXDESIGN_CODE_DIR}:${PROTENIX_CODE_DIR}${PYTHO
 LOAD_ARGS=(--load-checkpoint "${LOAD_CHECKPOINT}")
 if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
   LOAD_ARGS+=(--warm-start-params-only)
+  LOAD_ARGS+=(--load-aa-head-from "${AA_HEAD_CHECKPOINT}")
 fi
-LOAD_ARGS+=(--load-aa-head-from "${AA_HEAD_CHECKPOINT}")
+
+ABLATION_ARGS=()
+if [[ -n "${AA_HEAD_LR:-}" ]]; then
+  ABLATION_ARGS+=(--aa-head-lr "${AA_HEAD_LR}")
+fi
+if [[ "${DETACH_AA_LOGITS_FOR_SIDECHAIN:-0}" == "1" ]]; then
+  ABLATION_ARGS+=(--detach-aa-logits-for-sidechain)
+fi
 
 echo "stage3-binder  crop=${CROP_SIZE}  provider=${COMPLEX_PROVIDER}"
 echo "  monomer ${STAGE2_START_MONOMER_FRAC} -> ${STAGE2_END_MONOMER_FRAC}"
 echo "  pinder share of complex mass: ${PINDER_COMPLEX_FRAC}"
 echo "  ramp ${CURRICULUM_STAGE1_END_STEP} -> ${CURRICULUM_STAGE2_START_STEP}"
+echo "  CUDA allocator : ${PYTORCH_CUDA_ALLOC_CONF}"
+if [[ "${COMPLEX_PROVIDER}" == "pinder" || "${COMPLEX_PROVIDER}" == "both" ]]; then
+  echo "  PINDER PDB cache: ${PINDER_PDB_CACHE}"
+  echo "  PINDER CIF cache: ${PINDER_CIF_CACHE}"
+fi
+echo "  AA-head lr    : ${AA_HEAD_LR:-same as backbone}"
+echo "  detach AA->Sφ : ${DETACH_AA_LOGITS_FOR_SIDECHAIN:-0}"
 echo "  backbone+S_phi: ${LOAD_CHECKPOINT}"
-echo "  AA head       : ${AA_HEAD_CHECKPOINT}"
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
+  echo "  AA head       : ${AA_HEAD_CHECKPOINT}"
+else
+  echo "  resume        : model + AA head + optimizers + schedulers + step counters"
+fi
 echo "  output        : ${RUN_ROOT}"
 
 "${PYTHON_BIN}" -u scripts/training/train_protenix_monomer.py \
@@ -228,6 +274,7 @@ echo "  output        : ${RUN_ROOT}"
   --device cuda \
   --template-provider "${TEMPLATE_PROVIDER:-dunbrack_mode}" \
   "${LOAD_ARGS[@]}" \
+  "${ABLATION_ARGS[@]}" \
   "${@}"
 
 # NOTE ON MODEL SELECTION. `build_eval_dataloader` pins the validation set to

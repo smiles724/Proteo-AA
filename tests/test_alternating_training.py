@@ -46,7 +46,7 @@ class _FakeSCModel(nn.Module):
         self.A = atoms_per_res
         self.bias = nn.Parameter(torch.zeros(1))       # bb: structure denoise
         self.dist_proj = nn.Linear(1, 64)              # bb
-        self.aa_proj = nn.Linear(1, 20)                # bb
+        self.design_residue_type_head = nn.Linear(1, 20)  # bb
         self.hres_gen = nn.Linear(1, 8)                # bb: feeds the SC module
         self.sidechain_module = nn.Linear(8, self.A * 3)  # SC group
         self.post_proj = nn.Linear(self.A * 3, 1)      # bb: reads SC output
@@ -67,7 +67,7 @@ class _FakeSCModel(nn.Module):
 
         tok = torch.ones(*lead, L, 1)  # non-zero so Linear *weights* get gradient
         dist = self.dist_proj(tok).unsqueeze(-2).expand(*lead, L, L, 64).contiguous()
-        aa_logits = self.aa_proj(tok)
+        aa_logits = self.design_residue_type_head(tok)
 
         h_res = self.hres_gen(tok)                     # [B, L, 8] (bb)
         sc = self.sidechain_module(h_res).reshape(*lead, L, A, 3)  # [B, L, A, 3] (SC)
@@ -92,6 +92,11 @@ class _FakeSCModel(nn.Module):
             "post_pred_coordinate": post_pred,
             "post_gt_coordinate_aug": x_gt_aug,
         }
+
+    @property
+    def aa_proj(self):
+        """Backward-compatible test handle; parameters retain the production prefix."""
+        return self.design_residue_type_head
 
 
 class _Cfg:
@@ -192,6 +197,33 @@ def test_alternating_builds_two_optimizers(monkeypatch):
             assert id(p) not in sc_ids, name
 
 
+def test_aa_head_can_use_a_separate_learning_rate(monkeypatch):
+    monkeypatch.setattr(_Cfg.training, "aa_head_lr", 1e-1, raising=False)
+    trainer = _make_alt_trainer(monkeypatch)
+    groups = trainer.bb_optimizer.param_groups
+    head_ids = {id(p) for p in trainer.raw_model.design_residue_type_head.parameters()}
+    head_groups = [g for g in groups if any(id(p) in head_ids for p in g["params"])]
+    assert len(head_groups) == 1
+    assert head_groups[0]["lr"] == pytest.approx(1e-1)
+    assert all(
+        g["lr"] == pytest.approx(trainer.configs.training.lr)
+        for g in groups if g is not head_groups[0]
+    )
+
+
+def test_detached_sidechain_logits_keep_values_but_close_head_gradient():
+    from pxdesign_train.model import _route_aa_logits_to_sidechain
+
+    logits = torch.randn(2, 3, 20, requires_grad=True)
+    detached = _route_aa_logits_to_sidechain(logits, detach=True)
+    assert torch.equal(detached, logits)
+    assert not detached.requires_grad
+
+    live = _route_aa_logits_to_sidechain(logits, detach=False)
+    assert live is logits
+    assert live.requires_grad
+
+
 def test_alternating_step_updates_both_groups(monkeypatch):
     trainer = _make_alt_trainer(monkeypatch)
     batch = _batch_with_sc(trainer)
@@ -268,6 +300,8 @@ def test_alternating_checkpoint_roundtrip(monkeypatch, tmp_path):
     trainer2 = _make_alt_trainer(monkeypatch)
     trainer2.load_checkpoint(path, params_only=False)
     assert trainer2.step == 1
+    assert trainer2.global_step == 1
+    assert trainer2.train_sampler.step == 1
 
 
 def test_joint_mode_still_default(monkeypatch):

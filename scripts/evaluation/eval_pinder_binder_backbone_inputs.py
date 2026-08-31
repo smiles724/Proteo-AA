@@ -31,6 +31,10 @@ CONDITIONS = {
     "inference_style": "all",
     "native_aa": "none",
 }
+AA3 = (
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+)
 
 
 def _seed_everything(seed: int) -> None:
@@ -108,6 +112,7 @@ def _make_dataset(args: argparse.Namespace, manifest: Path, condition: str):
         manifest_path=manifest,
         pinder_root=args.pinder_root,
         cif_cache_dir=args.pinder_cif_cache,
+        pdb_cache_dir=args.pinder_pdb_cache or None,
         archive_path=args.pinder_archive,
         split=args.split,
         limit=limit,
@@ -190,6 +195,45 @@ def _forward_metrics(trainer, batch: dict[str, Any], ca_lddt_score) -> dict[str,
             compute_tm=False,
         )
 
+        # The main Stage-III AA head predicts from B_pre's diffusion-internal
+        # token representation, before the side-chain/refinement pass.  Score it
+        # only where the dataset masked a valid native binder identity.  The
+        # receptor is explicitly excluded by the assertions above.
+        aa_logits = out.get("aa_logits")
+        aa_clean = feat["aa_clean"].long()
+        aa_valid = feat["aa_loss_mask"].bool() & design_token_cpu.to(feat["aa_loss_mask"].device)
+        aa_valid = aa_valid & aa_clean.ne(-100)
+        if aa_logits is None:
+            raise AssertionError("checkpoint/model produced no aa_logits")
+        if aa_logits.dim() == aa_clean.dim() + 2:
+            n_sample = aa_logits.shape[-3]
+            pre, n_token = aa_clean.shape[:-1], aa_clean.shape[-1]
+            aa_clean_eval = aa_clean.reshape(*pre, 1, n_token).expand(
+                *pre, n_sample, n_token
+            )
+            aa_valid_eval = aa_valid.reshape(*pre, 1, n_token).expand(
+                *pre, n_sample, n_token
+            )
+        else:
+            aa_clean_eval = aa_clean
+            aa_valid_eval = aa_valid
+        if not aa_valid_eval.any():
+            raise AssertionError("PINDER example has no valid masked binder AA labels")
+        logp = torch.log_softmax(aa_logits.float(), dim=-1)
+        target = aa_clean_eval.clamp_min(0)
+        ce_token = -logp.gather(-1, target[..., None]).squeeze(-1)
+        aa_n = int(aa_valid_eval.sum().item())
+        aa_ce_sum = float(ce_token[aa_valid_eval].sum().detach().cpu())
+        aa_correct = int(
+            ((aa_logits.argmax(dim=-1) == aa_clean_eval) & aa_valid_eval).sum().item()
+        )
+        aa_pred = aa_logits.argmax(dim=-1)[aa_valid_eval].long()
+        aa_target = aa_clean_eval[aa_valid_eval].long()
+        aa_confusion = torch.bincount(
+            aa_target * len(AA3) + aa_pred,
+            minlength=len(AA3) * len(AA3),
+        ).reshape(len(AA3), len(AA3)).cpu().numpy()
+
     aa_mask = feat["aa_loss_mask"].bool()
     design_token = feat["design_token_mask"].bool()
     return {
@@ -202,7 +246,54 @@ def _forward_metrics(trainer, batch: dict[str, Any], ca_lddt_score) -> dict[str,
         "binder_aa_mask_fraction": _to_float(
             (aa_mask & design_token).sum().float() / design_token.sum().clamp_min(1)
         ),
+        "binder_aa_ce": aa_ce_sum / aa_n,
+        "binder_aa_acc": aa_correct / aa_n,
+        "binder_aa_n_predictions": float(aa_n),
+        "_aa_confusion": aa_confusion,
     }
+
+
+def _summarize_aa_confusion(
+    confusion: np.ndarray, condition: str
+) -> tuple[dict[str, float | int], list[dict[str, Any]]]:
+    """Return collapse-sensitive aggregate and per-class sequence metrics."""
+    confusion = np.asarray(confusion, dtype=np.int64)
+    support = confusion.sum(axis=1)
+    predicted = confusion.sum(axis=0)
+    true_positive = np.diag(confusion)
+    total = int(confusion.sum())
+    rows: list[dict[str, Any]] = []
+    recalls: list[float] = []
+    f1s: list[float] = []
+    for idx, name in enumerate(AA3):
+        precision = (
+            float(true_positive[idx] / predicted[idx]) if predicted[idx] else 0.0
+        )
+        recall = float(true_positive[idx] / support[idx]) if support[idx] else 0.0
+        f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+        recalls.append(recall)
+        f1s.append(f1)
+        rows.append(
+            {
+                "condition": condition,
+                "class_idx": idx,
+                "class_name": name,
+                "support": int(support[idx]),
+                "predicted": int(predicted[idx]),
+                "true_positive": int(true_positive[idx]),
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "support_fraction": float(support[idx] / total) if total else 0.0,
+                "prediction_fraction": float(predicted[idx] / total) if total else 0.0,
+            }
+        )
+    summary: dict[str, float | int] = {
+        "binder_aa_macro_f1": float(np.mean(f1s)),
+        "binder_aa_balanced_acc": float(np.mean(recalls)),
+        "binder_aa_num_predicted_classes": int((predicted > 0).sum()),
+    }
+    return summary, rows
 
 
 def _evaluate_condition(
@@ -211,7 +302,7 @@ def _evaluate_condition(
     manifest: Path,
     condition: str,
     ca_lddt_score,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     _seed_everything(int(args.seed))
     provider, dataset = _make_dataset(args, manifest, condition)
     from pxdesign_train.runner.trainer import _identity_collate
@@ -225,9 +316,14 @@ def _evaluate_condition(
     )
     sums: dict[str, float] = {}
     counts: dict[str, int] = {}
+    aa_ce_weighted_sum = 0.0
+    aa_correct_sum = 0.0
+    aa_prediction_count = 0.0
+    aa_confusion = np.zeros((len(AA3), len(AA3)), dtype=np.int64)
     rows: list[dict[str, Any]] = []
     for i, batch in enumerate(loader):
         metrics = _forward_metrics(trainer, batch, ca_lddt_score)
+        aa_confusion += metrics.pop("_aa_confusion")
         row = {
             "condition": condition,
             "aa_mask_mode": CONDITIONS[condition],
@@ -237,13 +333,21 @@ def _evaluate_condition(
         }
         rows.append(row)
         for key, value in metrics.items():
+            if key in {"binder_aa_ce", "binder_aa_acc", "binder_aa_n_predictions"}:
+                continue
             if math.isfinite(value):
                 sums[key] = sums.get(key, 0.0) + value
                 counts[key] = counts.get(key, 0) + 1
+        n_aa = metrics["binder_aa_n_predictions"]
+        aa_ce_weighted_sum += metrics["binder_aa_ce"] * n_aa
+        aa_correct_sum += metrics["binder_aa_acc"] * n_aa
+        aa_prediction_count += n_aa
         if (i + 1) % int(args.log_interval) == 0 or i == 0:
             print(
                 f"condition={condition} completed={i + 1}/{len(dataset)} "
-                f"binder_ca_lddt={metrics['binder_ca_lddt']:.4f}",
+                f"binder_ca_lddt={metrics['binder_ca_lddt']:.4f} "
+                f"binder_aa_ce={metrics['binder_aa_ce']:.4f} "
+                f"binder_aa_acc={metrics['binder_aa_acc']:.4f}",
                 flush=True,
             )
 
@@ -261,7 +365,16 @@ def _evaluate_condition(
     aggregate.update(
         {key: sums[key] / max(1, counts[key]) for key in sorted(sums)}
     )
-    return aggregate, rows
+    aggregate.update(
+        {
+            "binder_aa_ce": aa_ce_weighted_sum / max(1.0, aa_prediction_count),
+            "binder_aa_acc": aa_correct_sum / max(1.0, aa_prediction_count),
+            "binder_aa_n_predictions": int(aa_prediction_count),
+        }
+    )
+    class_summary, class_rows = _summarize_aa_confusion(aa_confusion, condition)
+    aggregate.update(class_summary)
+    return aggregate, rows, class_rows
 
 
 def _build_configs(args: argparse.Namespace, device: torch.device):
@@ -331,6 +444,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--pinder-cif-cache", default="/hai/scratch/yfsun/pinder/2024-02/cif_cache"
     )
+    p.add_argument("--pinder-pdb-cache", default="")
     p.add_argument(
         "--pinder-archive", default="/hai/scratch/yfsun/pinder/2024-02/raw/pdbs.zip"
     )
@@ -427,16 +541,19 @@ def main() -> None:
 
     aggregates: list[dict[str, Any]] = []
     sample_rows: list[dict[str, Any]] = []
+    class_rows: list[dict[str, Any]] = []
     for condition in args.conditions:
-        aggregate, rows = _evaluate_condition(
+        aggregate, rows, per_class = _evaluate_condition(
             trainer, args, manifest, condition, ca_lddt_score
         )
         aggregates.append(aggregate)
         sample_rows.extend(rows)
+        class_rows.extend(per_class)
         print(json.dumps(aggregate, sort_keys=True), flush=True)
 
     aggregate_csv = output_dir / "binder_input_comparison.csv"
     sample_csv = output_dir / "binder_input_comparison_per_complex.csv.gz"
+    class_csv = output_dir / "binder_aa_per_class.csv"
     summary_json = output_dir / "binder_input_comparison.json"
     with aggregate_csv.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(aggregates[0]))
@@ -446,6 +563,10 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(sample_rows[0]))
         writer.writeheader()
         writer.writerows(sample_rows)
+    with class_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(class_rows[0]))
+        writer.writeheader()
+        writer.writerows(class_rows)
 
     payload: dict[str, Any] = {"conditions": aggregates}
     by_name = {row["condition"]: row for row in aggregates}
@@ -464,6 +585,7 @@ def main() -> None:
     summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"wrote_aggregate={aggregate_csv}")
     print(f"wrote_per_complex={sample_csv}")
+    print(f"wrote_per_class={class_csv}")
     print(f"wrote_summary={summary_json}")
 
 

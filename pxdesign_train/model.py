@@ -71,6 +71,13 @@ def _tile_per_sample(
     return expanded.reshape(flat_B, *trail)
 
 
+def _route_aa_logits_to_sidechain(
+    aa_logits: torch.Tensor, *, detach: bool
+) -> torch.Tensor:
+    """Optionally close the side-chain loss gradient path into the AA head."""
+    return aa_logits.detach() if detach else aa_logits
+
+
 class ProtenixDesignTrain(ProtenixDesign):
     """`ProtenixDesign` + training forward + distogram heads.
 
@@ -295,6 +302,13 @@ class ProtenixDesignTrain(ProtenixDesign):
             # the leak closed by simply not supervising post_aa in that regime.
             self.sc_predicted_mask = bool(getattr(sc_cfg, "predicted_mask", False)) if sc_cfg is not None else False
             self.sc_force_gt_type_logits = bool(getattr(sc_cfg, "force_gt_type_logits", False)) if sc_cfg is not None else False
+            # Optimization ablation: S_phi still receives the exact same AA
+            # probabilities, but B_post/sc losses cannot use that route to update
+            # the classifier.  The primary AA CE keeps its normal graph through
+            # out["aa_logits"].
+            self.sc_detach_type_logits_for_sidechain = bool(
+                getattr(sc_cfg, "detach_type_logits_for_sidechain", False)
+            ) if sc_cfg is not None else False
             # Per-sigma alignment: S_phi reads per-sigma h_res/aa_logits/sigma
             # (flattened [B*N_sample, L, C]) rather than a reduced h_res. Warmup
             # can turn this off for the single-baseline path.
@@ -1192,6 +1206,10 @@ class ProtenixDesignTrain(ProtenixDesign):
                 )
                 gt_logits.scatter_(-1, sc_type_idx.clamp(0, n_type - 1)[..., None], 20.0)
                 aa_logits = torch.where(valid_type[..., None], gt_logits, aa_logits)
+            aa_logits = _route_aa_logits_to_sidechain(
+                aa_logits,
+                detach=getattr(self, "sc_detach_type_logits_for_sidechain", False),
+            )
             B = h_res.shape[0]
             # Overleaf paragraph 221: y_T = mu_ideal[a_i, j] + sigma_T eps  (the
             # x_T = F_hat y_T half is the to_global(...) call below). sc_type_idx and

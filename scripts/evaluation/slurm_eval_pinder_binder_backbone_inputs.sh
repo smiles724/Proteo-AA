@@ -11,17 +11,21 @@
 
 set -euo pipefail
 
-source ~/.bashrc
-conda activate ml
+source /hai/users/s/h/shenjm/miniconda3/etc/profile.d/conda.sh
+conda activate proteoaa
 
-REPO_ROOT="${REPO_ROOT:-/hai/users/y/f/yfsun/Proteo-AA}"
+REPO_ROOT="${REPO_ROOT:-/hai/users/s/h/shenjm/Proteo-AA}"
 DATA_ROOT="${DATA_ROOT:-/hai/scratch/yfsun/protenix_data}"
-PINDER_ROOT="${PINDER_ROOT:-/hai/scratch/yfsun/pinder/2024-02}"
-PROTENIX_CODE_DIR="${PROTENIX_CODE_DIR:-/hai/users/y/f/yfsun/Protein Project/Protenix}"
-PXDESIGN_CODE_DIR="${PXDESIGN_CODE_DIR:-/hai/users/y/f/yfsun/Protein Project/11/PXDesign}"
+PINDER_ROOT="${PINDER_ROOT:-/hai/scratch/shenjm/pinder/2024-02}"
+PINDER_INDEX_CSV="${PINDER_INDEX_CSV:-/hai/scratch/yfsun/pinder/2024-02/indices/pinder_ppi_complex.csv.gz}"
+PINDER_CIF_CACHE="${PINDER_CIF_CACHE:-/hai/scratch/shenjm/pinder/cif_cache}"
+PINDER_PDB_CACHE="${PINDER_PDB_CACHE:-/hai/scratch/shenjm/pinder/2024-02/pdbs}"
+PINDER_ARCHIVE="${PINDER_ARCHIVE:-/hai/scratch/yfsun/pinder/2024-02/raw/pdbs.zip}"
+PROTENIX_CODE_DIR="${PROTENIX_CODE_DIR:-${REPO_ROOT}/Protenix}"
+PXDESIGN_CODE_DIR="${PXDESIGN_CODE_DIR:-${REPO_ROOT}/PXDesign}"
 CHECKPOINT="${CHECKPOINT:-/hai/scratch/yfsun/proteo_aa_runs/stage2_complex_backbone/from_monomer_step96000_protenix_pinder/checkpoints/step50000.pt}"
-RUN_ROOT="${RUN_ROOT:-/hai/scratch/yfsun/proteo_aa_runs/pinder_binder_input_comparison/${SLURM_JOB_ID:-manual}}"
-PYTHON_BIN="${PYTHON_BIN:-/hai/users/y/f/yfsun/miniconda3/envs/ml/bin/python}"
+RUN_ROOT="${RUN_ROOT:-/hai/scratch/shenjm/proteo_aa_runs/pinder_binder_input_comparison/${SLURM_JOB_ID:-manual}}"
+PYTHON_BIN="${PYTHON_BIN:-/hai/users/s/h/shenjm/miniconda3/envs/proteoaa/bin/python}"
 
 mkdir -p "${REPO_ROOT}/logs" "${RUN_ROOT}"
 cd "${REPO_ROOT}"
@@ -35,9 +39,10 @@ export PYTHONPATH="${REPO_ROOT}:${PXDESIGN_CODE_DIR}:${PROTENIX_CODE_DIR}${PYTHO
   --output-dir "${RUN_ROOT}" \
   --split "${SPLIT:-val}" \
   --pinder-root "${PINDER_ROOT}" \
-  --pinder-index-csv "${PINDER_ROOT}/indices/pinder_ppi_complex.csv.gz" \
-  --pinder-cif-cache "${PINDER_ROOT}/cif_cache" \
-  --pinder-archive "${PINDER_ROOT}/raw/pdbs.zip" \
+  --pinder-index-csv "${PINDER_INDEX_CSV}" \
+  --pinder-cif-cache "${PINDER_CIF_CACHE}" \
+  --pinder-pdb-cache "${PINDER_PDB_CACHE}" \
+  --pinder-archive "${PINDER_ARCHIVE}" \
   --data-root "${DATA_ROOT}" \
   --protenix-code-dir "${PROTENIX_CODE_DIR}" \
   --pxdesign-code-dir "${PXDESIGN_CODE_DIR}" \

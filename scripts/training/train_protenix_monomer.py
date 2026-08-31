@@ -387,6 +387,9 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         manifest_path=manifest,
         pinder_root=Path(args.pinder_root),
         cif_cache_dir=Path(args.pinder_cif_cache),
+        pdb_cache_dir=(
+            Path(args.pinder_pdb_cache) if args.pinder_pdb_cache else None
+        ),
         archive_path=Path(args.pinder_archive),
         split="train",
         limit=int(args.complex_limit_index),
@@ -603,7 +606,8 @@ def build_configs(args: argparse.Namespace, device):
     configs.training.num_workers = int(args.num_workers)
     configs.training.iters_to_accumulate = int(args.iters_to_accumulate)
     configs.training.grad_clip_norm = float(args.grad_clip_norm)
-    configs.training.resume_lr = args.resume_lr
+    configs.training.resume_lr = getattr(args, "resume_lr", None)
+    configs.training.aa_head_lr = getattr(args, "aa_head_lr", None)
     configs.training.trainable_param_keywords = []
 
     configs.residue_type.mask_mode = args.aa_mask_mode
@@ -629,6 +633,9 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.template_init = not args.disable_template_init
         configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
+        configs.sidechain.detach_type_logits_for_sidechain = bool(
+            getattr(args, "detach_aa_logits_for_sidechain", False)
+        )
         if args.sc_frame_aware_head is not None:
             configs.sidechain.frame_aware_head = bool(args.sc_frame_aware_head)
         if args.sc_centre_coord_input is not None:
@@ -1102,6 +1109,7 @@ DEFAULT_PINDER_ROOT = os.environ.get(
 DEFAULT_PINDER_CIF_CACHE = os.environ.get(
     "PINDER_CIF_CACHE", os.path.join(DEFAULT_PINDER_ROOT, "cif_cache")
 )
+DEFAULT_PINDER_PDB_CACHE = os.environ.get("PINDER_PDB_CACHE", "")
 DEFAULT_PINDER_ARCHIVE = os.environ.get(
     "PINDER_ARCHIVE", os.path.join(DEFAULT_PINDER_ROOT, "raw", "pdbs.zip")
 )
@@ -1180,6 +1188,12 @@ def parse_args() -> argparse.Namespace:
         help="Persistent cache for lazy PINDER PDB-to-mmCIF conversion.",
     )
     p.add_argument(
+        "--pinder-pdb-cache",
+        default=DEFAULT_PINDER_PDB_CACHE,
+        help="Writable cache for PDBs lazily extracted from --pinder-archive. "
+             "Defaults to <pinder-root>/pdbs for backward compatibility.",
+    )
+    p.add_argument(
         "--pinder-archive",
         default=DEFAULT_PINDER_ARCHIVE,
         help="Official structure archive used when a selected PDB has not been extracted.",
@@ -1206,6 +1220,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=1000)
     p.add_argument("--train-samples-per-epoch", type=int, default=1000)
     p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument(
+        "--aa-head-lr",
+        type=float,
+        default=None,
+        help="Optional separate learning rate for design_residue_type_head. "
+             "The remaining backbone/side-chain parameters continue to use --lr.",
+    )
     p.add_argument("--warmup-steps", type=int, default=200)
     p.add_argument("--checkpoint-interval", type=int, default=200)
     p.add_argument("--log-interval", type=int, default=10)
@@ -1290,6 +1311,13 @@ def parse_args() -> argparse.Namespace:
              "silently ignored.",
     )
     p.add_argument("--sc-trunk-grad-scale", type=float, default=1.0)
+    p.add_argument(
+        "--detach-aa-logits-for-sidechain",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Feed the same AA probabilities to S_phi but stop S_phi/B_post losses "
+             "from backpropagating into the AA head. The primary AA CE is unchanged.",
+    )
     p.add_argument(
         "--sc-edm", action=argparse.BooleanOptionalAction, default=None,
         help="EDM side-chain diffusion: sample sigma, precondition, and feed "

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Optional, Union
@@ -34,6 +35,7 @@ class PinderPdbProvider:
         manifest_path: Union[str, Path],
         pinder_root: Union[str, Path],
         cif_cache_dir: Union[str, Path],
+        pdb_cache_dir: Optional[Union[str, Path]] = None,
         archive_path: Optional[Union[str, Path]] = None,
         split: str = "train",
         limit: int = -1,
@@ -43,6 +45,11 @@ class PinderPdbProvider:
         self.manifest_path = Path(manifest_path).resolve()
         self.pinder_root = Path(pinder_root).resolve()
         self.cif_cache_dir = Path(cif_cache_dir).resolve()
+        # The release root/archive are commonly shared read-only datasets.
+        # Materialize missing archive members in a distinct writable cache.
+        self.pdb_cache_dir = Path(
+            pdb_cache_dir or self.pinder_root / "pdbs"
+        ).resolve()
         self.archive_path = Path(
             archive_path or self.pinder_root / "raw" / "pdbs.zip"
         ).resolve()
@@ -80,6 +87,11 @@ class PinderPdbProvider:
         pdb_id = pinder_id[:4].lower()
         return self.cif_cache_dir / pdb_id[1:3] / f"{pinder_id}.cif"
 
+    def _cached_pdb_path(self, idx: int) -> Path:
+        pinder_id = self._pinder_ids[idx]
+        pdb_id = pinder_id[:4].lower()
+        return self.pdb_cache_dir / pdb_id[1:3] / f"{pinder_id}.pdb"
+
     def _archive_handle(self) -> zipfile.ZipFile:
         pid = os.getpid()
         if self._archive is None or self._archive_pid != pid:
@@ -101,7 +113,13 @@ class PinderPdbProvider:
                 f"PINDER dimer {pinder_id!r} is absent from {self.archive_path}"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_suffix(f".pdb.tmp.{os.getpid()}")
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.tmp.",
+            suffix=".pdb",
+            dir=destination.parent,
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
         try:
             with archive.open(member) as source, temporary.open("wb") as sink:
                 shutil.copyfileobj(source, sink, length=1024 * 1024)
@@ -118,11 +136,7 @@ class PinderPdbProvider:
 
         pdb_path = self.pinder_root / self._pdb_paths[idx]
         if not pdb_path.is_file():
-            pinder_id = self._pinder_ids[idx]
-            pdb_id = pinder_id[:4].lower()
-            sharded_path = (
-                self.pinder_root / "pdbs" / pdb_id[1:3] / f"{pinder_id}.pdb"
-            )
+            sharded_path = self._cached_pdb_path(idx)
             if sharded_path.is_file():
                 pdb_path = sharded_path
             else:
@@ -136,7 +150,13 @@ class PinderPdbProvider:
         from protenix.data.utils import pdb_to_cif
 
         cif_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cif_path.with_suffix(f".cif.tmp.{os.getpid()}")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{cif_path.name}.tmp.",
+            suffix=".cif",
+            dir=cif_path.parent,
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
         try:
             pdb_to_cif(
                 str(pdb_path),

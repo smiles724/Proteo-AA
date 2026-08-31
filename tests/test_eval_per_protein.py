@@ -208,6 +208,84 @@ def test_eval_and_checkpoint_fire_once_per_step_not_per_batch(monkeypatch):
     assert saves == [1, 2], f"expected one checkpoint per step, got {saves}"
 
 
+def test_training_log_averages_accumulation_window_once(monkeypatch):
+    """One log row represents one optimizer update's effective batch.
+
+    With gradient accumulation, loss components are emitted per micro-batch.
+    Logging an arbitrary last micro-batch is noisy, while guarding only on
+    ``step % interval`` prints duplicate rows because ``step`` remains fixed
+    between optimizer updates.  Average the window and emit exactly once.
+    """
+    trainer = _make_trainer(monkeypatch)
+    trainer.configs.training.iters_to_accumulate = 4
+    trainer.iters_to_accumulate = 4
+    trainer.configs.training.log_interval = 1
+    trainer.configs.training.eval_interval = 0
+    trainer.configs.training.checkpoint_interval = 0
+
+    values = iter((1.0, 2.0, 3.0, 4.0))
+
+    def _fake_train_step(self, batch):
+        value = next(values)
+        self.global_step += 1
+        if self.global_step % self.iters_to_accumulate == 0:
+            self.step += 1
+        return {
+            "loss": torch.tensor(value),
+            "loss_bb": torch.tensor(2.0 * value),
+        }
+
+    lines = []
+    monkeypatch.setattr(type(trainer), "train_step", _fake_train_step)
+    monkeypatch.setattr(type(trainer), "_log", lambda self, msg: lines.append(msg))
+
+    trainer.run(max_steps=1)
+
+    training_lines = [line for line in lines if " loss=" in f" {line}"]
+    assert training_lines == ["step=1 loss=2.5 loss_bb=5"]
+
+
+def test_training_log_splits_aa_metrics_by_source(monkeypatch):
+    trainer = _make_trainer(monkeypatch)
+    trainer.configs.training.iters_to_accumulate = 4
+    trainer.iters_to_accumulate = 4
+    trainer.configs.training.log_interval = 1
+    trainer.configs.training.eval_interval = 0
+    trainer.configs.training.checkpoint_interval = 0
+    trainer.train_dl = [
+        {"source_name": "protenix_monomer"},
+        {"source_name": "pinder_ppi_complex"},
+        {"source_name": "pinder_ppi_complex"},
+        {"source_name": "protenix_ppi_complex"},
+    ]
+
+    values = iter((1.0, 2.0, 3.0, 4.0))
+
+    def _fake_train_step(self, batch):
+        value = next(values)
+        self.global_step += 1
+        if self.global_step % self.iters_to_accumulate == 0:
+            self.step += 1
+        return {
+            "loss": torch.tensor(value),
+            "aa_ce": torch.tensor(value),
+            "aa_acc": torch.tensor(value / 10.0),
+        }
+
+    lines = []
+    monkeypatch.setattr(type(trainer), "train_step", _fake_train_step)
+    monkeypatch.setattr(type(trainer), "_log", lambda self, msg: lines.append(msg))
+
+    trainer.run(max_steps=1)
+
+    assert len(lines) == 1
+    line = lines[0]
+    assert "protenix_monomer_aa_ce=1" in line
+    assert "pinder_ppi_complex_aa_ce=2.5" in line
+    assert "pinder_ppi_complex_aa_acc=0.25" in line
+    assert "protenix_ppi_complex_aa_ce=4" in line
+
+
 def test_sample_id_is_the_complex_actually_returned(monkeypatch):
     """A crop retry shifts which complex is returned; the label must follow it.
 

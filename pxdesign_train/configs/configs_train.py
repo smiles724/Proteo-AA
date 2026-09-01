@@ -54,6 +54,13 @@ training_configs["residue_type"] = {
     # When sidechain.per_sigma=True, S_phi also consumes the per-sigma h_res/logits
     # path rather than this reduced h_res_candidate.
     "internal_reduce": "mean",
+    # Optional train/inference sigma alignment for the AA objective. The EDM
+    # sampler's median sigma is ~4.82, while the final 20-step inference call is
+    # at ~0.033. Values here replace the first K of N_sample training sigmas.
+    # Empty keeps the historical sampler exactly.
+    # ConfigManager cannot infer a type from an empty list (it indexes value[0]),
+    # so keep the default as a CSV string and parse it after parse_configs().
+    "forced_sigmas": "",
 }
 
 # EDM training noise sampler.
@@ -106,6 +113,11 @@ training_configs["loss"] = {
     # MDLM / absorbing-diffusion time weighting (1/t) for the AA CE. When
     # False the AA term is a plain masked-LM mean CE.
     "aa_time_weighting": True,
+    # Optional coordinate-noise weighting for AA CE. ``inverse_quadratic`` uses
+    # floor + (1-floor)/(1+(sigma/scale)^2), normalised by total token weight.
+    "aa_sigma_weight_mode": "uniform",
+    "aa_sigma_weight_scale": 0.4,
+    "aa_sigma_weight_floor": 0.1,
     "sigma_low_threshold": 4.0,  # σ below this gates LDDT and distogram terms
     "no_bins": training_configs["no_bins"],
     "min_bin": 2.3125,

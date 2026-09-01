@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import logging
+import math
 import os
 import sys
 from copy import deepcopy
@@ -606,6 +607,9 @@ def build_configs(args: argparse.Namespace, device):
     configs.training.num_workers = int(args.num_workers)
     configs.training.iters_to_accumulate = int(args.iters_to_accumulate)
     configs.training.grad_clip_norm = float(args.grad_clip_norm)
+    configs.training.aa_head_grad_clip_norm = getattr(
+        args, "aa_head_grad_clip_norm", None
+    )
     configs.training.resume_lr = getattr(args, "resume_lr", None)
     configs.training.aa_head_lr = getattr(args, "aa_head_lr", None)
     configs.training.trainable_param_keywords = []
@@ -616,6 +620,35 @@ def build_configs(args: argparse.Namespace, device):
     configs.residue_type.mask_max_prob = float(args.aa_mask_max_prob)
     configs.residue_type.input_source = args.aa_input_source
     configs.residue_type.trunk_grad_scale = float(args.trunk_grad_scale)
+    forced_sigmas_text = str(getattr(args, "aa_forced_sigmas", "") or "")
+    forced_sigmas = [
+        float(value) for value in forced_sigmas_text.split(",") if value.strip()
+    ]
+    if any((not math.isfinite(value)) or value <= 0.0 for value in forced_sigmas):
+        raise ValueError(
+            "--aa-forced-sigmas must contain finite positive values, got "
+            f"{forced_sigmas_text!r}"
+        )
+    if len(forced_sigmas) > int(configs.training.diffusion_batch_size):
+        raise ValueError(
+            "--aa-forced-sigmas contains more values than diffusion_batch_size: "
+            f"{len(forced_sigmas)} > {int(configs.training.diffusion_batch_size)}"
+        )
+    # Keep this field a string: Protenix's ConfigManager cannot infer the type
+    # of an empty-list default, while ml_collections refuses changing the parsed
+    # field from str to list. ProtenixDesignTrain parses the CSV at construction.
+    configs.residue_type.forced_sigmas = ",".join(
+        f"{value:g}" for value in forced_sigmas
+    )
+    configs.loss.aa_sigma_weight_mode = str(
+        getattr(args, "aa_sigma_weight_mode", "uniform")
+    )
+    configs.loss.aa_sigma_weight_scale = float(
+        getattr(args, "aa_sigma_weight_scale", 0.4)
+    )
+    configs.loss.aa_sigma_weight_floor = float(
+        getattr(args, "aa_sigma_weight_floor", 0.1)
+    )
 
     configs.loss.align_before_mse = bool(device.type == "cuda")
     if args.disable_aa_loss:
@@ -1250,6 +1283,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ema-decay", type=float, default=0.999)
     p.add_argument("--iters-to-accumulate", type=int, default=1)
     p.add_argument("--grad-clip-norm", type=float, default=0.0)
+    p.add_argument(
+        "--aa-head-grad-clip-norm",
+        type=float,
+        default=None,
+        help="Optional independent AA-head gradient clip. When set, the global "
+             "clip excludes design_residue_type_head so unrelated structure "
+             "gradients no longer rescale its gradient.",
+    )
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--dtype", default="bf16", choices=["fp32", "bf16", "fp16"])
     p.add_argument("--device", default="cuda")
@@ -1274,6 +1315,20 @@ def parse_args() -> argparse.Namespace:
         choices=["s_inputs", "diffusion_internal"],
     )
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
+    p.add_argument(
+        "--aa-forced-sigmas",
+        default="",
+        help="Comma-separated sigma values that replace the first training "
+             "diffusion samples, e.g. 0.04,0.4. Empty preserves EDM sampling.",
+    )
+    p.add_argument(
+        "--aa-sigma-weight-mode",
+        choices=["uniform", "inverse_quadratic"],
+        default="uniform",
+        help="Coordinate-sigma weighting used by the AA CE objective.",
+    )
+    p.add_argument("--aa-sigma-weight-scale", type=float, default=0.4)
+    p.add_argument("--aa-sigma-weight-floor", type=float, default=0.1)
     p.add_argument(
         "--disable-aa-loss",
         action="store_true",

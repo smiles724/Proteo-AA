@@ -37,6 +37,16 @@ AA3 = (
 )
 
 
+class _FixedNoiseSampler:
+    """Training-forward-compatible sampler returning one requested sigma."""
+
+    def __init__(self, sigma: float) -> None:
+        self.sigma = float(sigma)
+
+    def __call__(self, size: torch.Size, device: torch.device = torch.device("cpu")):
+        return torch.full(size, self.sigma, device=device, dtype=torch.float32)
+
+
 def _seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -201,7 +211,10 @@ def _forward_metrics(trainer, batch: dict[str, Any], ca_lddt_score) -> dict[str,
         # receptor is explicitly excluded by the assertions above.
         aa_logits = out.get("aa_logits")
         aa_clean = feat["aa_clean"].long()
-        aa_valid = feat["aa_loss_mask"].bool() & design_token_cpu.to(feat["aa_loss_mask"].device)
+        # Score every valid binder label in both conditions. ``aa_loss_mask`` is
+        # intentionally empty for native_aa, so using it here made that ablation
+        # fail before producing any metrics.
+        aa_valid = design_token_cpu.to(feat["aa_loss_mask"].device)
         aa_valid = aa_valid & aa_clean.ne(-100)
         if aa_logits is None:
             raise AssertionError("checkpoint/model produced no aa_logits")
@@ -254,7 +267,7 @@ def _forward_metrics(trainer, batch: dict[str, Any], ca_lddt_score) -> dict[str,
 
 
 def _summarize_aa_confusion(
-    confusion: np.ndarray, condition: str
+    confusion: np.ndarray, condition: str, sigma: float | None
 ) -> tuple[dict[str, float | int], list[dict[str, Any]]]:
     """Return collapse-sensitive aggregate and per-class sequence metrics."""
     confusion = np.asarray(confusion, dtype=np.int64)
@@ -276,6 +289,7 @@ def _summarize_aa_confusion(
         rows.append(
             {
                 "condition": condition,
+                "sigma": sigma if sigma is not None else "random",
                 "class_idx": idx,
                 "class_name": name,
                 "support": int(support[idx]),
@@ -301,9 +315,13 @@ def _evaluate_condition(
     args: argparse.Namespace,
     manifest: Path,
     condition: str,
+    sigma: float | None,
     ca_lddt_score,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     _seed_everything(int(args.seed))
+    trainer.raw_model.training_noise_sampler = (
+        _FixedNoiseSampler(sigma) if sigma is not None else trainer._eval_noise_sampler
+    )
     provider, dataset = _make_dataset(args, manifest, condition)
     from pxdesign_train.runner.trainer import _identity_collate
 
@@ -326,6 +344,7 @@ def _evaluate_condition(
         aa_confusion += metrics.pop("_aa_confusion")
         row = {
             "condition": condition,
+            "sigma": sigma if sigma is not None else "random",
             "aa_mask_mode": CONDITIONS[condition],
             "sample_index": i,
             "pinder_id": provider._pinder_ids[i],
@@ -345,6 +364,7 @@ def _evaluate_condition(
         if (i + 1) % int(args.log_interval) == 0 or i == 0:
             print(
                 f"condition={condition} completed={i + 1}/{len(dataset)} "
+                f"sigma={sigma if sigma is not None else 'random'} "
                 f"binder_ca_lddt={metrics['binder_ca_lddt']:.4f} "
                 f"binder_aa_ce={metrics['binder_aa_ce']:.4f} "
                 f"binder_aa_acc={metrics['binder_aa_acc']:.4f}",
@@ -353,6 +373,7 @@ def _evaluate_condition(
 
     aggregate: dict[str, Any] = {
         "condition": condition,
+        "sigma": sigma if sigma is not None else "random",
         "aa_mask_mode": CONDITIONS[condition],
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "split": args.split,
@@ -372,7 +393,9 @@ def _evaluate_condition(
             "binder_aa_n_predictions": int(aa_prediction_count),
         }
     )
-    class_summary, class_rows = _summarize_aa_confusion(aa_confusion, condition)
+    class_summary, class_rows = _summarize_aa_confusion(
+        aa_confusion, condition, sigma
+    )
     aggregate.update(class_summary)
     return aggregate, rows, class_rows
 
@@ -457,6 +480,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--log-interval", type=int, default=25)
     p.add_argument("--seed", type=int, default=20260724)
+    p.add_argument(
+        "--sigmas",
+        default="random",
+        help="Comma-separated fixed coordinate-noise levels (for example "
+             "0.04,0.4,4.0), or 'random' for the training distribution.",
+    )
     p.add_argument("--dtype", choices=["fp32", "bf16", "fp16"], default="bf16")
     p.add_argument("--device", default="cuda")
     p.add_argument("--rebuild-manifest", action="store_true")
@@ -469,6 +498,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.sigmas.strip().lower() == "random":
+        eval_sigmas: list[float | None] = [None]
+    else:
+        eval_sigmas = [
+            float(value) for value in args.sigmas.split(",") if value.strip()
+        ]
+        if not eval_sigmas or any(
+            (sigma is None) or (not math.isfinite(sigma)) or sigma <= 0.0
+            for sigma in eval_sigmas
+        ):
+            raise ValueError("--sigmas must be 'random' or finite positive values")
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
@@ -538,18 +578,20 @@ def main() -> None:
     )
     trainer.load_checkpoint(str(checkpoint), params_only=True)
     trainer.model.eval()
+    trainer._eval_noise_sampler = trainer.raw_model.training_noise_sampler
 
     aggregates: list[dict[str, Any]] = []
     sample_rows: list[dict[str, Any]] = []
     class_rows: list[dict[str, Any]] = []
     for condition in args.conditions:
-        aggregate, rows, per_class = _evaluate_condition(
-            trainer, args, manifest, condition, ca_lddt_score
-        )
-        aggregates.append(aggregate)
-        sample_rows.extend(rows)
-        class_rows.extend(per_class)
-        print(json.dumps(aggregate, sort_keys=True), flush=True)
+        for sigma in eval_sigmas:
+            aggregate, rows, per_class = _evaluate_condition(
+                trainer, args, manifest, condition, sigma, ca_lddt_score
+            )
+            aggregates.append(aggregate)
+            sample_rows.extend(rows)
+            class_rows.extend(per_class)
+            print(json.dumps(aggregate, sort_keys=True), flush=True)
 
     aggregate_csv = output_dir / "binder_input_comparison.csv"
     sample_csv = output_dir / "binder_input_comparison_per_complex.csv.gz"
@@ -569,11 +611,15 @@ def main() -> None:
         writer.writerows(class_rows)
 
     payload: dict[str, Any] = {"conditions": aggregates}
-    by_name = {row["condition"]: row for row in aggregates}
-    if {"inference_style", "native_aa"}.issubset(by_name):
-        inf = by_name["inference_style"]
-        native = by_name["native_aa"]
-        payload["paired_difference_inference_minus_native"] = {
+    by_key = {(row["condition"], str(row["sigma"])): row for row in aggregates}
+    paired = {}
+    for sigma in eval_sigmas:
+        sigma_key = str(sigma if sigma is not None else "random")
+        inf = by_key.get(("inference_style", sigma_key))
+        native = by_key.get(("native_aa", sigma_key))
+        if inf is None or native is None:
+            continue
+        paired[sigma_key] = {
             key: inf[key] - native[key]
             for key in (
                 "binder_ca_lddt",
@@ -582,6 +628,8 @@ def main() -> None:
                 "binder_tm_score",
             )
         }
+    if paired:
+        payload["paired_difference_inference_minus_native"] = paired
     summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"wrote_aggregate={aggregate_csv}")
     print(f"wrote_per_complex={sample_csv}")

@@ -62,6 +62,9 @@ class PXDesignLoss(nn.Module):
         aa_ignore_index: int = -100,
         aa_time_weighting: bool = False,
         aa_time_eps: float = 1e-2,
+        aa_sigma_weight_mode: str = "uniform",
+        aa_sigma_weight_scale: float = 0.4,
+        aa_sigma_weight_floor: float = 0.1,
         weight_sc_local: float = 1.0,
         weight_sc_phys: float = 0.1,
         weight_sc_pack: float = 0.0,
@@ -80,6 +83,18 @@ class PXDesignLoss(nn.Module):
         self.aa_ignore_index = aa_ignore_index
         self.aa_time_weighting = aa_time_weighting
         self.aa_time_eps = aa_time_eps
+        if aa_sigma_weight_mode not in {"uniform", "inverse_quadratic"}:
+            raise ValueError(
+                "aa_sigma_weight_mode must be 'uniform' or 'inverse_quadratic', "
+                f"got {aa_sigma_weight_mode!r}"
+            )
+        if aa_sigma_weight_scale <= 0.0:
+            raise ValueError("aa_sigma_weight_scale must be > 0")
+        if not 0.0 <= aa_sigma_weight_floor <= 1.0:
+            raise ValueError("aa_sigma_weight_floor must be in [0, 1]")
+        self.aa_sigma_weight_mode = aa_sigma_weight_mode
+        self.aa_sigma_weight_scale = float(aa_sigma_weight_scale)
+        self.aa_sigma_weight_floor = float(aa_sigma_weight_floor)
         self.sigma_low_threshold = sigma_low_threshold
         self.no_bins = no_bins
         self.min_bin = min_bin
@@ -246,6 +261,7 @@ class PXDesignLoss(nn.Module):
         aa_clean: torch.Tensor,
         aa_loss_mask: torch.Tensor,
         aa_t: Optional[torch.Tensor] = None,
+        sigma: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Masked cross-entropy + accuracy over design tokens.
 
@@ -258,6 +274,11 @@ class PXDesignLoss(nn.Module):
         This turns the plain masked-LM into the discrete-diffusion ELBO surrogate:
         low-``t`` steps (few masked, high per-token information) get up-weighted.
         We normalise by the summed weights so the scalar stays CE-comparable.
+
+        With ``aa_sigma_weight_mode='inverse_quadratic'``, per-sample logits are
+        additionally weighted toward low coordinate-noise sigma. This is separate
+        from ``aa_t``: all-mask training has aa_t=1 while coordinate sigma still
+        spans the EDM distribution.
         """
         if aa_clean.dim() == aa_logits.dim():
             aa_clean = aa_clean.squeeze(-1)
@@ -270,7 +291,8 @@ class PXDesignLoss(nn.Module):
         # expand the labels/mask over the sample axis; the CE then averages over
         # samples (== a Monte-Carlo estimate over the EDM sigma distribution) as
         # well as tokens. When there is no sample axis this is a no-op.
-        if aa_logits.dim() == aa_clean.dim() + 2:
+        has_sample_axis = aa_logits.dim() == aa_clean.dim() + 2
+        if has_sample_axis:
             n_sample = aa_logits.shape[-3]
             pre, n_tok = aa_clean.shape[:-1], aa_clean.shape[-1]
             aa_clean = aa_clean.reshape(*pre, 1, n_tok).expand(*pre, n_sample, n_tok)
@@ -288,20 +310,87 @@ class PXDesignLoss(nn.Module):
         ce_tok = -logp.gather(-1, tgt[..., None]).squeeze(-1)  # [..., N_token]
         vmask = valid.float()
 
+        weight = torch.ones_like(ce_tok)
         if self.aa_time_weighting and aa_t is not None:
             t = torch.as_tensor(aa_t, device=aa_logits.device).float()
-            w = 1.0 / t.clamp_min(self.aa_time_eps)  # per-example weight [...]
-            while w.dim() < ce_tok.dim():  # broadcast to token axis
-                w = w[..., None]
-            w = w.expand_as(ce_tok)
-            denom = (vmask * w).sum().clamp_min(self.eps)
-            ce = (ce_tok * vmask * w).sum() / denom
-        else:
-            ce = (ce_tok * vmask).sum() / vmask.sum().clamp_min(self.eps)
+            time_weight = 1.0 / t.clamp_min(self.aa_time_eps)
+            while time_weight.dim() < ce_tok.dim():
+                time_weight = time_weight[..., None]
+            weight = weight * time_weight
+        if (
+            self.aa_sigma_weight_mode == "inverse_quadratic"
+            and sigma is not None
+            and has_sample_axis
+        ):
+            sigma_value = torch.as_tensor(sigma, device=aa_logits.device).float()
+            expected = aa_logits.shape[:-2]
+            if sigma_value.shape != expected:
+                try:
+                    sigma_value = sigma_value.expand(expected)
+                except RuntimeError as exc:
+                    raise ValueError(
+                        f"sigma shape {tuple(sigma_value.shape)} does not match "
+                        f"per-sample AA logits lead {tuple(expected)}"
+                    ) from exc
+            sigma_weight = self.aa_sigma_weight_floor + (
+                1.0 - self.aa_sigma_weight_floor
+            ) / (1.0 + (sigma_value / self.aa_sigma_weight_scale).square())
+            weight = weight * sigma_weight[..., None]
+        denom = (vmask * weight).sum().clamp_min(self.eps)
+        ce = (ce_tok * vmask * weight).sum() / denom
 
         correct = (aa_logits.argmax(dim=-1) == aa_clean) & valid
         acc = correct.float().sum() / vmask.sum().clamp_min(self.eps)
         return ce, acc.detach(), mask_frac.detach()
+
+    def _aa_sigma_diagnostics(
+        self,
+        aa_logits: torch.Tensor,
+        aa_clean: torch.Tensor,
+        aa_loss_mask: torch.Tensor,
+        sigma: Optional[torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Unweighted AA CE/accuracy in fixed coordinate-sigma buckets."""
+        if sigma is None or aa_logits.dim() != aa_clean.dim() + 2:
+            return {}
+        if aa_clean.dim() == aa_logits.dim():
+            aa_clean = aa_clean.squeeze(-1)
+        aa_clean = aa_clean.long().to(aa_logits.device)
+        aa_loss_mask = aa_loss_mask.bool().to(aa_logits.device)
+        n_sample = aa_logits.shape[-3]
+        pre, n_tok = aa_clean.shape[:-1], aa_clean.shape[-1]
+        aa_clean = aa_clean.reshape(*pre, 1, n_tok).expand(*pre, n_sample, n_tok)
+        aa_loss_mask = aa_loss_mask.reshape(*pre, 1, n_tok).expand(
+            *pre, n_sample, n_tok
+        )
+        sigma_value = torch.as_tensor(sigma, device=aa_logits.device).float()
+        expected = aa_logits.shape[:-2]
+        if sigma_value.shape != expected:
+            try:
+                sigma_value = sigma_value.expand(expected)
+            except RuntimeError:
+                return {}
+        valid = aa_loss_mask & aa_clean.ne(self.aa_ignore_index)
+        logp = torch.log_softmax(aa_logits.float(), dim=-1)
+        target = aa_clean.clamp_min(0)
+        ce_token = -logp.gather(-1, target[..., None]).squeeze(-1)
+        correct = aa_logits.argmax(dim=-1).eq(aa_clean)
+        buckets = (
+            ("lt_0p1", sigma_value < 0.1),
+            ("0p1_1", (sigma_value >= 0.1) & (sigma_value < 1.0)),
+            ("1_4", (sigma_value >= 1.0) & (sigma_value < 4.0)),
+            ("ge_4", sigma_value >= 4.0),
+        )
+        metrics: dict[str, torch.Tensor] = {}
+        for name, sample_mask in buckets:
+            selected = valid & sample_mask[..., None]
+            count = selected.sum()
+            if int(count.detach().item()) == 0:
+                continue
+            metrics[f"aa_ce_sigma_{name}"] = ce_token[selected].mean().detach()
+            metrics[f"aa_acc_sigma_{name}"] = correct[selected].float().mean().detach()
+            metrics[f"aa_n_sigma_{name}"] = count.detach().float()
+        return metrics
 
     def forward(
         self,
@@ -405,12 +494,17 @@ class PXDesignLoss(nn.Module):
                 aa_clean=aa_clean,
                 aa_loss_mask=aa_loss_mask,
                 aa_t=aa_t,
+                sigma=sigma,
+            )
+            aa_sigma_metrics = self._aa_sigma_diagnostics(
+                aa_logits, aa_clean, aa_loss_mask, sigma
             )
             total = total + self.weight_aa * aa_ce
         else:
             aa_ce = total.sum() * 0.0
             aa_acc = torch.zeros_like(aa_ce).detach()
             aa_mask_frac = torch.zeros_like(aa_ce).detach()
+            aa_sigma_metrics = {}
 
         # --- Side-chain terms (Stage II-A onwards) ---
         # Main coordinate loss. Current S_phi emits GLOBAL coordinates, so the
@@ -560,7 +654,7 @@ class PXDesignLoss(nn.Module):
             loss_bb = total
             loss_sc_ret = total.detach().mean() * 0.0
 
-        return {
+        metrics = {
             "loss": total.mean(),
             "loss_bb": loss_bb.mean(),
             "loss_sc": loss_sc_ret,
@@ -581,3 +675,5 @@ class PXDesignLoss(nn.Module):
             "bb_post": bb_post.detach(),
             "aa_post": aa_post_ce.detach(),
         }
+        metrics.update(aa_sigma_metrics)
+        return metrics

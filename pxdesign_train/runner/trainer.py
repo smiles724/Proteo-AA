@@ -279,6 +279,15 @@ class PXDesignTrainer:
                 -100,
             ),
             aa_time_weighting=bool(getattr(loss_cfg, "aa_time_weighting", False)),
+            aa_sigma_weight_mode=str(
+                getattr(loss_cfg, "aa_sigma_weight_mode", "uniform")
+            ),
+            aa_sigma_weight_scale=float(
+                getattr(loss_cfg, "aa_sigma_weight_scale", 0.4)
+            ),
+            aa_sigma_weight_floor=float(
+                getattr(loss_cfg, "aa_sigma_weight_floor", 0.1)
+            ),
             sigma_low_threshold=loss_cfg.sigma_low_threshold,
             no_bins=loss_cfg.no_bins,
             min_bin=loss_cfg.min_bin,
@@ -293,6 +302,13 @@ class PXDesignTrainer:
             weight_sc_pack=float(getattr(loss_cfg, "weight_sc_pack", 0.0)),
             weight_sc_global=float(getattr(loss_cfg, "weight_sc_global", 0.5)),
         )
+        if str(getattr(loss_cfg, "aa_sigma_weight_mode", "uniform")) != "uniform":
+            self._log(
+                "AA sigma loss weighting: "
+                f"mode={loss_cfg.aa_sigma_weight_mode} "
+                f"scale={float(loss_cfg.aa_sigma_weight_scale):g} "
+                f"floor={float(loss_cfg.aa_sigma_weight_floor):g}"
+            )
         # Post-refinement weights are passed per-call in forward_loss.
         self._weight_bb_post = float(getattr(loss_cfg, "weight_bb_post", 1.0))
         self._weight_aa_post = float(getattr(loss_cfg, "weight_aa_post", 1.0))
@@ -321,6 +337,7 @@ class PXDesignTrainer:
             for name, p in self.raw_model.named_parameters()
             if p.requires_grad and name.startswith(self.AA_HEAD_PREFIXES)
         ]
+        self._aa_head_param_ids = {id(p) for p in self.aa_head_params}
 
         def _make_adam(params, *, split_aa_head: bool = False):
             params = list(params)
@@ -423,6 +440,18 @@ class PXDesignTrainer:
                     f"AA-head optimizer group: lr={aa_head_lr:g} "
                     f"(base lr={float(cfg.lr):g})"
                 )
+        aa_head_grad_clip = getattr(cfg, "aa_head_grad_clip_norm", None)
+        if aa_head_grad_clip is not None:
+            aa_head_grad_clip = float(aa_head_grad_clip)
+            if aa_head_grad_clip <= 0.0:
+                raise ValueError(
+                    "training.aa_head_grad_clip_norm must be > 0 when set, got "
+                    f"{aa_head_grad_clip}"
+                )
+            self._log(
+                f"AA-head independent gradient clip: {aa_head_grad_clip:g} "
+                f"(non-head global clip={float(getattr(cfg, 'grad_clip_norm', 0.0)):g})"
+            )
 
     def _split_sc_bb_params(self):
         """Partition trainable params into the Side-Chain group and the Backbone
@@ -590,7 +619,23 @@ class PXDesignTrainer:
                 p.grad for p in self.aa_head_params if p.grad is not None
             )
             grad_clip = float(getattr(self.configs.training, "grad_clip_norm", 0.0))
-            if grad_clip > 0:
+            aa_head_grad_clip = getattr(
+                self.configs.training, "aa_head_grad_clip_norm", None
+            )
+            if aa_head_grad_clip is not None:
+                non_head_params = [
+                    p for p in self.model.parameters()
+                    if p.grad is not None and id(p) not in self._aa_head_param_ids
+                ]
+                global_grad_norm = (
+                    torch.nn.utils.clip_grad_norm_(non_head_params, grad_clip).detach()
+                    if grad_clip > 0 and non_head_params else None
+                )
+                if self.aa_head_params:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.aa_head_params, float(aa_head_grad_clip)
+                    )
+            elif grad_clip > 0:
                 global_grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), grad_clip
                 ).detach()

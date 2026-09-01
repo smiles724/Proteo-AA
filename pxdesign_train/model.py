@@ -78,6 +78,37 @@ def _route_aa_logits_to_sidechain(
     return aa_logits.detach() if detach else aa_logits
 
 
+class ForcedSigmaNoiseSampler:
+    """Wrap an EDM sampler and guarantee selected low-noise draws.
+
+    ``sample_diffusion_training`` uses the last dimension as N_sample. The first
+    K draws are replaced with fixed values; the remaining draws keep the
+    original EDM distribution. With K=2 and N_sample=8, 75% of coordinate-noise
+    draws therefore remain unchanged.
+    """
+
+    def __init__(self, base_sampler, forced_sigmas) -> None:
+        values = tuple(float(value) for value in forced_sigmas)
+        if any((not math.isfinite(value)) or value <= 0.0 for value in values):
+            raise ValueError(f"forced_sigmas must be finite and > 0, got {values}")
+        self.base_sampler = base_sampler
+        self.forced_sigmas = values
+
+    def __getattr__(self, name):
+        return getattr(self.base_sampler, name)
+
+    def __call__(
+        self, size: torch.Size, device: torch.device = torch.device("cpu")
+    ) -> torch.Tensor:
+        sigma = self.base_sampler(size=size, device=device)
+        if not self.forced_sigmas or len(size) == 0 or int(size[-1]) == 0:
+            return sigma
+        count = min(len(self.forced_sigmas), int(size[-1]))
+        sigma = sigma.clone()
+        sigma[..., :count] = sigma.new_tensor(self.forced_sigmas[:count])
+        return sigma
+
+
 class ProtenixDesignTrain(ProtenixDesign):
     """`ProtenixDesign` + training forward + distogram heads.
 
@@ -103,6 +134,23 @@ class ProtenixDesignTrain(ProtenixDesign):
         if not isinstance(ns_cfg, dict):
             ns_cfg = {k: getattr(ns_cfg, k) for k in ("p_mean", "p_std", "sigma_data")}
         self.training_noise_sampler = TrainingNoiseSampler(**ns_cfg)
+        residue_cfg = getattr(configs, "residue_type", None)
+        forced_sigmas = (
+            getattr(residue_cfg, "forced_sigmas", [])
+            if residue_cfg is not None else []
+        )
+        if isinstance(forced_sigmas, str):
+            forced_sigmas = [
+                float(value) for value in forced_sigmas.split(",") if value.strip()
+            ]
+        if forced_sigmas:
+            self.training_noise_sampler = ForcedSigmaNoiseSampler(
+                self.training_noise_sampler, forced_sigmas
+            )
+            logging.getLogger(__name__).info(
+                "AA sigma stratification active: forced_sigmas=%s",
+                ",".join(f"{float(value):g}" for value in forced_sigmas),
+            )
 
         self.enable_distogram_head = getattr(configs, "enable_distogram_head", True)
         self.enable_diffusion_distogram_head = getattr(

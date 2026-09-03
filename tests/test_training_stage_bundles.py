@@ -300,3 +300,98 @@ def test_aa_head_on_stage2_is_a_selectable_stage(source):
     block = source[source.index("--training-stage"):]
     block = block[:block.index(")")]
     assert '"aa_head_on_stage2"' in block
+
+
+# ---------------------------------------------------------------------------
+# AA-head masking contract
+# ---------------------------------------------------------------------------
+
+def _stage_args_fn(source: str) -> str:
+    """Just `apply_training_stage_args`'s body.
+
+    Several stage names appear twice in this file -- once in `build_configs` and
+    once here -- so a whole-file `index` silently reads the wrong branch.
+    """
+    start = source.index("def apply_training_stage_args")
+    return source[start:source.index("\ndef ", start + 1)]
+
+
+FEATURIZER = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "pxdesign_train" / "data" / "featurizer.py"
+)
+
+
+def test_every_stage_that_trains_the_aa_head_uses_partial_masks(source):
+    """The masking schedule is a property of the objective, not of one bundle.
+
+    Every stage that trains `design_residue_type_head` used
+    `aa_mask_mode="all"` -- every design position masked at once -- which pins
+    `aa_t` at 1.0 and collapses the masked-diffusion objective: the MDLM `1/t`
+    weight becomes 1/1, and the head's time embedding contributes a constant. The
+    head then never sees a partially revealed sequence and cannot learn to read
+    already-decided neighbours -- the signal ProteinMPNN's recovery rests on.
+
+    Asserting the shared constant rather than the literal is the point: four
+    separate string literals are four places for this to drift back.
+    """
+    fn = _stage_args_fn(source)
+    for stage in ("aa_head_warmup", "joint", "aa_head_on_stage2",
+                  'in ("coevolution", "predicted_mask")'):
+        i = fn.index(f'args.training_stage == "{stage}"'
+                     if not stage.startswith("in ") else f"args.training_stage {stage}")
+        j = fn.find("elif args.training_stage", i + 10)
+        block = fn[i:j if j != -1 else len(fn)]
+        assert "args.disable_aa_loss = False" in block, f"{stage} should train the head"
+        assert "args.aa_mask_mode = AA_MASK_MODE_TRAINING" in block, stage
+    assert 'AA_MASK_MODE_TRAINING = "time_dependent"' in source
+
+
+def test_stages_that_do_not_train_the_head_set_no_schedule(source):
+    """`backbone_only` and `sidechain_warmup` disable the AA loss entirely.
+
+    The masking schedule is not theirs to choose, and giving them a real one
+    would spend featurizer work on a target nothing reads.
+    """
+    fn = _stage_args_fn(source)
+    for stage in ("backbone_only", "sidechain_warmup"):
+        i = fn.index(f'args.training_stage == "{stage}"')
+        block = fn[i:fn.index("elif args.training_stage", i + 10)]
+        assert "args.disable_aa_loss = True" in block, stage
+        assert 'args.aa_mask_mode = "none"' in block, stage
+
+
+def test_validation_masking_is_pinned_regardless_of_training(source):
+    """`val_aa_acc` has to keep meaning the same thing across runs.
+
+    `eval_args` is a whole-namespace copy of the training args, so a stage that
+    switches to partial masking switches validation with it. Partial masking is a
+    strictly easier task -- neighbouring identities are visible -- so val_aa_acc
+    would rise for a reason unrelated to the model, and stop being comparable to
+    the 0.1310 every stage has reported.
+    """
+    start = source.index("eval_args = argparse.Namespace(**vars(args))")
+    block = source[start:source.index("build_components(eval_args", start)]
+    assert 'eval_args.aa_mask_mode = "all"' in block
+    assert "eval_args.aa_mask_prob = 1.0" in block
+    assert "eval_args.aa_mask_min_prob = 0.0" in block
+    assert "eval_args.aa_mask_max_prob = 1.0" in block
+
+
+def test_cli_mask_modes_match_the_featurizer(source):
+    """A mode argparse accepts but the featurizer rejects fails after scheduling.
+
+    `--aa-mask-mode partial` passed the CLI and then raised inside
+    `DesignSelection.__post_init__`, i.e. once the job was already queued and had
+    loaded its dataset index. The two lists have to agree.
+    """
+    start = source.index('"--aa-mask-mode"')
+    ch = source.index("choices=", start)
+    cli = source[ch:source.index("]", ch) + 1]
+    feat = FEATURIZER.read_text()
+    valid = feat[feat.index("valid_modes = {"):]
+    valid = valid[:valid.index("}") + 1]
+    for mode in ("all", "none", "fixed", "time_dependent"):
+        assert f'"{mode}"' in valid, f"featurizer no longer accepts {mode}"
+        assert f'"{mode}"' in cli, f"--aa-mask-mode cannot select {mode}"
+    assert '"partial"' not in cli, "'partial' is not a featurizer mode"

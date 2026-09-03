@@ -564,6 +564,17 @@ def build_eval_dataloader(args: argparse.Namespace, output_dir: Path):
     eval_args.train_samples_per_epoch = max(1, int(args.eval_samples))
     eval_args.ref_pos_augment = False
     eval_args.data_mode = "monomer"
+    # Pin validation to FULL masking regardless of what training uses. eval_args
+    # is a whole-namespace copy, so a training stage that switches to partial
+    # masking would otherwise switch validation too -- and partial masking is an
+    # easier task (neighbouring identities are visible), so val_aa_acc would rise
+    # for a reason that has nothing to do with the model. Holding this fixed keeps
+    # the metric comparable to every historical run, including the 0.1310 that
+    # every stage has reported so far.
+    eval_args.aa_mask_mode = "all"
+    eval_args.aa_mask_prob = 1.0
+    eval_args.aa_mask_min_prob = 0.0
+    eval_args.aa_mask_max_prob = 1.0
     eval_components, n_items = build_components(eval_args, filtered_index)
     eval_dataset = eval_components.train_dataset
     if int(args.eval_samples) > 0:
@@ -1032,6 +1043,35 @@ def adopt_feedback_channels_from_checkpoint(configs, ckpt_path) -> dict:
     return adopted
 
 
+# Masking schedule for every stage that trains `design_residue_type_head`.
+#
+# WHY NOT "all". Until now every such stage used aa_mask_mode="all" -- every
+# design position masked at once -- which pins aa_t at 1.0 and quietly collapses
+# the masked-diffusion objective into its simplest special case: the MDLM
+# importance weight 1/t becomes 1/1, and the head's sinusoidal time embedding
+# adds the same constant vector on every example, i.e. a bias term. The
+# "time_dependent" schedule has been registered in `DesignSelection` since the
+# pipeline was written and had never been selected by any stage.
+#
+# The cost is not the dead machinery, it is what the head never sees. Under full
+# masking it is only ever asked to predict every identity from backbone geometry
+# alone, so it cannot learn to condition on already-decided neighbours -- which
+# is where most of ProteinMPNN's ~33% recovery on predicted backbones comes
+# from, against our ~13%. Inference has the same gap from the other side:
+# `sequential` mode reveals progressively and feeds commitments back through
+# `restype`, but a head trained only on fully-masked inputs has never seen a
+# partial sequence.
+#
+# "time_dependent" draws t ~ U(0, 1) per example and masks each design position
+# independently with probability t (aa_mask_min/max_prob default to 0.0/1.0, so
+# prob == t). That is the standard MDLM/LLaDA schedule, and it answers the
+# original objection to it: there is no hand-designed masking ratio to choose.
+#
+# Stages that do NOT train the head (backbone_only, sidechain_warmup) keep
+# "none" -- they disable the AA loss, so the schedule is not theirs to set.
+AA_MASK_MODE_TRAINING = "time_dependent"
+
+
 def apply_training_stage_args(args: argparse.Namespace) -> None:
     if args.training_stage == "backbone_only":
         args.disable_sidechain = True
@@ -1041,7 +1081,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
     elif args.training_stage == "aa_head_warmup":
         args.disable_sidechain = True
         args.disable_aa_loss = False
-        args.aa_mask_mode = "all"
+        args.aa_mask_mode = AA_MASK_MODE_TRAINING
         args.enable_coevolution = False
         args.trunk_grad_scale = 0.0
     elif args.training_stage == "sidechain_warmup":
@@ -1054,12 +1094,15 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
     elif args.training_stage == "joint":
         args.disable_sidechain = True
         args.disable_aa_loss = False
-        args.aa_mask_mode = "all"
+        args.aa_mask_mode = AA_MASK_MODE_TRAINING
         args.enable_coevolution = False
     elif args.training_stage == "aa_head_on_stage2":
         args.disable_sidechain = False
         args.disable_aa_loss = False
-        args.aa_mask_mode = "all"
+        # Scoped comment lives on AA_MASK_MODE_TRAINING above. This stage is the
+        # cheapest place to measure the change: it trains only the head against a
+        # frozen backbone and S_phi (1.30M of 262.05M) and reports at step ~9000.
+        args.aa_mask_mode = AA_MASK_MODE_TRAINING
         args.enable_coevolution = True
         # This head is fitted to the Stage III feature path, whose S_phi geometry
         # is teacher-forced from GT backbone frames.
@@ -1069,7 +1112,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
     elif args.training_stage in ("coevolution", "predicted_mask"):
         args.disable_sidechain = False
         args.disable_aa_loss = False
-        args.aa_mask_mode = "all"
+        args.aa_mask_mode = AA_MASK_MODE_TRAINING
         args.enable_coevolution = True
         # Stage III teacher-forces only S_phi's backbone geometry. Stage IV opens
         # that input to the predicted frame; learned B_pre features remain live in
@@ -1242,7 +1285,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--aa-mask-mode",
         default="all",
-        choices=["all", "partial", "none", "time_dependent"],
+        # Must match DesignSelection's valid_modes (data/featurizer.py):
+        # {"all", "none", "fixed", "time_dependent"}. "partial" was never one of
+        # them, so --aa-mask-mode partial passed argparse and then raised inside
+        # the featurizer, after the job had been scheduled.
+        choices=["all", "fixed", "none", "time_dependent"],
     )
     p.add_argument("--aa-mask-prob", type=float, default=1.0)
     p.add_argument("--aa-mask-min-prob", type=float, default=0.0)

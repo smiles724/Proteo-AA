@@ -60,6 +60,24 @@ def test_complete_unmask_encodes_trunk_once(monkeypatch):
     assert seen[0][1].argmax().item() == xpb
 
 
+def test_complete_unmask_exposes_all_one_trajectory_readouts(monkeypatch):
+    import protenix.model.protenix as pxm
+    monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
+
+    out = cogenerate(
+        _FakeModel(), _feat(), N_step=3,
+        aa_readout_mode="target_sigma", aa_readout_sigma=0.4,
+    )
+    assert set(out["aa_readouts"]) == {
+        "final", "target_sigma", "confidence_best"
+    }
+    assert out["aa_readout_mode"] == "target_sigma"
+    assert abs(float(out["aa_readouts"]["target_sigma"]["sigma"]) - 0.4) < 1e-5
+    assert torch.equal(
+        out["sequence"], out["aa_readouts"]["target_sigma"]["sequence"]
+    )
+
+
 def test_sequential_commits_progressively_and_reencodes_trunk(monkeypatch):
     """Ablation: mask_frac shrinks (commits) AND the trunk is re-encoded each step so
     committed residues re-enter the model (P3 fix)."""

@@ -135,6 +135,16 @@ class ProtenixDesignTrain(ProtenixDesign):
             ns_cfg = {k: getattr(ns_cfg, k) for k in ("p_mean", "p_std", "sigma_data")}
         self.training_noise_sampler = TrainingNoiseSampler(**ns_cfg)
         residue_cfg = getattr(configs, "residue_type", None)
+        self.aa_clean_coordinate_input = bool(
+            getattr(residue_cfg, "clean_coordinate_input", False)
+            if residue_cfg is not None
+            else False
+        )
+        if self.aa_clean_coordinate_input:
+            logging.getLogger(__name__).info(
+                "AA clean-coordinate diagnostic active: coordinate noise is "
+                "disabled while positive sigma conditioning remains active"
+            )
         forced_sigmas = (
             getattr(residue_cfg, "forced_sigmas", [])
             if residue_cfg is not None else []
@@ -1055,6 +1065,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             s_trunk=s,
             z_trunk=z,
             N_sample=N_sample,
+            clean_coordinate_input=self.aa_clean_coordinate_input,
         )
 
         out = {

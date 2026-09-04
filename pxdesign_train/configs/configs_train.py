@@ -61,6 +61,10 @@ training_configs["residue_type"] = {
     # ConfigManager cannot infer a type from an empty list (it indexes value[0]),
     # so keep the default as a CSV string and parse it after parse_configs().
     "forced_sigmas": "",
+    # Diagnostic only: feed the exact augmented native backbone to the diffusion
+    # module while retaining a positive sigma condition. Literal sigma=0 is not
+    # safe for EDM preconditioning/log-time embeddings.
+    "clean_coordinate_input": False,
 }
 
 # EDM training noise sampler.

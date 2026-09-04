@@ -217,7 +217,12 @@ class PXDesignLoss(nn.Module):
             det = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2))
         D = torch.eye(3, device=pred.device, dtype=p.dtype).expand(cov.shape[0], 3, 3).clone()
         D[:, 2, 2] = torch.where(det < 0, -1.0, 1.0)
-        R = Vh.transpose(-1, -2) @ D @ U.transpose(-1, -2)
+        # Coordinates are represented as ROW vectors below (`g0 @ R`).  For
+        # cov = g0.T @ p0 = U S Vh, the corresponding Kabsch rotation is
+        # U D Vh.  V D U.T is the column-vector form; using it with a right-side
+        # matrix multiply applies the inverse rotation and makes a pure rigid
+        # rotation look like a large structural error.
+        R = U @ D @ Vh
         g_aligned = (g - gc) @ R + pc
 
         d2 = ((g_aligned - p) ** 2).sum(dim=-1)

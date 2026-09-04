@@ -640,6 +640,24 @@ def build_configs(args: argparse.Namespace, device):
     configs.residue_type.forced_sigmas = ",".join(
         f"{value:g}" for value in forced_sigmas
     )
+    clean_coordinate_input = bool(
+        getattr(args, "aa_clean_coordinate_input", False)
+    )
+    if clean_coordinate_input:
+        if args.training_stage != "aa_head_on_stage2":
+            raise ValueError(
+                "--aa-clean-coordinate-input is a diagnostic supported only "
+                "when training_stage is aa_head_on_stage2"
+            )
+        if len(forced_sigmas) != int(configs.training.diffusion_batch_size):
+            raise ValueError(
+                "--aa-clean-coordinate-input requires one positive "
+                "--aa-forced-sigmas value per diffusion sample so the clean "
+                "backbone test has an explicit, fixed conditioning level: "
+                f"got {len(forced_sigmas)}, expected "
+                f"{int(configs.training.diffusion_batch_size)}"
+            )
+    configs.residue_type.clean_coordinate_input = clean_coordinate_input
     configs.loss.aa_sigma_weight_mode = str(
         getattr(args, "aa_sigma_weight_mode", "uniform")
     )
@@ -911,6 +929,30 @@ def build_configs(args: argparse.Namespace, device):
         # LAYOUT has to be whatever that checkpoint was trained with -- not this
         # stage's defaults. Adopt it from the checkpoint's own record.
         adopt_sidechain_arch_from_checkpoint(configs, args)
+
+    unfreeze_last = int(getattr(args, "unfreeze_last_diffusion_blocks", 0))
+    if unfreeze_last < 0:
+        raise ValueError("--unfreeze-last-diffusion-blocks must be >= 0")
+    if unfreeze_last:
+        if args.training_stage != "aa_head_on_stage2":
+            raise ValueError(
+                "--unfreeze-last-diffusion-blocks is currently supported only "
+                "for the aa_head_on_stage2 training stage"
+            )
+        n_blocks = int(configs.model.diffusion_module.transformer.n_blocks)
+        if unfreeze_last > n_blocks:
+            raise ValueError(
+                "--unfreeze-last-diffusion-blocks exceeds the configured trunk "
+                f"depth: {unfreeze_last} > {n_blocks}"
+            )
+        first = n_blocks - unfreeze_last
+        configs.training.trainable_param_keywords.extend(
+            f"diffusion_module.diffusion_transformer.blocks.{idx}."
+            for idx in range(first, n_blocks)
+        )
+        # aa_head_on_stage2 normally pins this to zero. Restore the explicit CLI
+        # scale so AA loss can adapt only the selected final blocks.
+        configs.residue_type.trunk_grad_scale = float(args.trunk_grad_scale)
     return configs
 
 
@@ -1105,7 +1147,8 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         # is teacher-forced from GT backbone frames.
         args.predicted_frame = False
         args.per_sigma = True
-        args.trunk_grad_scale = 0.0
+        if int(getattr(args, "unfreeze_last_diffusion_blocks", 0)) == 0:
+            args.trunk_grad_scale = 0.0
     elif args.training_stage in ("coevolution", "predicted_mask"):
         args.disable_sidechain = False
         args.disable_aa_loss = False
@@ -1316,10 +1359,26 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
     p.add_argument(
+        "--unfreeze-last-diffusion-blocks",
+        type=int,
+        default=0,
+        help="With aa_head_on_stage2, also train this many final main diffusion "
+             "transformer blocks. Their optimizer LR is --lr; the AA head keeps "
+             "--aa-head-lr, and --trunk-grad-scale controls AA gradient into them.",
+    )
+    p.add_argument(
         "--aa-forced-sigmas",
         default="",
         help="Comma-separated sigma values that replace the first training "
              "diffusion samples, e.g. 0.04,0.4. Empty preserves EDM sampling.",
+    )
+    p.add_argument(
+        "--aa-clean-coordinate-input",
+        action="store_true",
+        help="AA diagnostic: do not add coordinate noise to the augmented native "
+             "backbone, while retaining the positive conditioning values from "
+             "--aa-forced-sigmas. Requires aa_head_on_stage2 and exactly one "
+             "forced sigma per diffusion sample.",
     )
     p.add_argument(
         "--aa-sigma-weight-mode",

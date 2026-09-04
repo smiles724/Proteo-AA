@@ -43,6 +43,8 @@ def cogenerate(
     seq_patience: int = 3,
     seq_mode: str = "complete_unmask",
     refinement_steps: int = 3,
+    aa_readout_mode: str = "final",
+    aa_readout_sigma: float = 0.4,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -71,8 +73,15 @@ def cogenerate(
     `refinement_steps` is the number of post-diffusion S -> B_refine updates.
     It is used only when `sidechain_cycle` and co-evolution are enabled.
 
+    ``aa_readout_mode`` controls only the returned sequence/probabilities for
+    complete-unmask sampling. ``final`` preserves the historical last-step
+    result, ``target_sigma`` selects the diffusion step closest (in log sigma)
+    to ``aa_readout_sigma``, and ``confidence_best`` selects each token from the
+    trajectory step where that token had its highest maximum probability. All
+    three readouts are returned under ``aa_readouts`` from the same trajectory.
+
     Returns {coordinate, sequence (aa20 per design token, -1 elsewhere),
-             trajectory}.
+             aa_probs, aa_readouts, trajectory}.
     """
     from protenix.model.protenix import update_input_feature_dict
 
@@ -83,6 +92,18 @@ def cogenerate(
         raise ValueError(
             f"seq_mode must be 'complete_unmask' or 'sequential', got {seq_mode!r}"
         )
+    valid_readouts = {"final", "target_sigma", "confidence_best"}
+    if aa_readout_mode not in valid_readouts:
+        raise ValueError(
+            f"aa_readout_mode must be one of {sorted(valid_readouts)}, "
+            f"got {aa_readout_mode!r}"
+        )
+    if seq_mode != "complete_unmask" and aa_readout_mode != "final":
+        raise ValueError("non-final AA readouts require seq_mode='complete_unmask'")
+    if not torch.isfinite(torch.tensor(float(aa_readout_sigma))) or float(
+        aa_readout_sigma
+    ) <= 0.0:
+        raise ValueError("aa_readout_sigma must be finite and > 0")
     if refinement_steps < 0:
         raise ValueError(f"refinement_steps must be >= 0, got {refinement_steps}")
     if sc_start_frac != 1.0:
@@ -139,6 +160,11 @@ def cogenerate(
 
     trajectory = []
     final_aa_probs = None
+    target_aa_probs = None
+    target_aa_sigma = None
+    target_log_distance = float("inf")
+    confidence_aa_probs = None
+    confidence_best = None
 
     # --- inference-side cycle setup (Overleaf iterative co-evolution) ---
     sc_enabled = (sidechain_cycle and getattr(model, "enable_sidechain", False)
@@ -340,6 +366,28 @@ def cogenerate(
         probs = torch.softmax(logits, dim=-1)
         final_aa_probs = probs
         conf, pred = probs.max(dim=-1)
+
+        # Keep alternative readouts from this SAME generated trajectory. Target
+        # sigma is restricted to the ordinary diffusion phase: refinement sigma
+        # is a mode label/residual scale, not the physical noise of B_k.
+        if not is_refinement:
+            log_distance = abs(
+                float(torch.log(sig_t.float().clamp_min(1e-12)).item())
+                - float(torch.log(sig_t.new_tensor(float(aa_readout_sigma))).item())
+            )
+            if log_distance < target_log_distance:
+                target_log_distance = log_distance
+                target_aa_probs = probs.clone()
+                target_aa_sigma = float(sig_t)
+        if confidence_aa_probs is None:
+            confidence_aa_probs = probs.clone()
+            confidence_best = conf.clone()
+        else:
+            improve = conf > confidence_best
+            confidence_aa_probs = torch.where(
+                improve[..., None], probs, confidence_aa_probs
+            )
+            confidence_best = torch.maximum(confidence_best, conf)
 
         if seq_mode == "sequential":
             # LLaDA-style progressive commit: reveal the top-k highest-confidence
@@ -683,16 +731,49 @@ def cogenerate(
                 _seq_stable = 0
             _prev_seq = cur
 
+    # Select the public sequence/probability view while retaining every readout
+    # for one-pass evaluation. Sequential mode has committed states and therefore
+    # exposes only its historical final result.
+    readout_probs = {"final": final_aa_probs}
+    readout_sigmas = {
+        "final": trajectory[-1]["sigma"] if trajectory else float("nan")
+    }
+    if seq_mode == "complete_unmask":
+        readout_probs["target_sigma"] = target_aa_probs
+        readout_probs["confidence_best"] = confidence_aa_probs
+        readout_sigmas["target_sigma"] = target_aa_sigma
+        readout_sigmas["confidence_best"] = "per_token"
+    selected_probs = readout_probs[aa_readout_mode]
+    if selected_probs is None:
+        raise RuntimeError(f"AA readout {aa_readout_mode!r} produced no probabilities")
+    selected_sequence = sampled.clone()
+    selected_sequence[positions] = selected_probs.argmax(dim=-1)[positions]
+    aa_readouts = {
+        name: {
+            "probs": value,
+            "sequence": torch.where(
+                dtm,
+                value.argmax(dim=-1),
+                torch.full_like(sampled, -1),
+            ),
+            "sigma": readout_sigmas[name],
+        }
+        for name, value in readout_probs.items()
+        if value is not None
+    }
+
     # M3: full-atom assembly — backbone coords from diffusion + S_phi side-chain
     # global coords per committed design residue (empty dict if the cycle was off
     # or nothing committed). Each entry: {restype3, atom_names, coords[k,3]}.
     return {
         "coordinate": x.squeeze(0),
-        "sequence": sampled,
+        "sequence": selected_sequence,
         # Final-step probabilities are exposed for leakage-free inference
         # evaluation. They come from the same generated-backbone state as the
         # returned sequence; no label/GT coordinates enter cogenerate().
-        "aa_probs": final_aa_probs,
+        "aa_probs": selected_probs,
+        "aa_readout_mode": aa_readout_mode,
+        "aa_readouts": aa_readouts,
         "trajectory": trajectory,
         "sidechain": sidechain_out,
         "has_full_atom_sidechain": bool(sidechain_out),

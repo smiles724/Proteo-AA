@@ -68,6 +68,64 @@
 
 尤其要注意：PINDER free-generation 的 native sequence recovery 同时受 backbone 是否接近 native 构象影响。一个生成出来但不同于 native 的合理 binder，未必应该恢复出 native sequence，所以该指标不能单独等价为 AA head accuracy。
 
+### 2.1 总体研究问题
+
+Stage III binder 实验围绕四个逐层收窄的问题展开：
+
+1. **工程与监督是否接通？** 检查 checkpoint、label、binder mask、梯度、optimizer 和数据 cache，确认 AA loss 是否真正作用于目标 residue。
+2. **给定接近 native 的 backbone，AA head 能否预测 sequence？** 用 fixed-sigma 和 clean-coordinate 实验隔离 sequence readout，不让 free-generation backbone 质量混入结论。
+3. **模型是否具备学习容量，瓶颈位于 head 还是 representation？** 用固定 32 个样本的 tiny-overfit，以及 head-only、last-block、all-16-block 解冻深度对照判断。
+4. **训练能力能否迁移到真实生成？** 用 Gaussian-start rollout、不同轨迹 readout 和 PXDesign native sampler 评估 train–inference state distribution shift 与采样器影响。
+
+这一顺序很重要：如果 tiny-overfit 都不能成功，应先查接线或容量；只有 tiny-overfit 成功后，held-out 与 free rollout 的差距才可以解释为泛化、表示分布或 decoding strategy 问题。
+
+### 2.2 公共模型、数据和训练 protocol
+
+除非单项实验明确说明，Stage III binder 实验共享以下设置：
+
+| 项目 | 设置 | 目的 |
+| --- | --- | --- |
+| Backbone + side-chain warm start | Stage II `step52500.pt` | 保留已经训练的 backbone 与 `S_phi` |
+| AA head donor | `aa_head_on_stage2/step9000.pt` | 避免使用 Stage II 中 chance-level 的随机 AA head |
+| Binder 数据 | PINDER chain B；Protenix PPI 第二条 chain | 统一 binder selector 语义 |
+| 主训练数据 | monomer + Protenix PPI + PINDER curriculum | 在学习 complex/binder 的同时维持 monomer fold prior |
+| AA target | 加噪前保存的 native residue type | 防止把被 mask 或扰动后的 token 当 label |
+| 默认 sequence corruption | binder 全部 mask，`mask_mode=all` | 与当前 one-shot `complete_unmask` 推理语义一致 |
+| 默认 crop | 448 或 512 tokens；binder 完整保留 | 比较吞吐、显存与包含 interface 的能力 |
+| 主训练优化 | backbone 与 side chain alternating；AA CE 进入 backbone loss | 联合优化 backbone、side chain 与 residue type |
+| Fixed-sigma eval | native binder backbone 加指定 sigma 噪声 | 测量给定接近 native geometry 时的 AA readout 上限 |
+| Free-generation eval | binder 坐标从 Gaussian noise 开始多步 rollout | 测量实际联合生成轨迹，而非 teacher-forced 分类 |
+| 结构指标 | 每个 complex 对 binder 做 Kabsch 后计算 Cα/BB RMSD、lDDT、TM | 去除全局刚体平移和旋转；不包含 receptor-relative pose |
+
+主训练 warm start 使用两个 checkpoint，但已经逐 tensor 检查二者共同部分：`diffusion_module` 636/636、`design_condition_embedder` 96/96 完全一致。因此两个 checkpoint 的组合不是后续 AA 停滞的解释。
+
+### 2.3 实验设计总表：目的、方法、控制变量与判据
+
+| 实验 | 目的/假设 | Method 与关键控制 | 预先判据 | 实际结果 |
+| --- | --- | --- | --- | --- |
+| AA donor strict evaluation | 建立 Stage III 起点，并判断 donor 是否使用结构而非只学类别先验 | 同一 donor、同一数据；比较 sigma 0.04/0.4/4.0，并在 sigma 0.4 随机化结构输入 | Native 明显优于 randomized，表示存在结构信号 | Native sigma 0.4 为 13.40%，randomized 为 8.33%；有弱结构信号但类别塌缩 |
+| Main Stage III crop 448/512 | 检验 mixed binder training 是否能维持 backbone prior，并选择可稳定运行的 crop | 同一 warm start、loss 和 curriculum；主要改变 crop size；每 2000 steps 做 monomer validation | Backbone 指标持续改善且 AA 不退化；比较吞吐/OOM/稳定性 | Crop 448 到 step6000 持续改善；crop512 后期回退；两者 AA 都约 13% |
+| AA LR vs detach | 检验 AA 不动是否来自 head LR 太低，或 AA→`S_phi` 耦合干扰 | 两个 1000-step mixed-data run；比较 head LR `1e-4` 与 detach 配置 | 若优化是主因，应看到明显 CE/acc 分离 | 几乎无差异；后发现全局 clipping 混淆，促成独立 head clipping |
+| Uniform/partial-low/all-low | 检验 AA 几乎没在最终低 sigma 上训练是否为主因 | 纯 PINDER、head-only、相同 LR/clipping；只改变 sigma 采样与 weighting | Low-sigma arm 应显著优于 uniform，尤其在 sigma 0.04 eval | 三个 arm 均约 9.5–9.6%；held-out 差异很小，假设不充分 |
+| 107903 vs 107904 fixed-sigma | 判断 crop 448/512 的 Stage III checkpoint 在 binder 上是否不同 | 同一 128 个 PINDER validation complexes、crop448、sigma 0.04/0.4/4.0 | 同 protocol 下直接比较 AA CE/acc 与类别指标 | 两者几乎完全相同；sigma 0.4 最好，约 15.84% |
+| Step4000 vs step6000 sigma sweep | 判断 AA 是否随 Stage III 继续训练而改善，并定位最佳 sigma | 同一 crop448 run 的两个 checkpoint；七个 sigma；相同 PINDER protocol | 若 AA 随训练改善，6k 曲线应整体优于 4k | 曲线基本重合；最佳 sigma 约 0.4–1.0，主训练 AA 没继续改善 |
+| Free trajectory readout | 判断 fixed-native 的中 sigma 优势能否通过改变读取时机恢复 | 64 个 PINDER complexes、Gaussian-start、20-step rollout；比较 final、sigma≈0.4、per-token confidence-best | 若只是 readout timing 错，非 final 策略应优于 final | Final 8.28% 反而最好；简单换 readout 无效 |
+| Head-only tiny-overfit | 检查 label/loss/optimizer 是否接通，以及 shallow head 能否记忆小数据 | 固定重复 32 个 PINDER 样本；全 sigma 0.04；只训练 AA head | 完全接通且容量充足时应接近 100% train accuracy | 1500 steps 仅 20.09%；能学习但不能完全记忆 |
+| Last-block tiny-overfit | 判断允许局部 representation adaptation 是否足够 | 与 head-only 匹配的 32 samples/低 sigma；训练 head + block15，head LR `3e-4`、block LR `1e-4` | 明显超过 head-only 表示最后一层是关键瓶颈 | 20.57%，仍与 head-only 同量级；单个末层不够 |
+| Clean backbone + head-only | 隔离坐标噪声，测试 clean geometry 在 frozen representation 下是否容易读取 | 固定 32 samples；coordinates 不加噪；保留 sigma=0.04 conditioning；只训练 head | 若噪声是主因，应比普通 low-sigma 大幅提升并能记忆 | 3000 steps 22.81%；去噪仍不能让 shallow head 记忆 |
+| Clean backbone + all 16 blocks | 判断整个 diffusion representation 允许适配后是否具备 AA 学习容量 | 与 clean head-only 相同数据/步数/loss；唯一核心变化是解冻全部16个 blocks | 接近 100% 表示容量与训练接线无根本问题 | CE 0.0051、acc 99.95%；训练集容量问题被排除 |
+| Minimal-sampler structure eval | 测量实际 free-generated backbone 与 PINDER native 的差距 | Gaussian-start；Kabsch 修正后分别用20 steps/64 samples和400 steps/8 samples | RMSD/lDDT/TM 给出生成结构质量；不同样本集不得直接比较步数 | 两者均约19 Å RMSD、TM约0.11，当前 minimal sampler 表现差 |
+| PXDesign native sampler | 检验极高 RMSD 是否主要由自写 minimal Euler sampler 导致 | 计划在相同 checkpoint/样本上调用 PXDesign `sample_diffusion`，400 steps | 必须完成全部样本并生成 summary 后才可比较 | Job110546 接口报错，0 个有效样本；假设仍未检验 |
+
+### 2.4 结果解释与成功标准
+
+- **Tiny-overfit 成功不等于泛化成功。** 训练 accuracy >95% 只说明容量和优化链路存在；还必须在未参与训练的 PINDER complexes 上提高，才能支持可泛化 inverse folding。
+- **证明模型使用 backbone 需要因果 control。** 同一样本上 shuffled/null backbone 应显著降低 accuracy；否则模型可能用 sample identity、target context 或类别先验记忆。
+- **比较 sampler 必须成对。** checkpoint、样本 ID、初始 noise、crop、步数和 metric implementation 应固定；110423 与 110424 样本数不同，只能用于量级判断。
+- **比较 loss 必须固定 architecture。** class weighting、focal loss 或 label smoothing 不能与解冻深度、sigma schedule、unmask strategy 同时改变。
+- **AA accuracy 不能单独使用。** 必须同时报告 CE、balanced accuracy、macro-F1、per-class recall、top-5 accuracy、prediction histogram 和 calibration。
+- **Free-generation native recovery 不是唯一设计指标。** 当生成 backbone 与 native 不同但仍合理时，native sequence 未必是唯一正确答案；后续应补充 sequence plausibility、structure self-consistency 和 interface quality。
+
 ## 3. 代码逻辑审计
 
 ### 3.1 已确认没有发现硬错误的部分

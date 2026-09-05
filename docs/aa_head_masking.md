@@ -121,3 +121,104 @@ retraining a head, not re-scoring the existing one.
 (1.30M of 262.05M) against a frozen backbone and S_phi, and its previous run
 reported at step ~9000 in 14.5h — directly comparable to the 0.1270 that run
 recorded, since validation masking is pinned.
+
+---
+
+# The inference half
+
+Training on partial masks only pays off if sampling actually produces them.
+`seq_mode` decides that, and it now defaults to `sequential`.
+
+## What the two modes do
+
+**`complete_unmask`** (the previous default) keeps the design region fully
+masked for the whole trajectory, re-predicts every position from scratch at
+every step, and reads out a single argmax at the last one. No identity ever
+informs another. `aa_t` is hard-coded to 1.0, which is the only value a
+full-mask-trained head has seen — which is why this was the right default for
+those checkpoints, and why it remains the mode to pass for them.
+
+**`sequential`** decodes a few positions per round, commits them into `restype`,
+and re-encodes the trunk so the positions still to be called can see them. It
+also feeds the head a real `aa_t` — the fraction still masked — which is exactly
+the quantity `time_dependent` training teaches it to read.
+
+## Choosing what to commit each round: `commit_strategy`
+
+| | how many | which |
+|---|---|---|
+| `topk` (default) | the schedule: the design region split evenly over the sampling steps | highest confidence |
+| `threshold` | **the model**: everything above `commit_threshold` | highest confidence |
+| `random` | same count as `topk` | uniformly — the **control arm** |
+
+Confidence is the max softmax probability. Ordering by it rather than at random
+is LLaDA's *low-confidence remasking*, which that paper measured as clearly
+better on language. `random` exists so the same comparison can be made here
+rather than cited: it is the only way to find out whether the ordering buys
+anything on **proteins**.
+
+### The two guards on `threshold`, and why both are needed
+
+A bare threshold degenerates in both directions, and which one you get depends
+on how the checkpoint happens to be calibrated — a property of the weights, not
+of this code. Both failures are silent.
+
+**Nothing clears the bar.** No commits, identical state next round, and the run
+finishes having decided nothing. The guard commits the single most confident
+position, so the trajectory always advances. Expect this to be the *common* case
+early on: an AA head near 13% accuracy is not confident about much.
+
+**Everything clears it.** The whole design region lands in round one, which is
+`complete_unmask` wearing a schedule — no position is ever chosen with another's
+identity visible, which is the entire point of the mode. `commit_max_frac`
+(default 0.5) caps each round at that share of what is left.
+
+### Picking `commit_threshold`
+
+Do not guess it. The default of 0.9 is a placeholder, and it cannot be derived
+from the numbers already in hand: cross-entropy constrains the probability on
+the *true* class, while confidence is the probability on the *arg-max* class,
+and those come apart when the model is usually wrong. `val_aa_ce = 2.809` with
+`val_aa_acc = 0.127` is equally consistent with a typical confidence of 0.9 and
+one of 0.15.
+
+Measure it: dump `probs.max(dim=-1)` over the validation set and look at (a) the
+percentiles, (b) accuracy bucketed by confidence — if the high-confidence
+buckets are not more accurate, ordering by confidence is not buying anything and
+neither strategy will help — and (c) what share of positions each candidate
+threshold would admit per round.
+
+## `temperature`
+
+Was declared on `cogenerate` and never read; sampling was always greedy. Now
+live: above 0, the identity is drawn from `softmax(logits / temperature)`.
+
+**Confidence is still read off the untempered distribution.** Temperature is a
+diversity knob for *which* residue gets chosen; confidence has to keep meaning
+"how sure is the model", because the commit order ranks on it. Taking it from
+the tempered distribution would make a high temperature look like high
+certainty and commit the least reliable positions first.
+
+ProteinMPNN-class methods run this low — 0.1, sometimes 1e-4 — and get diversity
+from sampling many sequences and scoring them, not from loosening any one of
+them. Pass `generator` for reproducibility.
+
+## Order of operations
+
+These knobs cannot be tuned against the current checkpoint. A head trained with
+`aa_mask_mode="all"` has seen neither a falling `aa_t` nor a partially filled
+`restype`, so its confidences under `sequential` are not trustworthy and every
+strategy would be ranking on noise.
+
+1. Retrain a head with `AA_MASK_MODE_TRAINING` (`aa_head_on_stage2`, ~14.5h,
+   comparable to the 0.1270 that run recorded).
+2. Measure the confidence distribution and calibration on it.
+3. Then set `commit_threshold` and run the strategy ablation.
+
+Until (1) lands, pass `seq_mode="complete_unmask"` explicitly for any run using
+an older head.
+
+One thing that needs no code and can be swept immediately: `N_step`. The
+schedule is an even split, so at `N_step >= len(design region)` it is already
+one position per round — full sequential decoding. LLaDA reports accuracy
+improving consistently with more sampling steps.

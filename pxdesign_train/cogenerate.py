@@ -7,11 +7,17 @@ S(B_k) followed by B_refine(B_k, feedback_k) to obtain B_(k+1). The refinement
 loop carries the latest predicted backbone directly: it neither re-noises it nor
 takes an Euler step between refinement rounds.
 
-By default (`seq_mode="complete_unmask"`) the design region is kept fully masked
-and re-predicted in full every step, with the final sequence read out at the last
-step — no unmasking schedule. `seq_mode="sequential"` is the LLaDA-style ablation
-that progressively commits residues on a schedule and re-encodes the trunk each step
-so commitments feed back (see `cogenerate` docstring).
+By default (`seq_mode="sequential"`) the design region is decoded a few positions
+at a time, most confident first, each commitment written back into `restype` and
+re-encoded so the positions still to be called can see it — LLaDA's
+low-confidence ordering, which that paper measured as clearly better than
+committing at random. `commit_strategy` chooses how many go per round.
+
+`seq_mode="complete_unmask"` is the previous default: every position is
+re-predicted from scratch every step, nothing is ever committed early, and the
+answer is a single argmax at the last step. It is the right mode for an AA head
+trained with `aa_mask_mode="all"`, which has never seen a partially decided
+sequence.
 
 This is a MINIMAL, correctness-first sampler (deterministic EDM Euler step, no
 predictor-corrector / churn). Quality tuning is out of scope here.
@@ -30,6 +36,81 @@ _AA3 = ["ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
         "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL"]
 
 
+COMMIT_STRATEGIES = ("topk", "threshold", "random")
+
+
+def _select_commits(
+    *,
+    strategy: str,
+    conf: torch.Tensor,          # [N_token] confidence of the current prediction
+    masked_idx: torch.Tensor,    # [M] still-masked design token indices
+    k: int,                      # positions this step's schedule wants committed
+    threshold: float,
+    max_frac: float,
+    generator: Optional[torch.Generator] = None,
+) -> Optional[torch.Tensor]:
+    """Which still-masked positions to freeze this step.
+
+    Every strategy commits from `masked_idx` only, and returns token indices.
+
+    "topk"       the schedule decides HOW MANY (k, an even split of the design
+                 region over the sampling steps), confidence decides WHICH. This
+                 is LLaDA's low-confidence remasking, which that paper measured
+                 as clearly better than committing at random.
+
+    "threshold"  the MODEL decides how many: everything above `threshold` goes
+                 this round, whatever it can't call yet waits for the next one,
+                 by which time the positions committed now are context. The
+                 schedule is ignored.
+
+    "random"     the control arm. Same count as "topk", chosen uniformly instead
+                 of by confidence, so "does ranking by confidence actually buy
+                 anything on proteins" is measurable here rather than cited from
+                 a language-model paper.
+    """
+    if masked_idx.numel() == 0:
+        return None
+
+    if strategy == "topk":
+        if k <= 0:
+            return None
+        k = min(int(k), int(masked_idx.numel()))
+        return masked_idx[torch.topk(conf[masked_idx], k).indices]
+
+    if strategy == "random":
+        if k <= 0:
+            return None
+        k = min(int(k), int(masked_idx.numel()))
+        perm = torch.randperm(masked_idx.numel(), generator=generator,
+                              device=masked_idx.device)
+        return masked_idx[perm[:k]]
+
+    if strategy != "threshold":
+        raise ValueError(
+            f"commit_strategy must be one of {COMMIT_STRATEGIES}, got {strategy!r}"
+        )
+
+    masked_conf = conf[masked_idx]
+    over = masked_conf > float(threshold)
+    n_over = int(over.sum())
+
+    # Two guards, because a bare threshold degenerates in both directions and the
+    # direction depends on calibration, which is a property of the checkpoint
+    # rather than of this code.
+    #
+    #   nothing clears the bar -> no commit -> the same state next step -> the
+    #   loop runs out of steps having decided nothing. Commit the single most
+    #   confident position so the trajectory always advances.
+    #
+    #   everything clears it -> the whole design region lands in round one,
+    #   which is complete_unmask wearing a schedule: no position is ever chosen
+    #   with another one's identity visible, i.e. exactly the context this mode
+    #   exists to provide. Cap each round at `max_frac` of what is left.
+    n_cap = max(1, int(masked_idx.numel() * float(max_frac)))
+    n_take = max(1, min(n_over, n_cap))
+    return masked_idx[torch.topk(masked_conf, n_take).indices]
+
+
 @torch.no_grad()
 def cogenerate(
     model,
@@ -41,7 +122,27 @@ def cogenerate(
     sc_start_frac: float = 1.0,
     stop_on_seq_stable: bool = False,
     seq_patience: int = 3,
-    seq_mode: str = "complete_unmask",
+    # "sequential" decodes the design region a few positions at a time, most
+    # confident first, writing each commitment back into restype so the
+    # positions still to be called can see it. "complete_unmask" re-predicts
+    # every position from scratch every step and never lets one identity inform
+    # another; its answer is a single argmax at the final step.
+    #
+    # PREREQUISITE, and it is not optional. This mode hands the AA head a
+    # falling aa_t and a partially filled restype. A head trained with
+    # aa_mask_mode="all" has seen neither -- only aa_t == 1.0 and an
+    # end-to-end masked design region -- so running it here is off-distribution
+    # on both axes and will sample WORSE than complete_unmask. Training moved to
+    # AA_MASK_MODE_TRAINING ("time_dependent") for exactly this reason; a head
+    # trained after that change is the one this default assumes.
+    #
+    # Pass seq_mode="complete_unmask" to get the old behaviour back for a head
+    # that predates it. See docs/aa_head_masking.md.
+    seq_mode: str = "sequential",
+    commit_strategy: str = "topk",
+    commit_threshold: float = 0.9,
+    commit_max_frac: float = 0.5,
+    generator: Optional[torch.Generator] = None,
     refinement_steps: int = 3,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
@@ -85,6 +186,21 @@ def cogenerate(
         )
     if refinement_steps < 0:
         raise ValueError(f"refinement_steps must be >= 0, got {refinement_steps}")
+    if commit_strategy not in COMMIT_STRATEGIES:
+        raise ValueError(
+            f"commit_strategy must be one of {COMMIT_STRATEGIES}, "
+            f"got {commit_strategy!r}"
+        )
+    if not 0.0 < commit_max_frac <= 1.0:
+        raise ValueError(f"commit_max_frac must be in (0, 1], got {commit_max_frac}")
+    if temperature < 0:
+        raise ValueError(f"temperature must be >= 0, got {temperature}")
+    if commit_strategy != "topk" and seq_mode != "sequential":
+        raise ValueError(
+            f"commit_strategy={commit_strategy!r} only applies to "
+            'seq_mode="sequential"; complete_unmask commits nothing until the '
+            "final step"
+        )
     if sc_start_frac != 1.0:
         raise ValueError(
             "sc_start_frac no longer applies to the two-phase sampler; side-chain "
@@ -339,18 +455,39 @@ def cogenerate(
             logits = logits.squeeze(0)  # [N_token, 20]
         probs = torch.softmax(logits, dim=-1)
         final_aa_probs = probs
-        conf, pred = probs.max(dim=-1)
+        if temperature and temperature > 0:
+            # Sample the identity from a tempered distribution, but score
+            # confidence with the UNTEMPERED probability. Temperature is a
+            # diversity knob for *which* residue gets chosen; confidence has to
+            # keep meaning "how sure is the model", because the commit order
+            # ranks on it. Reading confidence off the tempered distribution
+            # would make a high temperature look like high certainty.
+            #
+            # ProteinMPNN-class methods run this low -- 0.1, sometimes 1e-4 --
+            # and get diversity from sampling many sequences and scoring them,
+            # not from loosening any single one.
+            tempered = torch.softmax(logits / float(temperature), dim=-1)
+            pred = torch.multinomial(tempered, 1, generator=generator).squeeze(-1)
+            conf = probs.gather(-1, pred[..., None]).squeeze(-1)
+        else:
+            conf, pred = probs.max(dim=-1)
 
         if seq_mode == "sequential":
-            # LLaDA-style progressive commit: reveal the top-k highest-confidence
-            # still-masked positions this step, FREEZE them, and write their types into
-            # restype (re-encoded into the trunk at the top of the next step — see P3 fix).
-            k = counts[step] if step < len(counts) else 0
+            # LLaDA-style progressive commit: choose some still-masked positions,
+            # FREEZE them, and write their types into restype (re-encoded into the
+            # trunk at the top of the next step — see P3 fix). `commit_strategy`
+            # selects how many and which; see `_select_commits`.
             masked_idx = still.nonzero(as_tuple=False).squeeze(-1)
-            if k > 0 and masked_idx.numel() > 0:
-                k = min(k, int(masked_idx.numel()))
-                top = torch.topk(conf[masked_idx], k).indices
-                reveal = masked_idx[top]
+            reveal = _select_commits(
+                strategy=commit_strategy,
+                conf=conf,
+                masked_idx=masked_idx,
+                k=counts[step] if step < len(counts) else 0,
+                threshold=commit_threshold,
+                max_frac=commit_max_frac,
+                generator=generator,
+            )
+            if reveal is not None and reveal.numel() > 0:
                 sampled[reveal] = pred[reveal]
                 still[reveal] = False
                 for j in reveal.tolist():

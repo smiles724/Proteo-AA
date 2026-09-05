@@ -23,7 +23,7 @@ def test_complete_unmask_stays_fully_masked_and_reads_out_last_step(monkeypatch)
 
     model = _FakeModel()
     torch.manual_seed(0)
-    out = cogenerate(model, _feat(), N_step=3)  # default seq_mode
+    out = cogenerate(model, _feat(), N_step=3, seq_mode="complete_unmask")
 
     assert out["trajectory"], "no steps ran"
     # Fully masked input every step — never partially revealed (predict-all).
@@ -53,7 +53,7 @@ def test_complete_unmask_encodes_trunk_once(monkeypatch):
 
     model.get_condition_embedding = spy
     torch.manual_seed(0)
-    cogenerate(model, _feat(), N_step=4)  # complete_unmask
+    cogenerate(model, _feat(), N_step=4, seq_mode="complete_unmask")
     assert calls["n"] == 1, f"complete_unmask must encode the trunk once, got {calls['n']}"
     _, xpb = build_aa20_to_restype36()
     assert seen[0][0].argmax().item() == xpb
@@ -103,3 +103,21 @@ def test_invalid_seq_mode_rejected(monkeypatch):
         assert "seq_mode" in str(e)
     else:
         raise AssertionError("invalid seq_mode should raise ValueError")
+
+
+def test_sequential_is_the_default(monkeypatch):
+    """The default is a deliberate choice, so pin it.
+
+    `sequential` is the mode the confidence ordering, the commit strategies and
+    the partial-mask training all exist for; `complete_unmask` never lets one
+    decided identity inform another. Two tests above used to reach this default
+    implicitly, which is how a flip like this stays invisible.
+
+    Assumes an AA head trained with AA_MASK_MODE_TRAINING — see the seq_mode
+    comment in cogenerate.
+    """
+    import inspect
+
+    from pxdesign_train.cogenerate import cogenerate as fn
+
+    assert inspect.signature(fn).parameters["seq_mode"].default == "sequential"

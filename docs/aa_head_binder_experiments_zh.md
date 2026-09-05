@@ -1,26 +1,59 @@
 # Stage III Binder 联合训练与 AA Head 实验总结
 
-> 整理日期：2026-09-02
+> 整理日期：2026-09-05
 >
 > 分支：`sjm/binder-design-training`
 >
-> 范围：Stage III binder 联合训练、AA head 代码审计、PINDER validation、sigma 对照、轨迹 readout 和 tiny-overfit 诊断。
+> 范围：从 Stage III binder training 启动开始的训练、失败任务、AA head 代码审计、PINDER validation、sigma/优化器/解冻深度对照、free-generation 采样与 tiny-overfit 诊断，以及 2026 年 9 月会议提出的后续问题。
 
 ## 1. 核心结论
 
-目前的证据不支持“AA label 接错”“binder/receptor mask 反了”“AA head 被冻结”或“两个 checkpoint 嫁接不兼容”是主因。AA head 的参数确实在更新，监督对象也是 binder 上的 native residue type。
+目前的证据不支持“AA label 接错”“binder/receptor mask 反了”“AA head 被冻结”或“两个 checkpoint 嫁接不兼容”是主因。AA head 的参数确实更新，监督对象也是 binder native residue type。
 
-AA head 也不是完全没有学习能力：在 PINDER native backbone 的固定噪声评估中，Stage III checkpoint 在中等 sigma 下可以达到约 **15.8% accuracy**；在固定 32 个 PINDER 样本上的 head-only tiny-overfit 中，训练准确率可以从约 8% 上升到 **20.1%**。但是，这个学习信号很弱，并且没有继续转化为真实联合生成轨迹上的序列恢复能力。
+最关键的新结果来自固定 32 个 PINDER 样本的 clean-backbone tiny-overfit：只训练 AA head 最终为 **22.81%**，训练 head 加最后一个 diffusion block 为 **20.57%**；而训练 head 加全部 16 个 diffusion blocks 后，PINDER train-window accuracy 达到 **99.95%**、CE 降到 **0.0051**。这证明整套模型有能力记住 backbone-conditioned AA 任务，也排除了 loss、label、mask、梯度或 optimizer 完全断开的假设。
 
-目前最一致的解释是以下问题叠加：
+这项结果同时把问题进一步定位为：
 
-1. AA head 本身很浅，主要依赖 diffusion trunk 已经编码好的局部结构表示；现有表示对 residue identity 的可分性不足。
-2. 训练使用的是 native structure 加单步噪声，而推理使用从 Gaussian noise 开始的多步 rollout，存在明显的 train–inference state distribution shift。
-3. 所有 binder residue 在训练和推理时都被同时 mask，模型没有已知 binder sequence context，也没有把已预测序列自回馈给 trunk。
-4. 低 sigma 并不是唯一问题：强制 low-sigma 训练没有带来可见提升；固定 native backbone 上中等 sigma 更好，但同一生成轨迹上选择中间 sigma readout 反而没有改善。
-5. 类别分布和预测存在明显塌缩，balanced accuracy 和 macro-F1 显著低于表面 accuracy。
+1. 原始冻结 diffusion representation 中的 AA identity 对浅层 head 不够可分；只允许最后一个 block 调整仍不够，深层 representation adaptation 才能完成训练集记忆。
+2. 99.95% 只是在 32 个训练样本上的 memorization，尚未证明模型真正使用 backbone geometry，也尚未证明能泛化到 held-out PINDER。
+3. 主 Stage III 使用 one-step noisy-native supervision，而真实推理从 Gaussian noise 开始多步 rollout，train–inference state distribution shift 仍然存在。
+4. 所有 binder residue 同时被 mask，预测 AA 不反馈给后续 diffusion step；这是比逐步 unmask 更困难的一步到位任务。
+5. AA 类别分布仍有塌缩迹象，balanced accuracy 和 macro-F1 明显低于表面 accuracy。
+6. 原生 PXDesign sampler 的第一次 validation 因兼容层漏传 `pair_z`、`p_lm`、`c_l` 而对 8/8 样本全部失败，所以目前仍没有有效的原生 sampler free-generation 指标。
 
-因此，现在还不能简单下结论说“这个网络结构一定学不到”；更准确的说法是：**当前 shallow AA readout + one-step noisy-native supervision 的组合，没有学到足以迁移到 free rollout 的 sequence–structure mapping**。下一步应先完成严格匹配的 last-block tiny-overfit，再决定是做 rollout-aware training，还是直接引入更强的 inverse-folding head。
+因此，当前不能说“NN 结构本身学不到 AA”。更准确的结论是：**网络容量足以记忆任务，但 frozen/shallow readout、训练状态分布与 free rollout 不匹配、以及 all-at-once unmask 共同限制了主训练的泛化和生成端表现**。下一步应先证明 all-16 模型在 held-out 数据上是否有效、用 shuffled-backbone 验证其是否真的依赖几何，再决定解冻深度、rollout-aware training 和 iterative unmasking 的方案。
+
+### 1.1 Job 总览与有效性
+
+下表按实验演进顺序记录从 Stage III binder training 开始出现的主要 job。`无效` 表示任务因工程错误退出，其数值不能作为模型结论；`被替代` 表示后来发现评估实现有误，应该使用修正后的 job。
+
+| Job | 实验 | 状态 | 主要结果或用途 |
+| ---: | --- | --- | --- |
+| 105659 | 最早 binder launch | 无效 | Slurm 环境找不到 `conda` |
+| 107180、107296 | binder smoke tests | 有效 smoke | 6 steps 通过，确认数据、checkpoint 和前后向可运行 |
+| 107381 | crop-512 正式尝试 | 无效 | step 50 左右因 CUDA allocator 碎片 OOM |
+| 107902 | 修复 OOM 后重提 | 无效 | external Protenix 路径配置错误 |
+| 107903 | Stage III binder，crop 512 | 有效 | 到约 step 5800，walltime 结束；后期 monomer geometry 不如 crop 448 稳定 |
+| 107904 | Stage III binder，crop 448 | 有效 | 到 step 6200；step 6000 backbone validation 最好，AA 仍约 13% |
+| 108572 | 最早 PINDER eval | 无效 | evaluation namespace 缺 `resume_lr` |
+| 108607、108608 | LR/detach 首次提交 | 无效 | DataLoader 向共享 PINDER cache 写临时文件，触发权限错误 |
+| 108695、108696 | AA LR 与 detach 对照 | 有效 | 1000 steps 内几乎无差异；暴露全局 gradient clipping 干扰 |
+| 108897、108898 | low-sigma 首次提交 | 无效 | 空 `forced_sigmas` 触发 `ConfigDict`/`IndexError` |
+| 109120、109121 | low-sigma 第二次提交 | 无效 | list/string 类型锁定导致 `TypeError` |
+| 109122、109123、109126 | uniform / partial-low / all-low | 有效 | 仅训练 head 时均约 9.5–9.6%，low sigma 没解决问题 |
+| 109151 | 三个 low-sigma 模型的 held-out eval | 有效 | 三者在 sigma 0.04/0.4/4.0 的差异都很小 |
+| 109152 | 32-sample、head-only tiny-overfit | 有效 | 1500 steps，PINDER window acc 20.09% |
+| 109153、109154 | 107903/107904 step5000 PINDER fixed-sigma | 有效 | 两 checkpoint 几乎相同；sigma 0.4 最好，约 15.84% |
+| 109339、109340 | 107904 step4000/6000 sigma sweep | 有效 | 最佳 sigma 0.4–1.0；4k 到 6k 无 AA 提升 |
+| 109341 | 20-step free-generation AA trajectory readout | 有效 | final 8.28%；sigma≈0.4 与 confidence-best 均更差 |
+| 109342 | 早期 head + last block tiny-overfit | 有效但非严格对照 | acc 17.22%；sigma 与梯度强度和 head-only 不匹配 |
+| 109451 | 严格 low-sigma head + last block | 有效 | 1500 steps，PINDER window acc 20.57%，仍未完全记忆 |
+| 110407 | 首次带结构指标的 free-generation eval | 被替代 | Kabsch 实现方向错误，RMSD 数值不应继续引用 |
+| 110421 | clean backbone + head-only，32 samples | 有效 | 3000 steps，PINDER window acc 22.81% |
+| 110423 | Kabsch 修正后，20-step free generation | 有效 | 64 samples；Cα RMSD 18.884 Å，lDDT 0.2377，TM 0.1096 |
+| 110424 | Kabsch 修正后，400-step free generation | 有效但小样本 | 8 samples；Cα RMSD 19.518 Å，lDDT 0.2086，TM 0.1154 |
+| 110540 | clean backbone + all 16 blocks，32 samples | 有效 | 3000 steps，PINDER CE 0.0051、acc 99.95% |
+| 110546 | PXDesign native sampler，400 steps | 无效 | 8/8 样本因缺少三个 forward 参数失败，没有 summary |
 
 ## 2. 不同评估的含义
 
@@ -290,17 +323,115 @@ Job 109342：
 
 日志：[`aa-lastblk32-c448-109342.out`](../logs/training/stage3_binder/aa-lastblk32-c448-109342.out)
 
+### 4.9 严格匹配的最后一层 low-sigma tiny-overfit
+
+Job 109451 修正了 109342 中不匹配的变量：固定同一批 32 个 PINDER 样本、8 个 diffusion samples 全部为 sigma 0.04、head LR `3e-4`、最后一个 diffusion block LR `1e-4`，不再把 trunk gradient 缩小到 0.1。
+
+| Step | PINDER train-window CE | PINDER train-window accuracy |
+| ---: | ---: | ---: |
+| 10 | 2.915 | 7.63% |
+| 100 | 2.841 | 10.95% |
+| 200 | 2.788 | 12.60% |
+| 500 | 2.750 | 13.40% |
+| 750 | 2.680 | 15.56% |
+| 1,000 | 2.559 | 18.47% |
+| 1,250 | 2.555 | 18.54% |
+| 1,500 | **2.478** | **20.57%** |
+
+最后一层确实更新，但最终只与 head-only 的约 20% 同量级，不能完成 32-sample memorization。这说明问题不是简单地“最后一层没允许动”，而是最后一层提供的适配深度仍不够。
+
+日志：[`aa-lastblk32-low-c448-109451.out`](../logs/training/stage3_binder/aa-lastblk32-low-c448-109451.out)
+
+### 4.10 Clean-backbone 容量对照：head-only 与 all-16 blocks
+
+为了回答“只给 backbone、接近 sigma=0 时能否学 AA type”，增加了不对 native coordinates 加噪声、但保留 sigma=0.04 conditioning 的 clean-coordinate 模式。没有直接使用数学上的 sigma=0，是为了避免 EDM preconditioning/噪声嵌入在训练分布外出现数值或语义歧义；这项实验等价地隔离了 clean backbone 是否足够提供 AA 学习信号。
+
+两个实验使用完全相同的 32 个 PINDER 样本、crop 448、3000 steps 和 AA-only loss：
+
+| 配置 | Trainable params | Step 1000 acc | Step 1500 acc | Step 2000 acc | Step 3000 CE / acc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Head-only，Job 110421 | 1.30M | — | — | — | 2.384 / 22.81% |
+| Head + all 16 diffusion blocks，Job 110540 | 133.53M | 51.33% | 80.03% | 97.21% | **0.0051 / 99.95%** |
+
+All-16 的完整关键轨迹如下：
+
+| Step | PINDER train-window CE | PINDER train-window accuracy |
+| ---: | ---: | ---: |
+| 100 | 2.814 | 11.56% |
+| 500 | 2.319 | 25.61% |
+| 750 | 1.916 | 36.36% |
+| 1,000 | 1.477 | 51.33% |
+| 1,250 | 1.125 | 63.26% |
+| 1,500 | 0.646 | 80.03% |
+| 2,000 | 0.129 | 97.21% |
+| 2,500 | 0.0288 | 99.54% |
+| 3,000 | **0.0051** | **99.95%** |
+
+结论分两层：
+
+- 强结论：模型、AA loss、label、mask 和 optimizer 的组合具备完成训练集记忆的容量；“整个 NN 结构根本学不到 AA”被排除。
+- 尚不能下的结论：该模型已经学到了可泛化的 inverse folding。因为这里只有 32 个重复样本，还需要 held-out validation 和 shuffled-backbone/null-coordinate control 排除按样本身份或非几何上下文记忆。
+
+训练日志：
+
+- [`aa-clean-head-32-c448-110421.out`](../logs/training/stage3_binder/aa-clean-head-32-c448-110421.out)
+- [`aa-clean-all16-32-c448-110540.out`](../logs/training/stage3_binder/aa-clean-all16-32-c448-110540.out)
+
+All-16 checkpoint：
+
+```text
+/hai/scratch/shenjm/proteo_aa_runs/aa_clean_backbone_tiny_overfit/stage3_binder_coevolution/110540/checkpoints/step3000.pt
+```
+
+训练日志中的 Cα RMSD 约 0.10–0.16 Å 是 clean-input 单步诊断，不是 free-generation 结构质量；这里的 `lddt` 也是训练 loss 字段，不能当作生成 Cα lDDT。
+
+### 4.11 Kabsch 修正后的 free-generation 结构指标
+
+Job 110407 首次为 Job 109341 的 Gaussian-start 轨迹加入 Cα RMSD/lDDT/TM-score，但随后发现 Kabsch 旋转方向实现错误，因此其中约 22.9 Å 的 RMSD 已被修正后的 jobs 取代。
+
+修正结果：
+
+| Job | Sampler | Samples | Cα RMSD | BB RMSD | Cα lDDT | TM-score | Final AA acc |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 110423 | minimal Euler，20 steps | 64 | 18.884 Å | 18.825 Å | 0.2377 | 0.1096 | 8.28% |
+| 110424 | minimal Euler，400 steps | 8 | 19.518 Å | 19.461 Å | 0.2086 | 0.1154 | 9.46% |
+
+这两个 job 的样本数和 retry 后实际样本集合不同，因此不能严格断言 400 steps 比 20 steps 更差；但它们共同说明当前 minimal Euler sampler 下的 free-generated binder 与 PINDER native backbone 相差很远。此前训练日志中约 3.4 Å 的 monomer validation RMSD 与这里也不能直接比较：数据集、任务、起点和评估对象均不同。
+
+日志：
+
+- [`pinder-kfix-n20-110423.out`](../logs/validation/pinder_binder_backbone_inputs/pinder-kfix-n20-110423.out)
+- [`pinder-kfix-n400-110424.out`](../logs/validation/pinder_binder_backbone_inputs/pinder-kfix-n400-110424.out)
+
+### 4.12 原生 PXDesign sampler validation：当前无有效结果
+
+Job 110546 使用 Job 107904 step5000、8 个 PINDER 样本、400 steps，尝试恢复 PXDesign 的原生 `sample_diffusion`。8/8 样本全部在 wrapper 调用 Protenix diffusion module 时失败：
+
+```text
+TypeError: DiffusionModule.forward() missing 3 required positional arguments:
+'pair_z', 'p_lm', and 'c_l'
+ERROR: no PINDER inference samples completed
+```
+
+这是 native sampler compatibility wrapper 的接口错误，不是 checkpoint 性能。该 job 没有生成 `inference_summary.json`，所以不得引用任何结构或 AA 指标。另需注意，它评估的是旧主模型 `107904/step5000.pt`，并不是新完成的 all-16 tiny-overfit checkpoint。
+
+日志：[`pinder-native-n400-110546.err`](../logs/validation/pinder_binder_backbone_inputs/pinder-native-n400-110546.err)
+
 ## 5. 实验失败与工程修复
 
 这些失败属于运行或配置问题，不是模型结果：
 
 | Job/现象 | 原因 | 修复 |
 | --- | --- | --- |
+| 105659 | Slurm 非交互环境找不到 `conda` | 改为显式 source conda 环境初始化脚本 |
+| 108572 | 评估脚本构造的 argparse namespace 缺少 `resume_lr` | 让 evaluation config 与 training config 的必需字段同步 |
 | 108607/108608 | 多个 DataLoader worker 向共享 PINDER pdb 路径写 `.tmp`，触发 `PermissionError` | 改用用户可写的 `PINDER_PDB_CACHE=/hai/scratch/shenjm/pinder/2024-02/pdbs`，并配置独立 CIF cache |
 | 108897/108898 | forced-sigma 空列表进入 config manager，触发 `IndexError` | 显式区分未设置与空列表 |
 | 109120/109121 | `ml_collections.ConfigDict` 把 list 字段锁定成 string 类型，覆盖时报 `TypeError` | config 中先存 CSV string，构建后再解析为 float list |
 | 107381 | CUDA allocator 有大量 reserved-but-unallocated memory，出现碎片 OOM | 使用 expandable CUDA segments；107903/107904 未再因此 OOM |
 | 107902 | 调用了错误的 external code path | 修正运行环境/路径 |
+| 110407 | Kabsch 旋转方向写反，free-generation RMSD 偏高 | 修正实现并以 110423/110424 结果替代 |
+| 110546 | native sampler wrapper 未提供 `pair_z`、`p_lm`、`c_l` | 待在 wrapper 中补默认值并增加能覆盖真实 forward 签名的测试 |
 | `MaxSubmitJobsPerAccount` | Slurm account/QOS 的同时提交上限 | 取消不需要的 job 或等待队列名额；与训练代码无关 |
 
 另外，PXDesign atom-attention embedder 的 API 兼容性已经在 submodule commit `2202ad0` 修复。
@@ -311,71 +442,216 @@ Job 109342：
 | --- | --- | --- |
 | 两个 checkpoint 对不上 | 基本排除 | backbone 和 design-condition embedder 逐 tensor 一致 |
 | AA label 或 binder mask 错 | 未发现 | label 保存时机、selector 和严格重建检查均正确 |
-| AA head 被冻结/未进入 optimizer | 排除 | 参数有约 3.63% 相对变化；tiny-overfit 可持续提升 |
+| AA head 被冻结/未进入 optimizer | 排除 | 参数有约 3.63% 相对变化；all-16 tiny-overfit 达到 99.95% |
 | 单纯 AA LR 太低 | 不是完整解释 | 早期对照被 global clipping 混淆；独立 clipping 后 low-sigma 实验仍无改善 |
 | 只因最终 sigma 训练不足 | 不充分 | all-low warmup 无显著收益；free trajectory 中 sigma 0.4 readout 也更差 |
 | backbone 联合训练完全破坏 AA 表示 | 不支持 | fixed-native sigma 0.4 仍有约 15.8%，且 crop 448/512 结果一致 |
-| 表示能力/训练目标与 rollout 不匹配 | 强烈怀疑 | fixed-native 与 free rollout 差距大；step 4k→6k backbone 变好而 AA 不变 |
-| shallow AA head 容量不足 | 有证据但未完全证明 | 32-sample head-only 只能到约 20%；last-block 实验尚未做严格匹配 |
+| frozen representation 不足 | 强支持 | head-only 22.81%，严格 last-block 20.57%，all-16 99.95% |
+| 整个网络容量不足/NN 结构绝对学不到 | 排除训练集层面的说法 | all-16 已能完全记住 32 个 PINDER 样本 |
+| all-16 已学会可泛化 inverse folding | 未知 | 还没有用 110540 step3000 做 held-out 或 shuffled-backbone control |
+| train–rollout distribution shift | 强烈怀疑 | fixed-native sigma 0.4 为 15.8%，Gaussian-start rollout 仅约 7.6–8.3% |
+| 一步到位 all-unmask 过难 | 合理但未做因果验证 | 当前没有序列反馈；confidence-best 只改变 readout，没有真正逐步 unmask |
+| 换 AA loss 就能解决主问题 | 暂不支持作为首要解释 | 标准 CE 在 all-16 overfit 中可降到 0.005；loss 本身并未阻止记忆 |
+| 类别分布影响 AA accuracy | 支持 | donor 预测集中在少数高频 AA，balanced accuracy/macro-F1 显著低于 raw accuracy |
+| free-generation Cα RMSD 已可靠评估 | 部分完成 | minimal sampler 的 Kabsch 指标已修正；原生 sampler 仍无有效结果 |
 
-## 7. 下一步实验优先级
+## 7. 上次会议讨论事项：现状与实验化定义
 
-### P0：严格匹配的 last-block tiny-overfit
+### 7.1 去掉 length 限制
 
-这是当前最关键的诊断实验。它必须与 job 109152 保持相同的 32 samples、全 sigma 0.04、无 position augmentation 和 1500 steps，只改变：
+当前并不只有一个“length 限制”：
 
-- 解冻最后一个 diffusion transformer block；
-- trunk LR 提到 `1e-4`；
-- trunk gradient scale 从 0.1 提到 1.0；
-- head LR 保持 `3e-4`。
+- index 过滤默认 `COMPLEX_MAX_N_TOKEN=1536`；
+- 实际模型输入仍受 `CROP_SIZE=448/512` 限制；
+- binder 必须完整保留，且默认不能超过 crop 的 75%；
+- 总 complex 超过 crop 时只保留 binder 和距 binder 最近的 receptor tokens。
 
-解释标准：
+因此只去掉 index 过滤并不等价于模型看见完整长复合物，反而可能让更多样本被 crop/retry。建议把会议项定义为一个独立数据实验：取消或显著提高 `complex-max-n-token`，保留 binder-complete crop，并按 binder length/complex length 分桶报告接受率、OOM、吞吐和 AA recovery。若目标是完整长复合物，则需要 dynamic batching、gradient accumulation 或更大 crop，而不是只删一行过滤。
 
-- 若 accuracy 明显超过 30% 且仍在上升，说明 trunk representation 可以被 AA supervision 改造；下一步应做 rollout-aware/on-policy AA training。
-- 若仍停在约 20%，说明单个最后 block 加 shallow head 仍不足，应优先设计独立的 inverse-folding head，而不是继续堆低 sigma warmup。
+状态：**未完成**。
 
-截至本文整理时，这个严格匹配实验是“计划运行/等待结果”，不能与已完成的 job 109342 混为一谈。
+### 7.2 “跃迁”的问题
 
-还需要注意：当前未提交的 `submit_aa_lastblock_tiny_overfit.sh` 仍硬编码 sigma 0.04/0.4 交替和 `--trunk-grad-scale 0.1`，对应的是 job 109342 的旧配置；在提交 P0 前必须把它改成全 sigma 0.04 和 trunk gradient scale 1.0，不能只设置 `TRUNK_LR=1e-4` 就当作严格匹配实验。
+这里建议把“跃迁”明确成两个可测量现象：
 
-### P1：1-sample memorization sanity check
+1. diffusion trajectory 中相邻 sigma 的 logits 是否突然改变，而不是平滑演化；
+2. sequence 从 all-mask 一步变成完整序列时，是否因为缺少中间条件而发生困难的离散跃迁。
 
-如果 P0 仍然弱，把 `TINY_SAMPLES` 降到 1。若单样本都不能接近完全记忆，应继续查表示、重复采样是否真正固定、loss normalization 和 optimizer update；若单样本可记忆而 32 样本不行，则更支持容量或表示可分性不足。
+Job 109341 已记录 final、target-sigma 和 confidence-best 三种 readout，但没有完整量化每一步的 logits 动态。下一次评估应保存每一步的 entropy、top-1 margin、相邻步 KL divergence、top-1 flip rate、预测氨基酸频率和 native accuracy，并按 sigma 作图。这样可以区分“结构轨迹本身坏掉”和“AA logits 在末端突然塌缩”。
 
-### P2：Rollout-aware AA supervision
+状态：**部分完成，缺完整 trajectory distribution 分析**。
 
-在训练中周期性使用模型自己 rollout 得到的中间/后期结构状态，再对这些 on-policy states 计算 AA CE。目标是缩小 noisy-native 与 Gaussian-start rollout 之间的状态分布差距。该实验应先从短程、冻结大部分 backbone 的版本开始，控制显存和训练不稳定性。
+### 7.3 允许 parameter 更新
 
-### P3：更强的 inverse-folding head
+已经完成从 frozen head-only 到 last-block，再到 all-16 blocks 的容量实验：
 
-如果 tiny-overfit 表明浅层 readout 是瓶颈，应增加显式几何/邻域建模，例如 residue-level graph/message passing 或小型 sequence transformer，并直接以最终/中间 backbone 几何为条件预测 AA。ProteinMPNN 在已有 monomer benchmark 上，GT-backbone recovery 为 46.25%，predicted-backbone recovery 为 33.38%，远高于当前 donor 的约 13%，说明专门的 inverse-folding architecture 值得作为基线；但该数字来自 monomer，不可直接当成 PINDER binder 对照。
+- head-only：22.81%；
+- head + last block：20.57%；
+- head + all 16 blocks：99.95%。
 
-### P4：类别不均衡处理与诊断
+这个方向已经得到决定性结果：深层参数必须允许适配，至少“只动最后一层”不够。下一步不是重复 all-16，而是用完全相同设置做 4/8/12-block depth sweep，并在 held-out PINDER 上比较，以找到最小有效解冻深度并控制 backbone prior 被破坏的风险。
 
-继续报告 per-class recall、balanced accuracy、macro-F1 和预测频率。可以在保证固定评估协议的前提下比较 class-weighted CE、label smoothing 或 balanced sampler，但它们应排在 representation/rollout mismatch 诊断之后。
+状态：**容量 sanity check 已完成，最小解冻深度未完成**。
 
-## 8. 已完成的代码改动与 Git 状态
+### 7.4 只给 backbone、sigma 接近 0 能否学 AA type
+
+Job 110421/110540 已通过 clean-coordinate 模式回答大部分问题：输入 native clean backbone，不添加 coordinate noise，但保留 sigma=0.04 conditioning。
+
+- 只训练 shallow head：只能到 22.81%；
+- 允许全部 diffusion blocks 适配：达到 99.95%。
+
+所以 clean backbone 中存在足够信息，但 frozen representation 没有把它编码成容易被当前 head 读取的形式。严格数学意义的 sigma=0 尚未运行；考虑到 EDM preconditioning 通常不把 0 当作普通训练 sigma，当前 clean-coordinate + sigma=0.04 是更安全、也更能回答科学问题的对照。
+
+状态：**训练集容量问题已回答；泛化未回答**。
+
+### 7.5 Sanity check：backbone 是否只在最后一步起作用
+
+目前还没有完成这个因果实验。现有 trajectory readout 只是在不同 step 读取 logits，并没有控制“什么时候把 backbone 信息提供给 AA 模块”。
+
+建议做三个严格对照：
+
+- `backbone_every_step`：每一步都使用当前 backbone；
+- `backbone_final_only`：此前步骤给 null/shuffled backbone，只在最后一步给真实 backbone；
+- `backbone_never`：所有步骤都给 null/shuffled backbone。
+
+同时固定 noise、样本和 unmask schedule。如果 `final_only ≈ every_step`，说明序列通路几乎只利用最终 backbone；如果 `every_step` 更好，则说明应让中间 AA prediction 反馈到后续 diffusion。
+
+状态：**未完成**。
+
+### 7.6 修改 AA CE 或使用其他 loss
+
+已做的 loss 变化主要是 sigma weighting，并未改善 frozen-head 结果；尚未系统比较类别相关 loss。All-16 用普通 CE 可以完全记忆训练集，因此“CE 数学形式导致完全学不到”已被排除，但类别塌缩和泛化仍可能受 loss 影响。
+
+建议在固定 architecture、固定 sampler 和固定 held-out set 下依次比较：
+
+1. plain CE 基线；
+2. inverse-sqrt-frequency weighted CE；
+3. logit-adjusted CE；
+4. focal loss；
+5. 小幅 label smoothing。
+
+选择指标不能只看 accuracy，还要看 CE、balanced accuracy、macro-F1、per-class recall、top-5 accuracy 和预测分布。不要同时改 loss、解冻深度和 sampler，否则无法归因。
+
+状态：**sigma weighting 已做；类别 loss sweep 未完成**。
+
+### 7.7 Residue type 的训练与预测分布
+
+已知 donor 存在明显塌缩：预测主要集中在 LEU、VAL、GLY、GLU、ALA，多个低频 residue recall 为 0。Stage III fixed-sigma 评估也显示 balanced accuracy/macro-F1 明显低于 raw accuracy。
+
+仍需统一输出四组 histogram：训练 label、validation label、模型 top-1 prediction、模型 softmax probability mass，并按 source、sigma、trajectory step、binder length 和 interface/core residue 分层。若问题主要来自高频 AA，可以比较 balanced sampling、inverse-sqrt class weight 或 logit adjustment；激进 inverse-frequency weighting 容易让稀有类过补偿，不建议作为第一版。
+
+状态：**已有 donor/per-class 证据，尚未覆盖最新 all-16 与完整 trajectory**。
+
+### 7.8 PLM 如何学习 sequence probability
+
+这部分尚未在当前代码中实验。可借鉴 masked language modeling / discrete denoising 的核心思想：模型学习的是条件分布，而不是一次性回归最终类别。对本项目最相关的用法有三种：
+
+- 用冻结 PLM 给 binder sequence 提供先验 logits，与结构 AA logits 做可学习融合；
+- 用 PLM teacher distribution 做 KL/distillation，而不是只对 one-hot native label 做 CE；
+- 把当前 all-mask objective 改成多 mask-ratio 的 masked-token denoising，让模型训练时看到部分已知 sequence context。
+
+必须避免把 native binder sequence 作为推理不可得输入泄漏给模型。PLM 应作为 prior、teacher 或已生成 token 的编码器，而不能直接读取完整答案。第一步应先建立 frozen-PLM prior baseline，比较 sequence NLL/perplexity 和结构条件加入后的增益。
+
+状态：**未开始**。
+
+### 7.9 按顺序 unmask，并从最高 confidence 开始
+
+Job 109341 的 `confidence_best` 只是从各 diffusion step 选择一次最高置信度 readout，没有把选出的 residue 固定并反馈给后续网络，因此它不是完整的 confidence-first iterative unmask。它低于 final readout，不能否定真正的 iterative decoding。
+
+建议采用 MaskGIT 风格实验：
+
+1. 初始全部 binder residues masked；
+2. 每轮按 confidence 固定一部分 residue；
+3. 下一轮把已固定 AA 重新输入 trunk；
+4. 低置信度 residue 保持 masked，必要时允许 remask；
+5. 比较 linear/cosine unmask fraction schedule，以及 confidence、随机、N→C、interface-first 四种 order。
+
+每轮记录 logits entropy、confidence calibration、AA frequency 和 token flip rate。这个实验需要训练时也包含 partial mask，否则推理会再次落入新的 distribution shift。
+
+状态：**readout 版已做，真正的反馈式 iterative unmask 未完成**。
+
+### 7.10 一步到位可能太难
+
+当前证据支持这一担忧：训练和推理的 binder residue 全部同时 masked，`aa_t=1`，已预测 sequence 不会反馈给 trunk；free rollout 最终 accuracy 仅约 8%。但 clean all-16 能记住训练样本，说明一步到位不是绝对不可学习，而更可能是数据效率和泛化很差。
+
+实验上应比较：
+
+- all-mask one-shot；
+- 随机 partial-mask denoising；
+- confidence-first iterative unmask；
+- teacher-forced 已知 token 比例 curriculum。
+
+状态：**假设得到间接支持，直接 A/B 未完成**。
+
+### 7.11 高频 residue 与 loss 改进
+
+该问题与 7.6/7.7 相连。需要区分两件事：native 数据本身频率不均衡，与模型预测比 native 更严重地集中在少数类别。建议先做 logit-adjustment 和 inverse-sqrt-frequency CE 两个温和对照，并明确报告预测/标签 frequency ratio。若某些 AA 在合理 interface 环境中仍几乎从不出现，再考虑 class-balanced sampler 或 focal loss。
+
+状态：**诊断部分完成，loss 对照未完成**。
+
+## 8. 下一步实验优先级
+
+### P0：修复并重跑原生 PXDesign sampler validation
+
+先补齐 native sampler wrapper 的 `pair_z=None`、`p_lm=None`、`c_l=None`，加入真实签名覆盖测试，然后在完全相同的 8 个 PINDER complexes 上比较 minimal Euler 与 PXDesign native sampler。只有这一步完成后，才能判断 18–20 Å 的 free-generation RMSD 是模型能力还是采样器实现造成的。
+
+### P1：验证 all-16 到底学了什么
+
+对 `110540/step3000.pt` 做以下三项成对评估：
+
+1. 同一 32 个训练样本上的 clean/low-sigma recovery；
+2. held-out PINDER 上的 clean/low-sigma recovery；
+3. shuffled/null backbone control。
+
+只有 held-out 提升且 shuffled backbone 明显下降，才能说模型学到了可泛化的 geometry→AA mapping。
+
+### P2：解冻深度 sweep
+
+在相同 32-sample、clean-coordinate 设置下比较 4/8/12/16 blocks；根据训练集是否能记忆和 held-out 是否提升选择最小有效深度。同步检查 monomer backbone validation，避免 AA 适配破坏 fold prior。
+
+### P3：partial-mask 与 confidence-first iterative unmask
+
+先训练多 mask-ratio objective，再比较 one-shot 与反馈式 iterative decoding。完整保存 logits/entropy/KL/flip-rate trajectory，用于分析会议提到的“跃迁”。
+
+### P4：rollout-aware AA supervision
+
+在训练中周期性使用模型自身 rollout 的中间/后期状态计算 AA CE，缩小 noisy-native 与 Gaussian-start state distribution shift。先做短 rollout、小 batch 和有限解冻，控制显存与稳定性。
+
+### P5：residue distribution 与 loss sweep
+
+固定 P1/P2 选出的 architecture 后，比较 plain CE、inverse-sqrt weighted CE、logit-adjusted CE、focal loss 和 label smoothing。以 balanced accuracy、macro-F1、per-class recall 和 calibration 为主，不能只看 raw accuracy。
+
+### P6：PLM sequence prior
+
+先建立 frozen-PLM sequence prior 与 distillation baseline，再考虑结构 logits 融合。该方向改动更大，应该放在 representation、sampler 和 iterative unmask 的基本问题得到澄清之后。
+
+### P7：长度泛化
+
+去掉/提高 index length filter，按长度分桶验证 crop 接受率、吞吐、OOM、AA recovery 和 backbone quality；如需完整长复合物，再引入动态 token batching 或更大 crop。
+
+## 9. 已完成的代码改动与 Git 状态
 
 已提交到 `sjm/binder-design-training` 的主要 commit：
 
 - `148eb18`：增加 source-specific AA metrics、AA head optimizer group/LR、gradient/update norm、PINDER evaluation、用户可写 cache 和 Stage III 对照提交脚本。
 - `2b2c5e2`：增加 AA head 独立 gradient clipping、forced-sigma sampler、sigma weighting/per-sigma diagnostics、PINDER fixed-sigma comparison 和 low-sigma/tiny-overfit 脚本。
 - `f1560e1`：更新 PXDesign embedder compatibility；对应 PXDesign submodule commit 为 `2202ad0`。
+- `d434e8d`：增加 binder AA 诊断与 clean-coordinate/解冻实验支持，并修复结构指标实现。
 
-截至整理时仍有未提交的实验性改动：
+截至 2026-09-05，分支 `sjm/binder-design-training` 比远端领先 1 个 commit；以下 native sampler 实验性改动仍未提交：
 
 - `pxdesign_train/cogenerate.py`
-- `scripts/training/train_protenix_monomer.py`
 - `tests/test_complete_unmask.py`
 - `scripts/evaluation/infer_aa_readouts_pinder.py`
 - `scripts/evaluation/slurm_infer_pinder_aa_readouts.sh`
-- `scripts/evaluation/submit_stage3_pinder_sigma_sweep.sh`
-- `scripts/training/submit_aa_lastblock_tiny_overfit.sh`
+- 本文档 `docs/aa_head_binder_experiments_zh.md`
 
-这些改动包含三个同轨迹 AA readout、`--unfreeze-last-diffusion-blocks`、PINDER sigma sweep/trajectory evaluation 脚本和相应测试。已有测试记录为 **59 passed**，PINDER dry-run 通过，并确认配置可以只解冻 AA head 与最后一个 diffusion block。工作区中的 `tmp.sh` 未纳入本次实验改动。
+这些未提交改动包含 PXDesign native sampler bridge、默认 native sampler 的 evaluation CLI 和相应测试。现有测试没有覆盖真实 Protenix forward 的三个必需参数，因此 Job 110546 暴露了接口缺口；修复并验证前不应提交该 bridge。工作区中的 `tmp.sh` 仍为用户的 untracked 文件，不纳入实验代码。
 
-## 9. 最终判断
+## 10. 最终判断
 
-Stage III mixed-data 训练对 crop-448 的 backbone 学习是有效的，而且没有损坏 monomer fold prior；真正没有随训练改善的是 AA prediction。现有证据表明 AA 通路能学到少量结构信号，但 donor 起点已经较弱、类别预测塌缩明显，并且 one-step noisy-native training 与 free rollout 之间存在较大的表示分布差异。low-sigma warmup、提高 head LR、detach 和简单更换 readout 都没有解决问题。
+Stage III mixed-data crop-448 对 monomer backbone validation 有效，并且优于 crop-512 的稳定性；但主训练 AA prediction 从 step 4000 到 6000 基本不变。单纯提高 head LR、detach、low-sigma warmup、sigma reweighting和更换 trajectory readout 都没有解决该问题。
 
-最合理的下一步不是继续盲目延长主训练，而是先用严格匹配的 last-block tiny-overfit 判断 representation 是否可被局部调整；随后根据结果选择 rollout-aware supervision 或更强的 inverse-folding head。
+All-16 clean-backbone tiny-overfit 达到 99.95%，使当前判断发生了重要更新：模型不是绝对学不到，而是需要深层 representation adaptation；现有 shallow/frozen 设置不足。与此同时，这一结果仍可能只是 32-sample memorization，不能代表 held-out 泛化。
+
+最合理的近期路线是：先修复原生 sampler、再对 all-16 checkpoint 做 held-out 与 shuffled-backbone 对照，然后定位最小解冻深度。完成这三步后，再进入 partial-mask/confidence-first unmask、rollout-aware supervision、类别 loss 和 PLM prior。这样每一步都能回答一个明确问题，避免同时改 architecture、loss 和 inference 后无法归因。

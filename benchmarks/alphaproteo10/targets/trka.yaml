@@ -1,0 +1,27 @@
+# TrkA -- AlphaProteo binder-design target
+#
+# Source: AlphaProteo (Zambaldi et al., arXiv:2409.08022) Table S1, p38 --
+# "Binder design problem specifications for in silico benchmarking and
+# experimental testing". PDB ID, chain/residue ranges and hotspots are
+# transcribed from there; PXDesign's technical report Table 3 reproduces the
+# same values for the six targets it lists, so the two agree except where
+# noted.
+#
+# AlphaProteo's own benchmark binder length for this target: 50-120.
+# A-CODE (arXiv:2605.03360 S4.2) instead samples 80-130 uniformly across all
+# ten targets, 328-728 designs each. `binder_length` below follows A-CODE,
+# because reproducing its Table 4 is the point; AlphaProteo's per-target range
+# is recorded above so the other convention stays available.
+#
+# MSA is left unset. PXDesign calls it optional but recommended, and its
+# published numbers were produced with one, so a run without MSA is not
+# comparable to the Table 4 baselines.
+
+target:
+  file: "./benchmarks/alphaproteo10/structures/1www.cif"
+  chains:
+    X:
+      crop: ["282-382"]
+      hotspots: [294, 296, 333]
+
+binder_length: 105   # midpoint of A-CODE's 80-130; sweep the range for a full run

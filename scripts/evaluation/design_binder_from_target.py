@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""Design a binder de novo against a target structure.
+
+Every existing inference path in this repo starts from a complex that already
+contains the binder -- training scrubs a real chain and asks the model to
+rebuild it. De novo design has no such chain: the input is a target, an epitope,
+and a length. This builds the missing half.
+
+    python scripts/evaluation/design_binder_from_target.py \
+        --target benchmarks/alphaproteo10/targets/pdl1.yaml \
+        --checkpoint <ckpt.pt> --out designs/
+
+NUMBERING. Target configs carry AUTHOR numbering, because that is what
+AlphaProteo's Table S1 and PXDesign's technical report publish and staying in it
+keeps a config checkable against the paper it came from. Protenix renumbers on
+parse: 5o45 chain A is auth 17-145 and becomes res_id 1-129. The two conventions
+differ by a per-chain offset, and PXDesign's own PDL1 example is written in the
+*parsed* one -- its `crop: ["1-116"]` and `hotspots: [40, 99, 107]` are exactly
+this file's auth 17-132 / [56, 115, 123] after conversion, which is the check
+that the mapping here is right. Reading a config in the wrong convention selects
+the wrong residues and reports no error.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+import yaml
+
+HERE = Path(__file__).resolve().parents[2]
+for p in (HERE, HERE / "Protenix", HERE / "PXDesign"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+logger = logging.getLogger(__name__)
+
+# The design-token residue name. The featurizer rewrites binder residues to this
+# and reduces them to four backbone atoms before featurisation, so a fabricated
+# binder does not need real identities -- only a valid backbone shape.
+XPB = "xpb"
+BACKBONE = ("N", "CA", "C", "O")
+
+
+# --------------------------------------------------------------------------
+# config
+# --------------------------------------------------------------------------
+
+def load_target_config(path: str | Path) -> dict:
+    """Read a target yaml into {file, chains: {id: (crops, hotspots)}, length}."""
+    cfg = yaml.safe_load(Path(path).read_text())
+    target = cfg["target"]
+    chains = {}
+    for chain_id, props in (target["chains"] or {}).items():
+        props = props or {}
+        crops = []
+        for span in props.get("crop", []) or []:
+            lo, hi = (int(x) for x in str(span).split("-"))
+            crops.append((lo, hi))
+        chains[str(chain_id)] = (crops, [int(h) for h in props.get("hotspots", []) or []])
+    # Paths in the configs are written relative to the repo root, which is where
+    # they are meant to be read from and where the download script puts the
+    # structures. Resolving against the config's own directory instead would
+    # work only when run from one particular place.
+    raw = target["file"]
+    structure = raw if os.path.isabs(raw) else str(HERE / raw.lstrip("./"))
+    return {
+        "file": structure,
+        "chains": chains,
+        "binder_length": int(cfg["binder_length"]),
+        "name": Path(path).stem,
+    }
+
+
+# --------------------------------------------------------------------------
+# target
+# --------------------------------------------------------------------------
+
+def parse_and_crop(structure_path: str, chains: dict) -> tuple[Any, np.ndarray]:
+    """Parse the structure and keep only the configured author-numbered spans.
+
+    Returns the cropped AtomArray and, per kept atom, whether it is a hotspot.
+    """
+    from protenix.data.pipeline.data_pipeline import DataPipeline
+
+    _, bio = DataPipeline.get_data_from_mmcif(
+        mmcif=structure_path, pdb_cluster_file=None, dataset="WeightedPDB"
+    )
+    if "atom_array" not in bio:
+        raise RuntimeError(f"could not parse {structure_path}")
+    atoms = bio["atom_array"]
+
+    # auth_seq_id is a string annotation and non-polymer rows (waters, glycans,
+    # buffer) can carry an empty one, so a blanket astype(int) raises on most
+    # structures. 5o45 happens to have none, which is how this passed on PDL1
+    # and failed on the other nine. Blanks become -1, which no crop selects --
+    # and every selection below is already restricted to protein atoms.
+    raw = np.asarray(atoms.auth_seq_id, dtype=str)
+    auth = np.full(raw.shape, -1, dtype=np.int64)
+    numeric = np.char.isdigit(np.char.lstrip(raw, "-"))
+    auth[numeric] = raw[numeric].astype(np.int64)
+    keep = np.zeros(atoms.array_length(), dtype=bool)
+    hotspot = np.zeros(atoms.array_length(), dtype=bool)
+
+    for chain_id, (crops, hotspots) in chains.items():
+        # Author chain id, not the renumbered one, for the same reason as the
+        # residue numbers: it is what the published table names.
+        on_chain = (atoms.auth_asym_id == chain_id) & (atoms.mol_type == "protein")
+        if not on_chain.any():
+            raise ValueError(
+                f"chain {chain_id} has no protein atoms "
+                f"(structure has {sorted(set(atoms.auth_asym_id))})"
+            )
+        for lo, hi in crops:
+            span = on_chain & (auth >= lo) & (auth <= hi)
+            if not span.any():
+                raise ValueError(
+                    f"chain {chain_id} crop {lo}-{hi} selected nothing; the "
+                    f"chain spans {auth[on_chain].min()}-{auth[on_chain].max()} "
+                    f"in author numbering"
+                )
+            keep |= span
+        for h in hotspots:
+            at = on_chain & (auth == h)
+            if not at.any():
+                raise ValueError(f"chain {chain_id} hotspot {h} not present")
+            hotspot |= at
+
+    if not keep.any():
+        raise ValueError("crop selected no atoms at all")
+    return atoms[keep], hotspot[keep]
+
+
+# --------------------------------------------------------------------------
+# binder
+# --------------------------------------------------------------------------
+
+def fabricate_binder(template: Any, length: int, chain_id: str = "Z") -> Any:
+    """Build `length` placeholder residues to stand in for the binder.
+
+    There is no binder yet, so its atoms have to be invented -- but every
+    Protenix annotation (ref_pos, tokatom_idx, centre_atom_mask, ...) has to
+    stay internally consistent or tokenisation and featurisation fail in ways
+    that do not name this as the cause. Rather than construct them, take real
+    backbone atoms from the target and relabel: the annotations then come along
+    already valid, and the featurizer rewrites the identities to `xpb` and keeps
+    only N/CA/C/O anyway, so the borrowed residue types never reach the model.
+
+    Coordinates are placeholders too. Sampling initialises the design region
+    from noise (`cogenerate` seeds x from the schedule), so these are consumed
+    only by featurisation, never as a target or a starting point.
+    """
+    import biotite.structure as struc
+
+    bb = np.isin(template.atom_name, BACKBONE) & (template.mol_type == "protein")
+    if not bb.any():
+        raise ValueError("target has no protein backbone atoms to borrow from")
+
+    # Whole residues only, and only residues with all four backbone atoms: a
+    # partial residue would give the frame builder an incomplete N/CA/C.
+    donors = []
+    for key in dict.fromkeys(zip(template.chain_id[bb], template.res_id[bb])):
+        sel = bb & (template.chain_id == key[0]) & (template.res_id == key[1])
+        if set(template.atom_name[sel]) >= set(BACKBONE):
+            donors.append(sel)
+    if not donors:
+        raise ValueError("no complete N/CA/C/O residue in the target to borrow")
+
+    picks = [donors[i % len(donors)] for i in range(length)]
+    binder = template[picks[0]]
+    for sel in picks[1:]:
+        binder += template[sel]
+
+    n_res = length
+    per_res = binder.array_length() // n_res
+    if per_res * n_res != binder.array_length():
+        raise RuntimeError("borrowed residues are not uniform in atom count")
+
+    binder.chain_id = np.array([chain_id] * binder.array_length())
+    binder.auth_asym_id = np.array([chain_id] * binder.array_length())
+    ids = np.repeat(np.arange(1, n_res + 1), per_res)
+    binder.res_id = ids
+    binder.auth_seq_id = ids.astype(template.auth_seq_id.dtype)
+    if "label_seq_id" in binder.get_annotation_categories():
+        binder.label_seq_id = ids.astype(template.label_seq_id.dtype)
+
+    # Representative-atom masks have to be re-pointed at CA. They are copied
+    # along with the borrowed atoms, and for most residues they mark CB -- which
+    # a backbone-only binder does not have, so the residue silently loses its
+    # representative and disappears from every per-token computation. The
+    # symptom is not an error but a token count that is too small: 105 fabricated
+    # residues came through as 6, the glycines, whose representative is CA
+    # already.
+    is_ca = binder.atom_name == "CA"
+    for mask_name in ("distogram_rep_atom_mask", "centre_atom_mask",
+                      "plddt_m_rep_atom_mask"):
+        if mask_name in binder.get_annotation_categories():
+            current = getattr(binder, mask_name)
+            binder.set_annotation(mask_name, is_ca.astype(current.dtype))
+
+    # Displace so the placeholder does not sit inside the target. The sampler
+    # overwrites these, but featurisation computes neighbour-dependent features
+    # and coincident atoms would make those meaningless.
+    span = template.coord.max(axis=0) - template.coord.min(axis=0)
+    binder.coord = binder.coord + np.array([span[0] + 30.0, 0.0, 0.0], dtype=np.float32)
+    return binder
+
+
+# --------------------------------------------------------------------------
+# features
+# --------------------------------------------------------------------------
+
+def build_features(target: Any, binder: Any, hotspot_on_target: np.ndarray) -> dict:
+    """Assemble target + fabricated binder into what the model consumes.
+
+    Re-tokenises rather than patching the target's token array: the binder adds
+    tokens, and every downstream index (atom_to_token_idx, centre atoms, the
+    side-chain backbone gather) is positional.
+    """
+    import biotite.structure as struc
+    from protenix.data.core.featurizer import Featurizer
+    from protenix.data.tokenizer import AtomArrayTokenizer
+    from protenix.data.utils import data_type_transform, make_dummy_feature
+
+    from pxdesign_train.data import DesignFeaturizer, DesignSelection
+
+    combined = target + binder
+    is_binder = np.concatenate(
+        [np.zeros(target.array_length(), bool), np.ones(binder.array_length(), bool)]
+    )
+    hotspot_atoms = np.concatenate(
+        [hotspot_on_target, np.zeros(binder.array_length(), bool)]
+    )
+
+    token_array = AtomArrayTokenizer(combined).get_token_array()
+    feat = Featurizer(
+        cropped_token_array=token_array,
+        cropped_atom_array=combined,
+        ref_pos_augment=False,   # inference: no augmentation
+        lig_atom_rename=False,
+    )
+    feature_dict = feat.get_all_input_features()
+    label_dict = feat.get_labels()
+    feature_dict = make_dummy_feature(
+        features_dict=feature_dict, dummy_feats=["msa", "template"]
+    )
+    feature_dict = data_type_transform(feat_or_label_dict=feature_dict)
+    label_dict = data_type_transform(feat_or_label_dict=label_dict)
+    feature_dict["is_distillation"] = torch.tensor([False])
+
+    selection = DesignSelection(
+        binder_atom_mask=is_binder,
+        # The training featurizer *samples* hotspots from Ca-Ca contacts, which
+        # is right for training -- the model has to work with zero, few or many.
+        # At inference they are given, so sampling is switched off here and the
+        # channel is written directly below.
+        hotspot_force_zero_prob=1.0,
+        compute_sidechain=True,
+        backbone_only_binder=True,
+    )
+    feature_dict, label_dict, _ = DesignFeaturizer(selection).transform(
+        combined, feature_dict, label_dict
+    )
+
+    # Hotspots, per token. `atom_to_token_idx` maps atoms to tokens, so an atom
+    # mask becomes a token mask by scatter.
+    a2t = feature_dict["atom_to_token_idx"].long()
+    n_token = int(feature_dict["residue_index"].shape[0])
+    hotspot = torch.zeros(n_token, dtype=torch.float32)
+    hotspot[a2t[torch.from_numpy(hotspot_atoms)]] = 1.0
+    feature_dict["hotspot"] = hotspot
+
+    return feature_dict, label_dict, combined, is_binder
+
+
+# --------------------------------------------------------------------------
+# generate
+# --------------------------------------------------------------------------
+
+def design(model, feature_dict: dict, *, n_step: int = 20, device: str = "cpu",
+           **cogen_kwargs) -> dict:
+    """Sample one binder. Returns cogenerate's output dict."""
+    from pxdesign_train.cogenerate import cogenerate
+
+    feat = {
+        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+        for k, v in feature_dict.items()
+    }
+    model = model.to(device).eval()
+    with torch.no_grad():
+        return cogenerate(model, feat, N_step=n_step, **cogen_kwargs)
+
+
+def write_cif(path: str | Path, atoms: Any, coords: np.ndarray,
+              is_binder: np.ndarray, sequence: np.ndarray) -> None:
+    """Write the designed complex, binder identities filled in."""
+    import biotite.structure.io.pdbx as pdbx
+
+    from pxdesign_train.cogenerate import _AA3
+
+    out = atoms.copy()
+    out.coord = np.asarray(coords, dtype=np.float32)
+
+    # `sequence` is indexed by TOKEN over the whole complex, -1 where nothing was
+    # designed -- not by binder residue. Taking the first N entries would read
+    # the target's tokens and leave the binder as xpb, which looks like the model
+    # produced no sequence at all.
+    res_names = out.res_name.copy()
+    seq = np.asarray(sequence)
+    designed = seq[seq >= 0]
+    binder_res = list(dict.fromkeys(out.res_id[is_binder]))
+    if len(designed) != len(binder_res):
+        logger.warning("%d designed identities for %d binder residues",
+                       len(designed), len(binder_res))
+    for res, aa in zip(binder_res, designed):
+        res_names[is_binder & (out.res_id == res)] = _AA3[int(aa)]
+    out.set_annotation("res_name", res_names)
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    f = pdbx.CIFFile()
+    pdbx.set_structure(f, out)
+    f.write(str(path))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--target", required=True, help="target yaml")
+    ap.add_argument("--checkpoint", default=None,
+                    help="model weights; omitted runs an untrained model, which "
+                         "checks the plumbing and nothing else")
+    ap.add_argument("--out", default="designs")
+    ap.add_argument("--n-step", type=int, default=20)
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    torch.manual_seed(args.seed)
+
+    cfg = load_target_config(args.target)
+    logger.info("target %s: %s, binder length %d",
+                cfg["name"], Path(cfg["file"]).name, cfg["binder_length"])
+
+    target, hotspot = parse_and_crop(cfg["file"], cfg["chains"])
+    binder = fabricate_binder(target, cfg["binder_length"])
+    feature_dict, _, combined, is_binder = build_features(target, binder, hotspot)
+    logger.info("  %d tokens (%d design), %d hotspot",
+                int(feature_dict["residue_index"].shape[0]),
+                int(feature_dict["design_token_mask"].sum()),
+                int(feature_dict["hotspot"].sum()))
+
+    model = build_model(args.checkpoint, args.device)
+    out = design(model, feature_dict, n_step=args.n_step, device=args.device)
+
+    dest = Path(args.out) / f"{cfg['name']}_design.cif"
+    write_cif(dest, combined, out["coordinate"].squeeze(0).cpu().numpy(),
+              is_binder, out["sequence"].cpu().numpy())
+    logger.info("wrote %s", dest)
+    return 0
+
+
+def build_model(checkpoint: str | None, device: str):
+    """Instantiate the model, optionally loading weights."""
+    from protenix.config.config import parse_configs
+
+    from pxdesign_train.configs.configs_train import training_configs
+    from pxdesign_train.model import ProtenixDesignTrain
+
+    configs = parse_configs(training_configs, arg_str="")
+    configs.enable_sidechain = True
+    configs.enable_coevolution = True
+    model = ProtenixDesignTrain(configs)
+    if checkpoint:
+        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        missing, unexpected = model.load_state_dict(
+            state.get("model", state), strict=False
+        )
+        logger.info("  loaded %s (missing=%d, unexpected=%d)",
+                    checkpoint, len(missing), len(unexpected))
+    else:
+        logger.warning("  NO CHECKPOINT -- untrained weights, output is noise")
+    return model.to(device)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

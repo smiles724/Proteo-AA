@@ -1,0 +1,52 @@
+# H1 (influenza haemagglutinin) -- AlphaProteo binder-design target
+#
+# Source: AlphaProteo (Zambaldi et al., arXiv:2409.08022) Table S1, p38.
+#
+# RENUMBERED, and this is the one target where that matters. Table S1 gives
+#
+#     A1-50, A76-80, A107-111, A258-322,  B1-68, B80-170     hotspots B21, B45, B52
+#
+# which is HA numbering: HA1 and HA2 each counted from 1, as the influenza
+# literature writes them. 5vli does not deposit it that way. Its author
+# numbering starts HA1 at 5 and offsets HA2 by +500, so chain B's residues are
+# 501-670 and a literal "B1-68" selects nothing at all. Taken literally the
+# published spec silently yields an empty crop on chain B and a shifted one on
+# chain A -- no error, just the wrong epitope.
+#
+# The mapping below was read off 5vli itself, not assumed:
+#
+#     chain A   label   1-45  -> auth   5-49    (+4)
+#               label  46-322 -> auth  49-325   (+3)   one-residue insertion at 46
+#     chain B   label   1-170 -> auth 501-670   (+500)
+#
+# Giving:
+#
+#     A1-50    -> A5-53        B1-68   -> B501-568
+#     A76-80   -> A79-83       B80-170 -> B580-670
+#     A107-111 -> A110-114     B21/B45/B52 -> B521/B545/B552
+#     A258-322 -> A261-325
+#
+# `benchmarks/alphaproteo10/check_targets.py` verifies every range and hotspot
+# against the downloaded structure; it is what caught this.
+#
+# AlphaProteo's own benchmark binder length for this target: 40-120.
+# A-CODE (arXiv:2605.03360 S4.2) instead samples 80-130 uniformly across all
+# ten targets, 328-728 designs each. `binder_length` below follows A-CODE,
+# because reproducing its Table 4 is the point; AlphaProteo's per-target range
+# is recorded above so the other convention stays available.
+#
+# MSA is left unset. PXDesign calls it optional but recommended, and its
+# published numbers were produced with one, so a run without MSA is not
+# comparable to the Table 4 baselines.
+
+target:
+  file: "./benchmarks/alphaproteo10/structures/5vli.cif"
+  chains:
+    A:
+      crop: ["5-53", "79-83", "110-114", "261-325"]
+      # no hotspot on this chain; the epitope sits on chain B
+    B:
+      crop: ["501-568", "580-670"]
+      hotspots: [521, 545, 552]
+
+binder_length: 105   # midpoint of A-CODE's 80-130; sweep the range for a full run

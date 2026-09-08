@@ -4,6 +4,10 @@ Target specifications for the binder-design benchmark A-CODE reports in its
 Table 4, so our model can be scored on the same set as the numbers we would be
 compared against.
 
+For why this benchmark, what the metric measures, current status and what is
+still missing, see [`docs/binder_benchmark.md`](../../docs/binder_benchmark.md).
+This file is the data reference: where each number came from and how to check it.
+
 ## Why this set
 
 A-CODE (`arXiv:2605.03360`) benchmarks conditional binder design on ten targets

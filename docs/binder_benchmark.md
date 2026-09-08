@@ -99,6 +99,11 @@ One invocation produces one design. A full benchmark run loops it: A-CODE sample
 328–728 binders per target at lengths 80–130. Roughly 60 GPU-hours all in, so
 about 15 hours on four cards — compute is not the constraint here.
 
+**`binder_length` in the configs is a single value (105, the midpoint of
+A-CODE's range), not the range itself.** A run that leaves it there samples one
+length ten times over, which is not the published protocol; vary it per design to
+cover 80–130.
+
 **Which checkpoint.** One with all three components trained: backbone, AA head
 and side-chain module — i.e. the *output* of Stage III / binder training, not the
 Stage II and AA-head checkpoints it warm-starts from. Only after Stage III has
@@ -106,6 +111,14 @@ run has the co-evolution path been trained, and that is the thing under test.
 
 Without `--checkpoint` the script runs untrained weights and says so loudly. That
 checks the plumbing and nothing else.
+
+The load is validated: the `module.` prefix a multi-GPU run writes is stripped,
+and a checkpoint matching fewer than half the parameters raises instead of
+loading. Both matter because `strict=False` is otherwise required — a Stage III
+checkpoint legitimately lacks some buffers — and would turn a total mismatch into
+a silent no-op, leaving the model at its random initialisation while reporting
+success. If it refuses your checkpoint, that is the guard, not a bug: the message
+names the keys that did not match.
 
 ## What is missing
 

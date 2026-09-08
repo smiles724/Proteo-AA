@@ -377,11 +377,32 @@ def build_model(checkpoint: str | None, device: str):
     model = ProtenixDesignTrain(configs)
     if checkpoint:
         state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        missing, unexpected = model.load_state_dict(
-            state.get("model", state), strict=False
-        )
-        logger.info("  loaded %s (missing=%d, unexpected=%d)",
-                    checkpoint, len(missing), len(unexpected))
+        state = state.get("model", state)
+
+        # Strip the DDP prefix. Checkpoints saved from a multi-GPU run carry
+        # `module.` on every key -- the trainer removes it on load
+        # (runner/trainer.py) and this has to as well. Without it, and with
+        # strict=False below, NOTHING matches and the model runs on random
+        # weights while reporting success.
+        if any(k.startswith("module.") for k in state):
+            state = {k.removeprefix("module."): v for k, v in state.items()}
+
+        missing, unexpected = model.load_state_dict(state, strict=False)
+
+        # strict=False is needed -- a Stage III checkpoint legitimately lacks
+        # some buffers -- but it also turns a total mismatch into a silent
+        # no-op, so check that the load actually did something.
+        loaded = len(model.state_dict()) - len(missing)
+        if loaded < 0.5 * len(model.state_dict()):
+            raise RuntimeError(
+                f"{checkpoint} matched only {loaded} of "
+                f"{len(model.state_dict())} parameters -- wrong checkpoint, or a "
+                f"key prefix this does not handle. First unmatched keys: "
+                f"{sorted(unexpected)[:3]}"
+            )
+        logger.info("  loaded %s (%d/%d params, missing=%d, unexpected=%d)",
+                    checkpoint, loaded, len(model.state_dict()),
+                    len(missing), len(unexpected))
     else:
         logger.warning("  NO CHECKPOINT -- untrained weights, output is noise")
     return model.to(device)

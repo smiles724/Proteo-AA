@@ -31,7 +31,8 @@ Generation 使用当前 `proteoaa` 环境和 Protenix 2.0。AF2-IG/ProteinMPNN
 scoring 必须使用独立的 PXDesignBench v0.1.2 环境，因为官方 evaluator 依赖
 Protenix 0.5、JAX、ColabDesign，不能安装进当前训练环境。
 
-按 PXDesignBench 官方说明准备一次：
+conda 环境和 PXDesignBench 源码体积较小，可以留在 home；模型权重必须放在
+`/hai/scratch/shenjm`。先安装环境：
 
 ```bash
 git clone --branch v0.1.2 https://github.com/bytedance/PXDesignBench.git \
@@ -39,8 +40,20 @@ git clone --branch v0.1.2 https://github.com/bytedance/PXDesignBench.git \
 
 cd /hai/users/s/h/shenjm/tools/PXDesignBench-v0.1.2
 bash install.sh --env pxdbench --pkg_manager conda --cuda-version 12.1
-bash download_tool_weights.sh /hai/scratch/shenjm/pxdesign_tool_weights
 ```
+
+不要直接运行官方 `download_tool_weights.sh`：它还会下载 binder 流程不使用的约
+8 GB ESMFold 权重。使用仓库中的纯 CPU job，只下载/校验 AF2 和 ProteinMPNN：
+
+```bash
+cd /hai/users/s/h/shenjm/Proteo-AA
+mkdir -p logs/setup
+sbatch scripts/utilities/slurm_download_pxdesignbench_binder_weights.sh
+```
+
+该 job 的权重目录和临时目录分别是
+`/hai/scratch/shenjm/pxdesign_tool_weights` 与 `/hai/scratch/shenjm/tmp`；home 中只保留
+conda env 和约数 MB 的 PXDesignBench 源码。
 
 安装后应存在：
 

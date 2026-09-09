@@ -38,6 +38,7 @@ export PYTHONPATH="${REPO_ROOT}:${PXDESIGN_CODE_DIR}:${PROTENIX_CODE_DIR}${PYTHO
   --crop-size "${CROP_SIZE:-448}" \
   --max-samples "${MAX_SAMPLES:-64}" \
   --n-step "${N_STEP:-20}" \
+  --sampler-mode "${SAMPLER_MODE:-pxdesign_native}" \
   --aa-readout-sigma "${AA_READOUT_SIGMA:-0.4}" \
   --seed "${SEED:-42}" \
   --dtype "${DTYPE:-bf16}" \

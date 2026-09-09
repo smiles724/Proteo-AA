@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Evaluate AA readouts and final structure during true PINDER cogeneration.
 
-Native coordinates and labels are retained on CPU until generation completes.
-The model starts from Gaussian coordinate noise with every binder identity masked;
-one trajectory supplies final, target-sigma, and per-token confidence readouts.
-The final generated coordinates are scored on the binder chain with the same
-per-complex, binder-aligned geometry metrics as the PINDER backbone evaluator.
+The native receptor structure is the intended conditioning input. Native binder
+coordinates and labels are retained outside the model until generation completes.
+The sampled complex starts from Gaussian coordinate noise with every binder
+identity masked; one trajectory supplies final, target-sigma, and per-token
+confidence readouts. The final generated coordinates are scored on the binder
+chain with the same per-complex, binder-aligned geometry metrics as the PINDER
+backbone evaluator.
 """
 
 from __future__ import annotations
@@ -138,6 +140,8 @@ def _summarize_structure_metrics(
     summary: dict[str, Any] = {
         "checkpoint": checkpoint,
         "coordinate_source": "gaussian_noise_final",
+        "conditioning": "native_receptor_structure",
+        "native_binder_coordinates_used_as_condition": False,
         "metric_scope": "binder",
         "alignment": "per_complex_binder_kabsch",
         "pose_metrics_included": False,
@@ -182,6 +186,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-crop-retries", type=int, default=32)
     p.add_argument("--max-samples", type=int, default=64)
     p.add_argument("--n-step", type=int, default=20)
+    p.add_argument(
+        "--sampler-mode",
+        choices=["pxdesign_native", "minimal_euler"],
+        default="pxdesign_native",
+        help="Backbone reverse-diffusion implementation. pxdesign_native reuses "
+             "the released PXDesign sampler; minimal_euler is the historical "
+             "deterministic ablation.",
+    )
     p.add_argument("--aa-readout-sigma", type=float, default=0.4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--dtype", choices=["fp32", "bf16", "fp16"], default="bf16")
@@ -235,9 +247,11 @@ def main() -> None:
     print(f"eligible_validation_rows={n_manifest}")
     print(f"evaluation_rows={len(dataset)}")
     print(f"n_step={args.n_step}")
+    print(f"sampler_mode={args.sampler_mode}")
     print(f"aa_readout_sigma={args.aa_readout_sigma}")
     print("coordinate_source=gaussian_noise")
-    print("gt_coordinates_passed_to_model=false")
+    print("native_receptor_coordinates_used_as_condition=true")
+    print("native_binder_coordinates_used_as_condition=false")
     print("structure_metric_scope=binder")
     print("structure_alignment=per_complex_binder_kabsch")
     print("receptor_relative_pose_metrics=false")
@@ -311,6 +325,7 @@ def main() -> None:
                         seq_mode="complete_unmask",
                         aa_readout_mode="final",
                         aa_readout_sigma=float(args.aa_readout_sigma),
+                        sampler_mode=str(args.sampler_mode),
                     )
                 structure_metrics = _free_generation_structure_metrics(
                     generated_coordinate=generated["coordinate"],
@@ -406,6 +421,7 @@ def main() -> None:
     structure_summary.update(
         {
             "n_step": int(args.n_step),
+            "sampler_mode": str(args.sampler_mode),
             "seed": int(args.seed),
             "n_requested": len(dataset),
             "n_failed": len(dataset) - len(structure_per_sample),

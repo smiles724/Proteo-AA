@@ -114,7 +114,12 @@ done
 # not overlay the original donor again.
 LOAD_CHECKPOINT="${LOAD_CHECKPOINT:?set LOAD_CHECKPOINT to a Stage II side-chain checkpoint}"
 WARM_START_PARAMS_ONLY="${WARM_START_PARAMS_ONLY:-1}"
-if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
+LOAD_AA_HEAD_FROM="${LOAD_AA_HEAD_FROM:-1}"
+if [[ "${LOAD_AA_HEAD_FROM}" != "0" && "${LOAD_AA_HEAD_FROM}" != "1" ]]; then
+  echo "ERROR: LOAD_AA_HEAD_FROM must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" && "${LOAD_AA_HEAD_FROM}" == "1" ]]; then
   AA_HEAD_CHECKPOINT="${AA_HEAD_CHECKPOINT:?set AA_HEAD_CHECKPOINT to a run that trained design_residue_type_head}"
 else
   AA_HEAD_CHECKPOINT="${AA_HEAD_CHECKPOINT:-}"
@@ -203,7 +208,7 @@ fi
   echo "ERROR: checkpoint does not exist: ${LOAD_CHECKPOINT}" >&2
   exit 2
 }
-if [[ "${WARM_START_PARAMS_ONLY}" == "1" && ! -f "${AA_HEAD_CHECKPOINT}" ]]; then
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" && "${LOAD_AA_HEAD_FROM}" == "1" && ! -f "${AA_HEAD_CHECKPOINT}" ]]; then
   echo "ERROR: AA-head checkpoint does not exist: ${AA_HEAD_CHECKPOINT}" >&2
   exit 2
 fi
@@ -218,6 +223,8 @@ export PYTHONPATH="${REPO_ROOT}:${PXDESIGN_CODE_DIR}:${PROTENIX_CODE_DIR}${PYTHO
 LOAD_ARGS=(--load-checkpoint "${LOAD_CHECKPOINT}")
 if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
   LOAD_ARGS+=(--warm-start-params-only)
+fi
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" && "${LOAD_AA_HEAD_FROM}" == "1" ]]; then
   LOAD_ARGS+=(--load-aa-head-from "${AA_HEAD_CHECKPOINT}")
 fi
 
@@ -241,8 +248,10 @@ fi
 echo "  AA-head lr    : ${AA_HEAD_LR:-same as backbone}"
 echo "  detach AA->Sφ : ${DETACH_AA_LOGITS_FOR_SIDECHAIN:-0}"
 echo "  backbone+S_phi: ${LOAD_CHECKPOINT}"
-if [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
+if [[ "${WARM_START_PARAMS_ONLY}" == "1" && "${LOAD_AA_HEAD_FROM}" == "1" ]]; then
   echo "  AA head       : ${AA_HEAD_CHECKPOINT}"
+elif [[ "${WARM_START_PARAMS_ONLY}" == "1" ]]; then
+  echo "  AA head       : random initialization (no donor)"
 else
   echo "  resume        : model + AA head + optimizers + schedulers + step counters"
 fi

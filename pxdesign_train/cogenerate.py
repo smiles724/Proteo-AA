@@ -31,6 +31,164 @@ _AA3 = ["ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
 
 
 @torch.no_grad()
+def _pxdesign_native_complete_unmask(
+    *,
+    model,
+    feat: dict[str, Any],
+    s_inputs: torch.Tensor,
+    s_trunk: torch.Tensor,
+    z_trunk: torch.Tensor,
+    noise_schedule: torch.Tensor,
+    design_mask: torch.Tensor,
+    aa_readout_mode: str,
+    aa_readout_sigma: float,
+) -> dict[str, Any]:
+    """Run PXDesign's own sampler while recording AA logits at every call.
+
+    The denoiser wrapper is intentionally only an observer: PXDesign remains the
+    single source of truth for centring, churn, t_hat, stochastic noise and the
+    eta schedule.  Complete-unmask keeps the conditioning features fixed, so the
+    wrapper can recover every AA readout without changing sampler state.
+    """
+    device = s_inputs.device
+    dtype = s_inputs.dtype
+    n_token = int(design_mask.shape[-1])
+    positions = design_mask.nonzero(as_tuple=False).squeeze(-1)
+    trajectory: list[dict[str, Any]] = []
+    final_probs: Optional[torch.Tensor] = None
+    final_sigma = float("nan")
+    target_probs: Optional[torch.Tensor] = None
+    target_sigma: Optional[float] = None
+    target_log_distance = float("inf")
+    confidence_probs: Optional[torch.Tensor] = None
+    confidence_best: Optional[torch.Tensor] = None
+
+    def denoise_and_record(**kwargs):
+        nonlocal final_probs, final_sigma
+        nonlocal target_probs, target_sigma, target_log_distance
+        nonlocal confidence_probs, confidence_best
+
+        # PXDesign's sampler predates these optional conditioning inputs and
+        # therefore omits them from the denoiser call.  The current Protenix
+        # DiffusionModule signature still requires the arguments themselves.
+        kwargs.setdefault("pair_z", None)
+        kwargs.setdefault("p_lm", None)
+        kwargs.setdefault("c_l", None)
+        x_denoised = model.diffusion_module(**kwargs)
+        sigma = kwargs["t_hat_noise_level"]
+        a_token = model._a_token_cache
+        if a_token is None:
+            raise RuntimeError(
+                "PXDesign native sampler did not expose diffusion a_token for AA readout"
+            )
+        a_red = model._reduce_a_token(a_token, sigma).to(dtype)
+        logits = model.design_residue_type_head(
+            a_red, aa_t=torch.tensor(1.0, device=device)
+        ).float()
+        if logits.dim() == 3:
+            logits = logits.squeeze(0)
+        probs = torch.softmax(logits, dim=-1)
+        conf = probs.max(dim=-1).values
+        sigma_values = sigma.detach().float().reshape(-1)
+        if sigma_values.numel() != 1:
+            raise RuntimeError(
+                "PXDesign native AA readout currently requires N_sample=1, got "
+                f"{sigma_values.numel()} sigma values"
+            )
+        sigma_value = float(sigma_values.item())
+
+        final_probs = probs.clone()
+        final_sigma = sigma_value
+        log_distance = abs(
+            float(torch.log(sigma_values.clamp_min(1e-12)).item())
+            - float(torch.log(sigma_values.new_tensor(aa_readout_sigma)).item())
+        )
+        if log_distance < target_log_distance:
+            target_log_distance = log_distance
+            target_probs = probs.clone()
+            target_sigma = sigma_value
+        if confidence_probs is None:
+            confidence_probs = probs.clone()
+            confidence_best = conf.clone()
+        else:
+            improve = conf > confidence_best
+            confidence_probs = torch.where(
+                improve[..., None], probs, confidence_probs
+            )
+            confidence_best = torch.maximum(confidence_best, conf)
+
+        trajectory.append(
+            {
+                "step": len(trajectory),
+                "phase": "diffusion",
+                "phase_step": len(trajectory),
+                # This is the actual t_hat passed to the denoiser, not merely
+                # the nominal scheduler value before stochastic churn.
+                "sigma": sigma_value,
+                "mask_frac": 1.0 if positions.numel() else 0.0,
+                "mean_conf": (
+                    float(conf[positions].mean()) if positions.numel() else 0.0
+                ),
+                "sc_committed": 0,
+            }
+        )
+        return x_denoised
+
+    generated_coordinate = model.sample_diffusion(
+        denoise_net=denoise_and_record,
+        input_feature_dict=feat,
+        s_inputs=s_inputs,
+        s_trunk=s_trunk,
+        z_trunk=z_trunk,
+        noise_schedule=noise_schedule,
+        N_sample=1,
+    )
+    if final_probs is None or target_probs is None or confidence_probs is None:
+        raise RuntimeError("PXDesign native sampler completed without AA readouts")
+
+    readout_probs = {
+        "final": final_probs,
+        "target_sigma": target_probs,
+        "confidence_best": confidence_probs,
+    }
+    readout_sigmas = {
+        "final": final_sigma,
+        "target_sigma": target_sigma,
+        "confidence_best": "per_token",
+    }
+    selected_probs = readout_probs[aa_readout_mode]
+    empty_sequence = torch.full(
+        (n_token,), -1, dtype=torch.long, device=device
+    )
+    aa_readouts = {
+        name: {
+            "probs": probs,
+            "sequence": torch.where(
+                design_mask, probs.argmax(dim=-1), empty_sequence
+            ),
+            "sigma": readout_sigmas[name],
+        }
+        for name, probs in readout_probs.items()
+    }
+    if generated_coordinate.shape[-3] != 1:
+        raise RuntimeError(
+            "PXDesign native cogeneration expected one coordinate sample, got "
+            f"shape {tuple(generated_coordinate.shape)}"
+        )
+    return {
+        "coordinate": generated_coordinate.squeeze(-3),
+        "sequence": aa_readouts[aa_readout_mode]["sequence"],
+        "aa_probs": selected_probs,
+        "aa_readout_mode": aa_readout_mode,
+        "aa_readouts": aa_readouts,
+        "trajectory": trajectory,
+        "sidechain": {},
+        "has_full_atom_sidechain": False,
+        "sampler_mode": "pxdesign_native",
+    }
+
+
+@torch.no_grad()
 def cogenerate(
     model,
     input_feature_dict: dict[str, Any],
@@ -45,6 +203,7 @@ def cogenerate(
     refinement_steps: int = 3,
     aa_readout_mode: str = "final",
     aa_readout_sigma: float = 0.4,
+    sampler_mode: str = "minimal_euler",
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -80,6 +239,13 @@ def cogenerate(
     trajectory step where that token had its highest maximum probability. All
     three readouts are returned under ``aa_readouts`` from the same trajectory.
 
+    ``sampler_mode="pxdesign_native"`` delegates the diffusion trajectory to
+    PXDesign's released sampler (centring, stochastic churn, t_hat and eta
+    schedule included) and records AA logits through a read-only denoiser
+    wrapper. It currently supports the leakage-free complete-unmask path without
+    side-chain cycling. ``minimal_euler`` retains the historical implementation
+    for ablations and the iterative side-chain/sequential paths.
+
     Returns {coordinate, sequence (aa20 per design token, -1 elsewhere),
              aa_probs, aa_readouts, trajectory}.
     """
@@ -92,6 +258,26 @@ def cogenerate(
         raise ValueError(
             f"seq_mode must be 'complete_unmask' or 'sequential', got {seq_mode!r}"
         )
+    if sampler_mode not in ("minimal_euler", "pxdesign_native"):
+        raise ValueError(
+            "sampler_mode must be 'minimal_euler' or 'pxdesign_native', got "
+            f"{sampler_mode!r}"
+        )
+    if sampler_mode == "pxdesign_native":
+        if seq_mode != "complete_unmask":
+            raise ValueError(
+                "pxdesign_native currently requires seq_mode='complete_unmask'"
+            )
+        if sidechain_cycle:
+            raise ValueError(
+                "pxdesign_native currently runs the initial backbone trajectory "
+                "without sidechain_cycle"
+            )
+        if stop_on_seq_stable:
+            raise ValueError(
+                "pxdesign_native owns the complete diffusion loop and does not "
+                "support stop_on_seq_stable"
+            )
     valid_readouts = {"final", "target_sigma", "confidence_best"}
     if aa_readout_mode not in valid_readouts:
         raise ValueError(
@@ -155,6 +341,18 @@ def cogenerate(
     noise_schedule = model.inference_noise_scheduler(
         N_step=N_step, device=device, dtype=dtype
     )
+    if sampler_mode == "pxdesign_native":
+        return _pxdesign_native_complete_unmask(
+            model=model,
+            feat=feat,
+            s_inputs=s_inputs,
+            s_trunk=s_trunk,
+            z_trunk=z_trunk,
+            noise_schedule=noise_schedule,
+            design_mask=dtm,
+            aa_readout_mode=aa_readout_mode,
+            aa_readout_sigma=float(aa_readout_sigma),
+        )
     x = noise_schedule[0] * torch.randn(1, N_atom, 3, device=device, dtype=dtype)
     counts = _unmask_counts(int(positions.numel()), N_step)
 
@@ -777,4 +975,5 @@ def cogenerate(
         "trajectory": trajectory,
         "sidechain": sidechain_out,
         "has_full_atom_sidechain": bool(sidechain_out),
+        "sampler_mode": "minimal_euler",
     }

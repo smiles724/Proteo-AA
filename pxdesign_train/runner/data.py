@@ -144,7 +144,7 @@ class DesignSourceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any]:
         n = len(self.provider)
         retries = max(1, min(int(self.max_crop_retries), n))
-        last_crop_error: Optional[ValueError] = None
+        last_retryable_error: Optional[Exception] = None
 
         tried: list[int] = []
         for attempt in range(retries):
@@ -152,15 +152,22 @@ class DesignSourceDataset(Dataset):
             tried.append(local_idx)
             try:
                 return self._get_one(local_idx)
-            except ValueError as exc:
-                if not str(exc).startswith(("DesignCropper:", "InferenceSafeBinder:")):
+            except (ValueError, RuntimeError) as exc:
+                # Large real-data manifests inevitably contain a few malformed
+                # structures. CifFileProvider wraps parser failures (for example
+                # an unknown atom element) in this RuntimeError. Treat those like
+                # crop-invalid samples and use the existing deterministic retry
+                # budget; unrelated RuntimeErrors must still stop the run.
+                if not str(exc).startswith(
+                    ("DesignCropper:", "InferenceSafeBinder:", "Failed to parse CIF:")
+                ):
                     raise
-                last_crop_error = exc
+                last_retryable_error = exc
 
         raise ValueError(
             f"DesignSourceDataset: failed to find a crop-valid example after "
             f"{retries} attempts starting at index {idx} (tried {tried}). "
-            f"Last crop error: {last_crop_error}"
+            f"Last retryable sample error: {last_retryable_error}"
         )
 
     def _probe_index(self, idx: int, attempt: int, n: int) -> int:

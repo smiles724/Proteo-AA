@@ -644,10 +644,10 @@ def build_configs(args: argparse.Namespace, device):
         getattr(args, "aa_clean_coordinate_input", False)
     )
     if clean_coordinate_input:
-        if args.training_stage != "aa_head_on_stage2":
+        if args.training_stage not in ("aa_head_warmup", "aa_head_on_stage2"):
             raise ValueError(
                 "--aa-clean-coordinate-input is a diagnostic supported only "
-                "when training_stage is aa_head_on_stage2"
+                "when training_stage is aa_head_warmup or aa_head_on_stage2"
             )
         if len(forced_sigmas) != int(configs.training.diffusion_batch_size):
             raise ValueError(

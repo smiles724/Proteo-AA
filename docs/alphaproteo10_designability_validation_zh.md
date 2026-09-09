@@ -38,9 +38,14 @@ conda 环境和 PXDesignBench 源码体积较小，可以留在 home；模型权
 git clone --branch v0.1.2 https://github.com/bytedance/PXDesignBench.git \
   /hai/users/s/h/shenjm/tools/PXDesignBench-v0.1.2
 
-cd /hai/users/s/h/shenjm/tools/PXDesignBench-v0.1.2
-bash install.sh --env pxdbench --pkg_manager conda --cuda-version 12.1
+cd /hai/users/s/h/shenjm/Proteo-AA
+mkdir -p logs/setup
+sbatch scripts/utilities/slurm_install_pxdesignbench_env.sh
 ```
+
+这个 CPU job 会把 env 放在
+`/hai/users/s/h/shenjm/miniconda3/envs/pxdbench`，但把安装临时文件、pip cache 和
+conda package cache 放在 `/hai/scratch/shenjm/pxdesign_install_cache`。
 
 不要直接运行官方 `download_tool_weights.sh`：它还会下载 binder 流程不使用的约
 8 GB ESMFold 权重。使用仓库中的纯 CPU job，只下载/校验 AF2 和 ProteinMPNN：

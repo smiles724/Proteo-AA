@@ -9,6 +9,7 @@ RUN_ROOT="${RUN_ROOT:?set RUN_ROOT from generation}"
 PXDBENCH_DIR="${PXDBENCH_DIR:?set PXDBENCH_DIR}"
 PXDBENCH_PYTHON="${PXDBENCH_PYTHON:?set PXDBENCH_PYTHON}"
 TOOL_WEIGHTS_ROOT="${TOOL_WEIGHTS_ROOT:?set TOOL_WEIGHTS_ROOT}"
+PREP_PYTHON="${PREP_PYTHON:-/hai/users/s/h/shenjm/miniconda3/envs/proteoaa/bin/python}"
 TASK_FILE="${TASK_FILE:-${RUN_ROOT}/score_tasks.tsv}"
 TASK_START="${TASK_START:-0}"
 TASK_COUNT="${TASK_COUNT:-4}"
@@ -16,7 +17,7 @@ MAX_CONCURRENT="${MAX_CONCURRENT:-4}"
 
 cd "${REPO_ROOT}"
 mkdir -p logs/validation/alphaproteo10 "${RUN_ROOT}/scores"
-python scripts/evaluation/prepare_alphaproteo_score_tasks.py \
+"${PREP_PYTHON}" scripts/evaluation/prepare_alphaproteo_score_tasks.py \
   --generation-root "${RUN_ROOT}/generation" \
   --score-root "${RUN_ROOT}/scores" \
   --output "${TASK_FILE}" \

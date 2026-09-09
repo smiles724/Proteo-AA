@@ -297,20 +297,36 @@ def design(model, feature_dict: dict, *, n_step: int = 20, device: str = "cpu",
 
 
 def write_cif(path: str | Path, atoms: Any, coords: np.ndarray,
-              is_binder: np.ndarray, sequence: np.ndarray) -> None:
-    """Write the designed complex, binder identities filled in."""
-    import biotite.structure.io.pdbx as pdbx
+              is_binder: np.ndarray, sequence: np.ndarray | None) -> None:
+    """Write the designed complex.
 
-    from pxdesign_train.cogenerate import _AA3
+    ``sequence=None`` is the honest representation of a PXDesign-d backbone-only
+    run: write a poly-glycine placeholder for the binder and leave sequence
+    design to ProteinMPNN.  In particular, do not report the randomly
+    initialised Proteo-AA head that accompanies an official PXDesign checkpoint
+    as though PXDesign had generated those identities.
+    """
+    import biotite.structure.io.pdbx as pdbx
 
     out = atoms.copy()
     out.coord = np.asarray(coords, dtype=np.float32)
+    res_names = out.res_name.copy()
+
+    if sequence is None:
+        res_names[is_binder] = "GLY"
+        out.set_annotation("res_name", res_names)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        f = pdbx.CIFFile()
+        pdbx.set_structure(f, out)
+        f.write(str(path))
+        return
 
     # `sequence` is indexed by TOKEN over the whole complex, -1 where nothing was
     # designed -- not by binder residue. Taking the first N entries would read
     # the target's tokens and leave the binder as xpb, which looks like the model
     # produced no sequence at all.
-    res_names = out.res_name.copy()
+    from pxdesign_train.cogenerate import _AA3
+
     seq = np.asarray(sequence)
     designed = seq[seq >= 0]
     binder_res = list(dict.fromkeys(out.res_id[is_binder]))
@@ -337,12 +353,36 @@ def main() -> int:
     ap.add_argument("--n-step", type=int, default=20)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--binder-length",
+        type=int,
+        default=None,
+        help="Override the YAML binder_length; use this to sweep A-CODE's "
+             "published 80-130 range.",
+    )
+    ap.add_argument(
+        "--sampler-mode",
+        choices=("pxdesign_native", "minimal_euler"),
+        default="pxdesign_native",
+        help="Reverse-diffusion implementation. Use pxdesign_native for the "
+             "official PXDesign backbone control.",
+    )
+    ap.add_argument(
+        "--backbone-only",
+        action="store_true",
+        help="Ignore AA-head output and write a poly-Gly binder backbone for a "
+             "subsequent ProteinMPNN stage.",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     torch.manual_seed(args.seed)
 
     cfg = load_target_config(args.target)
+    if args.binder_length is not None:
+        if args.binder_length <= 0:
+            ap.error("--binder-length must be positive")
+        cfg["binder_length"] = args.binder_length
     logger.info("target %s: %s, binder length %d",
                 cfg["name"], Path(cfg["file"]).name, cfg["binder_length"])
 
@@ -355,11 +395,22 @@ def main() -> int:
                 int(feature_dict["hotspot"].sum()))
 
     model = build_model(args.checkpoint, args.device)
-    out = design(model, feature_dict, n_step=args.n_step, device=args.device)
+    out = design(
+        model,
+        feature_dict,
+        n_step=args.n_step,
+        device=args.device,
+        sampler_mode=args.sampler_mode,
+        seq_mode="complete_unmask",
+        sidechain_cycle=False,
+    )
 
     dest = Path(args.out) / f"{cfg['name']}_design.cif"
+    sequence = None if args.backbone_only else out["sequence"].cpu().numpy()
     write_cif(dest, combined, out["coordinate"].squeeze(0).cpu().numpy(),
-              is_binder, out["sequence"].cpu().numpy())
+              is_binder, sequence)
+    if args.backbone_only:
+        logger.info("  backbone-only output: binder identities are poly-Gly placeholders")
     logger.info("wrote %s", dest)
     return 0
 

@@ -50,13 +50,26 @@ structure it predicts. If an independent predictor agrees the sequence folds
 that way and docks there, the design is plausible; if it predicts something else
 or is unconfident, it is not.
 
-PXDesign's strict AF2-IG thresholds, all three required:
+A-CODE Table 4 uses the PXDesign filter, all four required (A-CODE Appendix C.2;
+the same thing ProtDBench ships as `af2_easy`):
 
 ```
-ipAE  < 7.0      confident about how the two chains sit relative to each other
-pLDDT > 0.9      confident about the binder's own fold
-RMSD  < 1.5 A    the prediction matches what was designed
+pLDDT > 0.80     confident about the binder's own fold
+ipTM  > 0.50     confident the two chains form an interface
+ipAE  < 10.85 A  confident about how they sit relative to each other
+RMSD  < 3.5 A    bound vs unbound binder, i.e. it does not need the target to fold
 ```
+
+The `10.85` looks arbitrary because it is a unit conversion: BindCraft and the
+ColabDesign family write this threshold as `i_pAE < 0.35`, having divided PAE by
+its 31.0 A ceiling. 0.35 x 31 = 10.85.
+
+**There is a second, stricter filter and it is easy to reach for by mistake:**
+ProtDBench's `af2_opt` — `pLDDT > 0.9`, `unscaled_i_pAE < 7.0`,
+`binder RMSD < 1.5 A`. Reporting it alongside is worthwhile, but it is **not**
+the Table 4 protocol. On ProtDBench's released PXDesign designs the two filters
+give 21.19% and 9.70% on average, and up to 300x apart on single targets. Only
+`af2_easy` reproduces Table 4 (verified: all ten targets match to two decimals).
 
 This is a **prediction, not a measurement**. AlphaProteo has real experimental
 hit rates (9–88% by target) but those need a wet lab. Designability is the

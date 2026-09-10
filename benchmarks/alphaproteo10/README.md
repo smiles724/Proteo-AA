@@ -76,7 +76,22 @@ From A-CODE §4.2 and PXDesign's README:
 |---|---|
 | Designs per target | 328–728, binder length 80–130 |
 | Metric | Designability = share passing the filter |
-| Filter (**AF2-IG**, strict) | ipAE < 7.0, pLDDT > 0.9, binder RMSD < 1.5 Å |
+| Filter — **use this one to compare with Table 4** | pLDDT > 0.80, ipTM > 0.50, ipAE < 10.85 Å, binder bound/unbound RMSD < 3.5 Å |
+
+That filter is A-CODE Appendix C.2, and it is the one ProtDBench ships as
+`af2_easy` (`protdbench/protd_configs/eval.py`), where the same threshold is
+written in normalized units as `i_pAE < 0.35` — ColabDesign divides PAE by 31.0,
+so 0.35 × 31 = 10.85 Å. **Verified against ProtDBench's released per-design
+scores: its `af2_easy` reproduces A-CODE Table 4's PXDesign row on all ten
+targets to two decimal places** (mean absolute deviation 0.00, r = 1.000).
+
+ProtDBench also ships a stricter filter, `af2_opt` — `pLDDT > 0.9`,
+`unscaled_i_pAE < 7.0`, `binder RMSD < 1.5 Å`. **That is not the Table 4
+protocol.** On the same designs it gives a mean of 9.70% against `af2_easy`'s
+21.19%, and individual targets move by up to 300× (H1 12.08 → 0.04, IL7RA
+29.80 → 0.26). Reporting both is fine and probably worth doing — but the column
+you place next to Table 4 has to be `af2_easy`, or the percentages are not
+comparable.
 
 A-CODE reports the co-designed sequence and a ProteinMPNN-redesigned variant
 separately; for us those are the two halves of the same question, since the
@@ -89,9 +104,11 @@ recommended and produced its published numbers with one, so a run without MSA is
 not comparable to the table above. Nine of the ten still need one; only PDL1
 ships an example.
 
-**AlphaProteo's own filter is not this one.** Its in-silico benchmark uses
-pAE < 10, binder RMSD < 1 Å, pLDDT > 80 — looser on pAE, tighter on RMSD. Use
-the PXDesign/AF2-IG thresholds above, or the numbers do not compare.
+**Three different filters are in play; do not mix them.** AlphaProteo's own
+in-silico benchmark uses pAE < 10, binder RMSD < 1 Å, pLDDT > 80. A-CODE Table 4
+uses the PXDesign/`af2_easy` thresholds above. `af2_opt` is a third, stricter
+set. Each produces a different percentage from the same designs, so every number
+has to carry the name of the filter that produced it.
 
 ## Sources
 

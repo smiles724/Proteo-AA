@@ -52,13 +52,17 @@ export COMPLEX_MAX_N_TOKEN=${COMPLEX_MAX_N_TOKEN:-640}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export EVAL_SAMPLES=${EVAL_SAMPLES:-64}
 
-# Appended last, so these win over the base launcher's smoke-scale values for
-# the same options. Accumulation and clipping follow the Stage III binder run.
-#
-# CHECKPOINT_INTERVAL stays BELOW EVAL_INTERVAL on purpose. `run()` evaluates
-# before it saves, so anything that raises in validation discards every step
-# since the last checkpoint -- which, at equal intervals, is all of them.
-exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_binder.sh" "$@" \
+# The base launcher consumes --dry-run only in the first position. Keep it
+# there while placing cluster defaults before explicit CLI overrides.
+RUN_OPTIONS=()
+if [[ ${1:-} == --dry-run ]]; then
+  shift
+  RUN_OPTIONS=(--dry-run)
+fi
+# Accumulation and clipping follow the Stage III binder run by default.
+# CHECKPOINT_INTERVAL defaults below EVAL_INTERVAL because validation runs
+# before checkpoint saving; an earlier save bounds work lost on failure.
+exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_binder.sh" "${RUN_OPTIONS[@]}" \
   --iters-to-accumulate "${ITERS_TO_ACCUMULATE:-8}" \
   --grad-clip-norm "${GRAD_CLIP_NORM:-1.0}" \
   --warmup-steps "${WARMUP_STEPS:-500}" \
@@ -66,4 +70,4 @@ exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_binder.sh" "$@" \
   --checkpoint-interval "${CHECKPOINT_INTERVAL:-1000}" \
   --log-interval "${LOG_INTERVAL:-50}" \
   --eval-interval "${EVAL_INTERVAL:-2000}" \
-  --num-workers "${NUM_WORKERS:-4}"
+  --num-workers "${NUM_WORKERS:-4}" "$@"

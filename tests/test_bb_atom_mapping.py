@@ -55,6 +55,12 @@ def _make_chain(chain_id="C", res_offset=0, x_offset=0.0, y=0.0, spec=None):
 
     spec = spec if spec is not None else _SPEC
     rng = np.random.default_rng(0)
+    # Fixed atom-name geometry keeps N/CA/C noncollinear for every hash seed.
+    offsets = {
+        "N": (-0.525, 1.36, 0.0), "CA": (0.0, 0.0, 0.0),
+        "C": (1.526, 0.0, 0.0), "O": (2.153, 1.06, 0.0),
+        "CB": (-0.529, -0.774, -1.205), "OG": (-1.2, -1.2, -2.15),
+    }
 
     names, res_names, res_ids, coords = [], [], [], []
     tokens_atom_idx, centre_idx = [], []
@@ -67,9 +73,8 @@ def _make_chain(chain_id="C", res_offset=0, x_offset=0.0, y=0.0, spec=None):
         idxs = []
         cax = x_offset + r * 3.8
         for a in an:
-            # A distinct, deterministic coordinate per (residue, atom name).
-            jitter = (hash(a) % 7) * 0.1
-            coords.append([cax + jitter, y + 0.37 * len(a), 0.11 * (r + 1)])
+            dx, dy, dz = offsets[a]
+            coords.append([cax + dx, y + dy, 0.11 * (r + 1) + dz])
             names.append(a)
             res_names.append(rn)
             res_ids.append(res_offset + r + 1)

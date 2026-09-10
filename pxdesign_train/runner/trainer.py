@@ -83,6 +83,21 @@ class TrainerComponents:
     named_eval_dataloaders: Optional[dict[str, DataLoader]] = None
 
 
+def _log_key(key: str) -> str:
+    """Flatten a metric name for the LOG only; returned dicts keep their keys.
+
+    Stage IV introduced the first metric names containing `/`:
+    `stage4/aa_pre` on a row, and `binder_pinder/loss` on the set-wide mean.
+    A `/` is a word boundary, so `val_stage4/aa_pre=2.8` makes the KV regex in
+    `scripts/plotting/plot_training_metrics.py` read a bare `aa_pre` -- and
+    `val_binder_pinder/loss=9.5` a bare `loss`, which is the key that script
+    uses to decide a line is a training row at all. It keeps the last row per
+    (job, step), so every eval step would overwrite that step's real training
+    point with a validation number. Guard the prefix, not the plots.
+    """
+    return key.replace("/", "_")
+
+
 class PXDesignTrainer:
     """Training driver for PXDesign-d.
 
@@ -760,7 +775,7 @@ class PXDesignTrainer:
                             f"val_index={row['index']} "
                             + (f"val_source={row['source']} " if "source" in row else "")
                             + " ".join(
-                                f"val_{k}={v:.4g}"
+                                f"val_{_log_key(k)}={v:.4g}"
                                 for k, v in row.items()
                                 if k not in ("index", "sample_id", "source")
                             )
@@ -768,7 +783,9 @@ class PXDesignTrainer:
                     if metrics:
                         self._log(
                             f"step={self.step} val_n={len(self.last_eval_per_protein)} "
-                            + " ".join(f"val_{k}={v:.4g}" for k, v in metrics.items())
+                            + " ".join(
+                                f"val_{_log_key(k)}={v:.4g}" for k, v in metrics.items()
+                            )
                         )
                 if stepped and ckpt_int > 0 and self.step > 0 and self.step % ckpt_int == 0:
                     self.save_checkpoint()

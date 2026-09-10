@@ -273,5 +273,53 @@ def test_named_eval_sources_reach_the_log_without_a_format_error(monkeypatch):
     # The mean line carries each source's metrics under its own prefix.
     means = [ln for ln in lines if "val_n=" in ln]
     assert len(means) == 1, f"expected exactly 1 mean line, got {means}"
-    assert "val_binder_pinder/loss=" in means[0]
-    assert "val_monomer_retention/loss=" in means[0]
+    assert "val_binder_pinder_loss=" in means[0]
+    assert "val_monomer_retention_loss=" in means[0]
+
+
+def test_slashed_metric_names_stay_behind_the_val_prefix(monkeypatch):
+    """A `/` in a metric name is a word boundary, and that breaks the guarantee.
+
+    Stage IV brought the first such names: `stage4/aa_pre` on a per-protein row
+    and `binder_pinder/loss` on the mean. `plot_training_metrics.py` matches
+    `([A-Za-z_][A-Za-z0-9_]*)=<number>`, so `val_stage4/aa_pre=2.8` yields a
+    bare `aa_pre` and `val_binder_pinder/loss=9.5` a bare `loss` -- the very key
+    that script uses to accept a line as a training row. It keeps the last row
+    per (job, step), so each eval step would overwrite that step's real training
+    point. Apply the same prefix guard the sibling test applies, but with a name
+    that actually contains a slash.
+    """
+    import re
+
+    from pxdesign_train.runner import PXDesignTrainer
+
+    trainer = _make_trainer(monkeypatch)
+    trainer.components.named_eval_dataloaders = {
+        "binder_pinder": _eval_loader(1, source_name="binder_pinder"),
+    }
+    trainer.configs.training.eval_interval = 1
+
+    original = PXDesignTrainer.forward_loss
+
+    def _with_slashed_metric(self, batch):
+        out = original(self, batch)
+        out["stage4/aa_pre"] = torch.tensor(2.804)
+        return out
+
+    monkeypatch.setattr(PXDesignTrainer, "forward_loss", _with_slashed_metric)
+
+    lines = []
+    monkeypatch.setattr(type(trainer), "_log", lambda self, msg: lines.append(msg))
+    trainer.run(max_steps=1)
+
+    kv = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=(?=[-+]?(?:\d|\.\d))")
+    validation = [ln for ln in lines if "val_protein=" in ln or "val_n=" in ln]
+    assert validation, f"no validation lines logged: {lines}"
+    for ln in validation:
+        for key in (k for k in kv.findall(ln) if k != "step"):
+            assert key.startswith("val_"), (
+                f"metric {key!r} escaped the val_ prefix; a log parser reads it "
+                f"as a training metric: {ln}"
+            )
+    assert any("val_stage4_aa_pre=" in ln for ln in validation)
+    assert any("val_binder_pinder_stage4_aa_pre=" in ln for ln in validation)

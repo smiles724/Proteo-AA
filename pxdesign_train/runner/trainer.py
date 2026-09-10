@@ -747,14 +747,22 @@ class PXDesignTrainer:
                     # at every eval step, while `plot_sidechain_warmup_report.py`
                     # branches on `val_sc_local` vs `sc_local` and would file all
                     # ~491 rows as training samples ~40x above the true curve.
+                    # `source` is a STRING, and Stage IV's named validation
+                    # loaders put one on every row (`evaluate()` above). It has to
+                    # be emitted like sample_id -- named explicitly and excluded
+                    # from the join -- because the join formats with `:.4g`, and
+                    # `f"{'binder_pinder':.4g}"` raises ValueError. That raise
+                    # lands in `run()` BEFORE the checkpoint block below, so a
+                    # Stage IV run would lose every step since its last save.
                     for row in self.last_eval_per_protein:
                         self._log(
                             f"step={self.step} val_protein={row['sample_id']} "
                             f"val_index={row['index']} "
+                            + (f"val_source={row['source']} " if "source" in row else "")
                             + " ".join(
                                 f"val_{k}={v:.4g}"
                                 for k, v in row.items()
-                                if k not in ("index", "sample_id")
+                                if k not in ("index", "sample_id", "source")
                             )
                         )
                     if metrics:

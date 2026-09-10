@@ -242,3 +242,36 @@ def test_sample_id_is_the_complex_actually_returned(monkeypatch):
     assert used, "expected the retry to reach a working index"
     assert item["sample_id"] == f"prot{used[-1]}"
     assert item["sample_id"] != "prot0", "must not report the index that failed"
+
+
+def test_named_eval_sources_reach_the_log_without_a_format_error(monkeypatch):
+    """Stage IV's named validation loaders must not kill the run loop.
+
+    `evaluate()` stamps a STRING `source` on every row when
+    `named_eval_dataloaders` is set. The per-protein log line formats its
+    fields with `:.4g`, and `f"{'binder_pinder':.4g}"` raises ValueError --
+    inside `run()`, one block ABOVE the checkpoint save, so the run dies
+    having written nothing since its last checkpoint. The source belongs on
+    the line (it is what distinguishes two rows with the same index), so pin
+    that it is emitted, val_-prefixed, and non-numeric.
+    """
+    trainer = _make_trainer(monkeypatch)
+    trainer.components.named_eval_dataloaders = {
+        "binder_pinder": _eval_loader(2, source_name="binder_pinder"),
+        "monomer_retention": _eval_loader(1, source_name="monomer_retention"),
+    }
+    trainer.configs.training.eval_interval = 1
+
+    lines = []
+    monkeypatch.setattr(type(trainer), "_log", lambda self, msg: lines.append(msg))
+    trainer.run(max_steps=1)
+
+    per_protein = [ln for ln in lines if "val_protein=" in ln]
+    assert len(per_protein) == 3, f"expected 3 per-protein lines, got {per_protein}"
+    assert sum("val_source=binder_pinder" in ln for ln in per_protein) == 2
+    assert sum("val_source=monomer_retention" in ln for ln in per_protein) == 1
+    # The mean line carries each source's metrics under its own prefix.
+    means = [ln for ln in lines if "val_n=" in ln]
+    assert len(means) == 1, f"expected exactly 1 mean line, got {means}"
+    assert "val_binder_pinder/loss=" in means[0]
+    assert "val_monomer_retention/loss=" in means[0]

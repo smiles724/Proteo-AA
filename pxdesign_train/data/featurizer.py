@@ -243,6 +243,11 @@ class DesignFeaturizer:
                 self._compute_sidechain_targets(atom_array, feature_dict, binder_atom_mask)
             )
 
+        # Loss-independent, all-residue protein interface. Fixed atom coordinates
+        # are stored separately so Stage IV never recovers them from binder labels.
+        if "atom_to_token_idx" in feature_dict:
+            feature_dict.update(self._aa_structure_interface(atom_array, feature_dict, binder_atom_mask))
+
         # 2. Mark binder residues as xpb on the AtomArray. Note: this is *before*
         #    computing restype, so the new restype one-hot reflects the design.
         atom_array = self._mark_as_xpb(atom_array, binder_atom_mask)
@@ -452,6 +457,48 @@ class DesignFeaturizer:
             "eval_ca_atom_mask": torch.from_numpy(ca.astype(bool)),
             "eval_backbone_atom_mask": torch.from_numpy(bb.astype(bool)),
         }
+
+    @staticmethod
+    def _aa_structure_interface(atom_array, feature_dict, binder_atom_mask):
+        from pxdesign_train.aa.atom_mapping import ATOM37, BB37, AA_ORDER
+        from pxdesign_train.sidechain.instantiate import STD_AA_3
+        a2t = feature_dict["atom_to_token_idx"].detach().cpu().numpy()
+        length = int(feature_dict["restype"].shape[-2])
+        bb_idx = np.full((length, 4), -1, dtype=np.int64)
+        fixed_idx = np.full((length, 37), -1, dtype=np.int64)
+        fixed_aa = np.full(length, 20, dtype=np.int64)
+        protein = np.zeros(length, dtype=bool)
+        observed = (np.asarray(atom_array.is_resolved, dtype=bool)
+                    if "is_resolved" in atom_array.get_annotation_categories()
+                    else np.isfinite(atom_array.coord).all(-1))
+        is_protein = feature_dict["is_protein"].detach().cpu().numpy().astype(bool)
+        for atom, token in enumerate(a2t):
+            if not is_protein[atom]:
+                continue
+            name = str(atom_array.atom_name[atom])
+            residue = str(atom_array.res_name[atom])
+            protein[token] = True
+            if name in ("N", "CA", "C", "O") and (binder_atom_mask[atom] or observed[atom]):
+                bb_idx[token, ("N", "CA", "C", "O").index(name)] = atom
+            if not binder_atom_mask[atom]:
+                if residue in STD_AA_3:
+                    fixed_aa[token] = STD_AA_3.index(residue)
+                if name in ATOM37 and observed[atom]:
+                    fixed_idx[token, ATOM37.index(name)] = atom
+        fixed_mask = ~np.asarray(binder_atom_mask, dtype=bool) & observed
+        return dict(aa_bb_atom_idx=torch.from_numpy(bb_idx),
+            aa_fixed_atom37_idx=torch.from_numpy(fixed_idx),
+            aa_fixed_aatype=torch.from_numpy(fixed_aa),
+            aa_residue_mask=torch.from_numpy(protein),
+            fixed_atom_mask=torch.from_numpy(fixed_mask),
+            fixed_atom_xyz=torch.from_numpy(np.where(fixed_mask[:, None], atom_array.coord, 0).astype(np.float32)),
+            structure_atom_name=list(map(str, atom_array.atom_name)),
+            structure_res_name=list(map(str, atom_array.res_name)),
+            structure_element=list(map(str, atom_array.element)),
+            structure_ins_code=list(map(str, atom_array.ins_code)),
+            structure_hetero=torch.as_tensor(np.asarray(atom_array.hetero).astype(bool)),
+            structure_chain_id=list(map(str, atom_array.chain_id)),
+            structure_res_id=torch.as_tensor(np.asarray(atom_array.res_id).astype(np.int64)))
 
     def _compute_sidechain_targets(
         self, atom_array, feature_dict: dict, binder_atom_mask: np.ndarray

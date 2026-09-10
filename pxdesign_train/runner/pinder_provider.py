@@ -37,6 +37,10 @@ class PinderPdbProvider:
         archive_path: Optional[Union[str, Path]] = None,
         split: str = "train",
         limit: int = -1,
+        min_n_token: int = 0,
+        max_n_token: int = 0,
+        cluster_disjoint: bool = False,
+        max_binder_tokens: int = 0,
     ) -> None:
         import pandas as pd
 
@@ -52,12 +56,28 @@ class PinderPdbProvider:
             "pinder_id",
             "pdb_path",
             "converted_binder_chain",
-            "source_split",
+            "source_split", "cluster_id", "num_tokens", "binder_tokens",
         ]
         if self.manifest_path.suffix == ".parquet":
-            frame = pd.read_parquet(self.manifest_path, columns=columns)
+            import pyarrow.parquet as pq
+            available = set(pq.read_schema(self.manifest_path).names)
+            frame = pd.read_parquet(self.manifest_path, columns=[key for key in columns if key in available])
         else:
-            frame = pd.read_csv(self.manifest_path, usecols=columns)
+            frame = pd.read_csv(self.manifest_path, usecols=lambda key: key in columns)
+        if cluster_disjoint:
+            if "cluster_id" not in frame:
+                raise ValueError("PINDER Stage IV requires cluster_id metadata")
+            if split == "train":
+                heldout = set(frame.loc[frame.source_split.astype(str).isin(["val", "test"]), "cluster_id"].astype(str))
+                frame = frame.loc[~frame.cluster_id.astype(str).isin(heldout)]
+        if max_binder_tokens > 0:
+            if "binder_tokens" not in frame:
+                raise ValueError("PINDER crop eligibility requires binder_tokens metadata")
+            frame = frame.loc[frame.binder_tokens <= max_binder_tokens]
+        if min_n_token > 0:
+            frame = frame.loc[frame.num_tokens >= min_n_token]
+        if max_n_token > 0:
+            frame = frame.loc[frame.num_tokens <= max_n_token]
         frame = frame.loc[frame["source_split"].astype(str).eq(split)].reset_index(
             drop=True
         )
@@ -67,6 +87,7 @@ class PinderPdbProvider:
             raise ValueError(
                 f"PINDER manifest {self.manifest_path} has no rows for split={split!r}"
             )
+        self.cluster_ids = frame["cluster_id"].astype(str).tolist() if "cluster_id" in frame else None
         self._pinder_ids = frame["pinder_id"].astype(str).tolist()
         self._pdb_paths = frame["pdb_path"].astype(str).tolist()
         self._binder_chains = frame["converted_binder_chain"].astype(str).tolist()

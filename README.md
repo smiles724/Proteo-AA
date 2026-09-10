@@ -51,3 +51,5 @@ pointers — no ByteDance code or weights are re-hosted.
 The side-chain template uses the **Dunbrack BBDEP2010** rotamer library (redistributed
 under ODC-By). If you publish results computed with it, cite: Shapovalov, M.V. & Dunbrack,
 R.L. Jr. (2011), *A smoothed backbone-dependent rotamer library…*, **Structure** 19, 844–858.
+
+See [Stage IV FaMPNN integration and validation status](docs/stage4_fampnn.md) for the new sequence backend, launchers, checkpoint contract, and outstanding release gates.

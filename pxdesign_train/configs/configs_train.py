@@ -21,6 +21,8 @@ training_configs["enable_diffusion_distogram_head"] = False  # head built but un
 training_configs["enable_residue_type_head"] = True
 
 training_configs["residue_type"] = {
+    "backend": "mlp",
+    "fampnn_checkpoint": "",
     "vocab_size": 20,
     "ignore_index": -100,
     "loss_on_design_only": True,
@@ -549,4 +551,15 @@ training_configs["curriculum"] = {
         "weights": {"afdb_monomer": 0.1, "mgnify_monomer": 0.1, "pdb_complex": 0.8},
         "max_steps": 50000,
     },
+}
+
+# Stage IV is opt-in. Existing stages retain their backend and objectives.
+training_configs["stage4"] = {
+    "phase": "IV-A", "train_rounds": 1, "inference_rounds": 3,
+    "decode_blocks": 4, "query_fraction": 0.5, "whole_mask_probability": 0.1,
+    "temperature": 0.0, "sc_to_aa": True, "sc_to_bb": True,
+    "aa_lr": 1e-5, "sc_lr": 1e-5, "bb_lr": 1e-6,
+    "bb_trainable_prefixes": ["diffusion_module.atom_attention_decoder."],
+    "weight_aa_pre": 1.0, "weight_aa_revision": 1.0,
+    "weight_sc_aux": 1.0, "weight_physical": 0.1,
 }

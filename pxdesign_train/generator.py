@@ -98,6 +98,11 @@ def sample_diffusion_training(
         noise = torch.randn_like(x_gt_aug, dtype=dtype) * sigma[..., None, None]
         x_input = x_gt_aug + noise
 
+    if input_feature_dict.get("stage4_fixed_context", False):
+        design = input_feature_dict["design_token_mask"].bool()
+        atom_design = design[input_feature_dict["atom_to_token_idx"].long()]
+        x_input = torch.where(atom_design[..., None], x_input, x_gt_aug)
+
     # 4. Denoise.  pair_z / p_lm / c_l are None — DiffusionModule computes them.
     if diffusion_chunk_size is None:
         x_denoised = denoise_net(

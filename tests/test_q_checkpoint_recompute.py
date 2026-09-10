@@ -169,3 +169,14 @@ def test_flag_based_gating_would_have_failed():
 
     with pytest.raises(Exception):           # CheckpointError (or a silent-grad mismatch)
         out.sum().backward()
+
+
+def test_replay_uses_the_original_round_feedback_after_cache_changes():
+    m, dec, q_skip, bb_idx = _build()
+    sc_first = torch.randn(2,4,8,requires_grad=True)
+    sc_later = torch.randn(2,4,8,requires_grad=True)
+    out = _run(m,dec,q_skip,sc_first,bb_idx,checkpointed=True)
+    m._q_sc_cache = sc_later
+    out.sum().backward()
+    assert sc_first.grad is not None and sc_first.grad.abs().sum() > 0
+    assert sc_later.grad is None

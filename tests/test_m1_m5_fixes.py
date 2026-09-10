@@ -438,7 +438,7 @@ def test_frames_from_backbone_index_matches_direct_build():
     bb_idx = torch.tensor([[0, 1, 2], [4, 5, 6], [-1, -1, -1]])  # 3 tokens; last invalid
     R, t, valid = frames_from_backbone_index(coords, bb_idx)
     assert R.shape == (2, 3, 3, 3) and t.shape == (2, 3, 3)
-    assert valid.tolist() == [True, True, False]
+    assert valid.tolist() == [[True, True, False], [True, True, False]]
     R0, t0 = build_frame(coords[:, 0], coords[:, 1], coords[:, 2])
     assert torch.allclose(R[:, 0], R0) and torch.allclose(t[:, 0], t0)
 

@@ -293,6 +293,8 @@ class DesignSourceDataset(Dataset):
             # differ exactly when a retry fired. Recovering the name from the
             # index file afterwards would therefore mislabel those rows.
             "sample_id": self._sample_id(idx),
+            "provider_index": int(idx),
+            "cluster_id": str(self.provider.cluster_ids[idx]) if hasattr(self.provider, "cluster_ids") else "",
         }
 
     def _sample_id(self, idx: int) -> str:
@@ -725,7 +727,7 @@ def _slice_feature_dict(
     # (e.g. a cached/pre-featurized feature dict) — without it that path is a silent
     # wrong-atom gather. Rows whose atom was dropped by the crop become -1, which is
     # exactly what every downstream consumer already treats as "invalid".
-    for _key in ("sc_bb_atom_idx", "sc_token_center_idx"):
+    for _key in ("sc_bb_atom_idx", "sc_token_center_idx", "aa_bb_atom_idx", "aa_fixed_atom37_idx"):
         if _key in feat and isinstance(feat[_key], torch.Tensor):
             v = feat[_key]
             if v.shape[0] == n_token_orig:

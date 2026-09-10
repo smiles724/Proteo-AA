@@ -94,16 +94,17 @@ def phi_psi_from_ncac(
     """
     L = n.shape[-2]
     dev = n.device
-    ri = residue_index.to(dev).reshape(-1).long()
-    ai = asym_id.to(dev).reshape(-1).long()
+    ri = residue_index.to(dev).long()
+    ai = asym_id.to(dev).long()
     if have is None:
         have = torch.ones(L, dtype=torch.bool, device=dev)
-    have = have.to(dev).reshape(-1)
+    have = have.to(dev)
+    ri, ai, have = torch.broadcast_tensors(ri, ai, have)
 
-    prev_ok = torch.zeros(L, dtype=torch.bool, device=dev)
-    prev_ok[1:] = (ai[1:] == ai[:-1]) & (ri[1:] == ri[:-1] + 1) & have[1:] & have[:-1]
-    next_ok = torch.zeros(L, dtype=torch.bool, device=dev)
-    next_ok[:-1] = (ai[:-1] == ai[1:]) & (ri[:-1] + 1 == ri[1:]) & have[:-1] & have[1:]
+    prev_ok = torch.zeros_like(have, dtype=torch.bool)
+    prev_ok[..., 1:] = (ai[..., 1:] == ai[..., :-1]) & (ri[..., 1:] == ri[..., :-1] + 1) & have[..., 1:] & have[..., :-1]
+    next_ok = torch.zeros_like(have, dtype=torch.bool)
+    next_ok[..., :-1] = (ai[..., :-1] == ai[..., 1:]) & (ri[..., :-1] + 1 == ri[..., 1:]) & have[..., :-1] & have[..., 1:]
 
     ar = torch.arange(L, device=dev)
     c_prev = c[..., (ar - 1).clamp_min(0), :]
@@ -136,34 +137,41 @@ def backbone_phi_psi(
     Returns:
         phi, psi: [..., L] float radians, NaN where undefined.
     """
-    bb = bb_idx[..., :3]
-    have = (bb >= 0).all(dim=-1)                          # [L]
-    safe = bb.clamp_min(0)
-    n = coords[..., safe[:, 0], :]                        # [..., L, 3]
-    ca = coords[..., safe[:, 1], :]
-    c = coords[..., safe[:, 2], :]
-    return phi_psi_from_ncac(n, ca, c, residue_index, asym_id, have=have)
+    xyz, present = gather_backbone(coords, bb_idx[..., :3])
+    n, ca, c = xyz.unbind(-2)
+    return phi_psi_from_ncac(n, ca, c, residue_index, asym_id, have=present.all(-1))
+
+
+def gather_backbone(coords: torch.Tensor, bb_idx: torch.Tensor):
+    """Gather [..., L, K, 3] with explicit broadcastable leading axes.
+
+    For [B,S,N,3] coordinates, use [B,1,L,K] per-item indices. Absent atoms
+    are zeroed and masked, never a copy of atom zero.
+    """
+    lead = torch.broadcast_shapes(coords.shape[:-2], bb_idx.shape[:-2])
+    n_atom = coords.shape[-2]
+    if n_atom == 0:
+        raise ValueError("Cannot gather from an empty atom array")
+    idx = bb_idx.to(coords.device).long().expand(*lead, *bb_idx.shape[-2:])
+    valid = (idx >= 0) & (idx < n_atom)
+    xyz = coords.expand(*lead, n_atom, 3).reshape(-1, n_atom, 3)
+    gathered = xyz.gather(1, idx.clamp(0, n_atom - 1).reshape(xyz.shape[0], -1, 1).expand(-1, -1, 3))
+    gathered = gathered.reshape(*idx.shape, 3)
+    return torch.where(valid[..., None], gathered, 0.0), valid
 
 
 def frames_from_backbone_index(coords: torch.Tensor, bb_idx: torch.Tensor):
-    """Build per-residue frames from PREDICTED backbone coords by gathering each
-    token's N/CA/C atoms (paper Stage II-B: F_hat = Frame(x_hat_N, x_hat_CA, x_hat_C)).
+    """Frames from N/CA/C with matching leading axes; O is not required.
 
-    Args:
-        coords: [..., N_atom, 3] predicted (or any) global coordinates.
-        bb_idx: [L, 3] or [L, 4] long — atom indices of (N, CA, C[, O]) per token;
-            -1 = invalid. Only the first three columns are used: the featurizer's
-            `sc_bb_atom_idx` is (N, CA, C, O) and its O column may be -1 on a token
-            whose frame atoms are all present, so validity must NOT be tested over
-            all four columns.
-    Returns:
-        R: [..., L, 3, 3], t: [..., L, 3], valid: [L] bool (False where bb_idx<0).
+    Returns R [...,L,3,3], t [...,L,3], valid [...,L]. Invalid/degenerate
+    frames have identity rotation, zero translation and valid=False.
     """
-    bb_idx = bb_idx[..., :3]                             # frame atoms only (N, CA, C)
-    valid = (bb_idx >= 0).all(dim=-1)                    # [L]
-    safe = bb_idx.clamp_min(0)                           # gather needs non-neg
-    n = coords[..., safe[:, 0], :]                       # [..., L, 3]
-    ca = coords[..., safe[:, 1], :]
-    c = coords[..., safe[:, 2], :]
-    R, t = build_frame(n, ca, c)                         # [..., L, 3, 3], [..., L, 3]
+    xyz, present = gather_backbone(coords, bb_idx[..., :3])
+    n, ca, c = xyz.unbind(-2)
+    valid = present.all(-1) & torch.isfinite(xyz).all(dim=(-1, -2))
+    valid = valid & ((c - ca).norm(dim=-1) > 1e-6)
+    valid = valid & (torch.cross(c - ca, n - ca, dim=-1).norm(dim=-1) > 1e-6)
+    R, t = build_frame(torch.nan_to_num(n), torch.nan_to_num(ca), torch.nan_to_num(c))
+    R = torch.where(valid[..., None, None], R, torch.eye(3, device=R.device, dtype=R.dtype))
+    t = torch.where(valid[..., None], t, 0.0)
     return R, t, valid

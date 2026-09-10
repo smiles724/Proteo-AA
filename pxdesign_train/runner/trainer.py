@@ -80,6 +80,7 @@ class TrainerComponents:
     schedule: CurriculumSchedule
     train_samples_per_epoch: int = 1000
     eval_dataloader: Optional[DataLoader] = None
+    named_eval_dataloaders: Optional[dict[str, DataLoader]] = None
 
 
 class PXDesignTrainer:
@@ -222,6 +223,9 @@ class PXDesignTrainer:
     def _init_model(self) -> None:
         self.raw_model = ProtenixDesignTrain(self.configs).to(self.device)
         self._apply_trainable_filter()
+        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            from pxdesign_train.stage4 import apply_phase
+            apply_phase(self.raw_model)
         if self.use_ddp:
             self.model = DDP(
                 self.raw_model,
@@ -300,6 +304,9 @@ class PXDesignTrainer:
     def _init_optimizer(self) -> None:
         cfg = self.configs.training
         self.train_mode = str(getattr(cfg, "train_mode", "joint"))
+        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            if self.train_mode != "joint":
+                raise ValueError("FaMPNN Stage IV requires joint backward with AA/SC/BB parameter groups")
         warmup = int(getattr(cfg, "warmup_steps", 0))
 
         def _make_adam(params):
@@ -370,6 +377,9 @@ class PXDesignTrainer:
             )
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
+            if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+                from pxdesign_train.stage4 import optimizer_groups
+                params = optimizer_groups(self.raw_model)
             if not params:
                 raise ValueError("No trainable parameters")
             self.optimizer = _make_adam(params)
@@ -509,11 +519,24 @@ class PXDesignTrainer:
             weight_aa_post=getattr(self, "_weight_aa_post", 1.0),
             backbone_atom_mask=batch["input_feature_dict"].get("backbone_loss_mask"),
         )
+        if "stage4_aa_pre" in out:
+            cfg = self.configs.stage4
+            terms = {"aa_pre": cfg.weight_aa_pre, "aa_revision": cfg.weight_aa_revision,
+                     "sc_aux": cfg.weight_sc_aux, "phys": cfg.weight_physical}
+            for name, weight in terms.items():
+                value = out["stage4_" + name]
+                loss_out["stage4/" + name] = value.detach()
+                loss_out["loss"] = loss_out["loss"] + float(weight) * value
+            for name in ("recovery_pre", "recovery_revision"):
+                loss_out["stage4/" + name] = out["stage4_" + name].detach()
         return loss_out
 
     def train_step(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Single training step. Returns the loss-component dict for logging."""
         self.model.train()
+        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            from pxdesign_train.stage4 import apply_phase
+            apply_phase(self.raw_model)
         dtype = self._train_precision()
         ctx = (
             torch.autocast("cuda", dtype=dtype, cache_enabled=False)
@@ -642,6 +665,21 @@ class PXDesignTrainer:
         is stable across evals — which is what makes the rows comparable
         step-to-step.
         """
+        named = getattr(self.components, "named_eval_dataloaders", None)
+        if named:
+            original = self.eval_dl
+            results, rows = {}, []
+            try:
+                self.components.named_eval_dataloaders = None
+                for source, loader in named.items():
+                    self.eval_dl = loader
+                    results.update({f"{source}/{k}":v for k,v in self.evaluate().items()})
+                    rows.extend(dict(source=source,**row) for row in self.last_eval_per_protein)
+            finally:
+                self.eval_dl = original
+                self.components.named_eval_dataloaders = named
+            self.last_eval_per_protein = rows
+            return results
         if self.eval_dl is None:
             self.last_eval_per_protein = []
             return {}
@@ -752,6 +790,16 @@ class PXDesignTrainer:
             # never saw. Recorded separately so an evaluator can reconstruct it.
             "sidechain_edm_hparams": self._sidechain_edm_hparams(),
         }
+        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            from pxdesign_train.stage4 import checkpoint_identity
+            state["stage4_identity"] = checkpoint_identity(self.raw_model)
+            from pathlib import Path
+            import json
+            provenance = Path(self.checkpoint_dir).parent / "provenance.json"
+            if provenance.is_file():
+                state["run_provenance"] = json.loads(provenance.read_text())
+            state["rng_torch"] = torch.get_rng_state()
+            state["rng_cuda"] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
         if self.train_mode == "alternating":
             state["sc_optimizer"] = self.sc_optimizer.state_dict()
             state["bb_optimizer"] = self.bb_optimizer.state_dict()
@@ -922,6 +970,23 @@ class PXDesignTrainer:
 
     def load_checkpoint(self, path: str, params_only: bool = False) -> None:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            from pxdesign_train.stage4 import checkpoint_identity
+            recorded = ckpt.get("stage4_identity")
+            expected = checkpoint_identity(self.raw_model)
+            if not params_only and recorded != expected:
+                raise ValueError("Stage IV resume identity differs; use an explicit params-only warm start")
+            if recorded is not None:
+                for key in ("backend", "upstream_revision", "checkpoint_sha256", "model_config", "mapping_version"):
+                    if recorded.get(key) != expected.get(key):
+                        raise ValueError(f"Stage IV checkpoint {key} mismatch")
+            if params_only and recorded is None:
+                ckpt = dict(ckpt)
+                ckpt["model"] = {k:v for k,v in ckpt["model"].items() if not k.removeprefix("module.").startswith("design_residue_type_head.")}
+            if not params_only and "rng_torch" in ckpt:
+                torch.set_rng_state(ckpt["rng_torch"].cpu())
+                if torch.cuda.is_available() and ckpt.get("rng_cuda"):
+                    torch.cuda.set_rng_state_all([x.cpu() for x in ckpt["rng_cuda"]])
         load_strict = bool(getattr(self.configs, "load_strict", False))
         # Strip DDP prefix if loading a DDP checkpoint into a single-GPU model.
         self._check_sidechain_arch(ckpt)
@@ -929,6 +994,11 @@ class PXDesignTrainer:
         if not self.use_ddp and any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
         state = self._migrate_atom_name_vocab(state)
+        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            required = {k: v for k,v in self.model.state_dict().items() if k.removeprefix("module.").startswith(("diffusion_module.", "sidechain_module.", "input_embedder."))}
+            incompatible = [k for k,v in required.items() if k not in state or state[k].shape != v.shape]
+            if incompatible:
+                raise ValueError(f"Stage IV donor is missing compatible backbone/packer weights: {incompatible[:12]}")
         if params_only and not load_strict:
             include_prefixes = getattr(
                 getattr(self.configs, "training", object()),

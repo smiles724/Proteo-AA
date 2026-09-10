@@ -54,11 +54,11 @@ def test_stage_names_are_selectable_on_the_cli(source):
 
 def test_coevolution_turns_on_the_machinery_it_is_named_for(source):
     """Stage III without the refinement pass is just Stage I with extra loss terms."""
-    start = source.index('elif args.training_stage in ("coevolution", "predicted_mask")')
+    start = source.index('elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn")')
     block = source[start:source.index("    return configs", start)]
     assert "configs.enable_sidechain = True" in block
     assert "configs.enable_coevolution = True" in block
-    assert 'args.training_stage == "predicted_mask"' in block
+    assert 'args.training_stage in ("predicted_mask", "stage4_fampnn")' in block
     assert "configs.sidechain.per_sigma = True" in block
     # Stage III teacher-forces geometry/atom composition, while the AA logits
     # remain a learned feature supplied by B_pre as Fang specified.
@@ -76,11 +76,11 @@ def test_joint_stage_still_declares_itself_sidechain_free(source):
 def test_stage_iv_opens_predicted_geometry_and_atom_sets(source):
     """Stage III uses GT geometry/atom sets; Stage IV matches inference inputs."""
     bundle = source[
-        source.index('elif args.training_stage in ("coevolution", "predicted_mask")'):
+        source.index('elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn")'):
         source.index("    return configs")
     ]
-    assert 'args.training_stage == "predicted_mask"' in bundle
-    start = source.index('if args.training_stage == "predicted_mask"')
+    assert 'args.training_stage in ("predicted_mask", "stage4_fampnn")' in bundle
+    start = source.index('if args.training_stage in ("predicted_mask", "stage4_fampnn")')
     block = source[start:start + 900]
     assert "configs.sidechain.predicted_mask = True" in block
     assert "configs.sidechain.route_by_type = True" in block
@@ -103,19 +103,19 @@ def test_every_stage_sets_the_dataset_args_it_needs(source):
 def test_stage_iii_iv_frame_curriculum_is_explicit_in_both_bundles(source):
     """III teacher-forces geometry; IV alone opens predicted frames."""
     config_start = source.index(
-        'elif args.training_stage in ("coevolution", "predicted_mask")'
+        'elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn")'
     )
     config_block = source[config_start:source.index("    return configs", config_start)]
     assert (
         'configs.sidechain.predicted_frame = (\n'
-        '            args.training_stage == "predicted_mask"\n'
+        '            args.training_stage in ("predicted_mask", "stage4_fampnn")\n'
         '        )'
     ) in config_block
 
     apply_start = source.index("def apply_training_stage_args")
     apply_block = source[apply_start:source.index("def parse_args", apply_start)]
     assert (
-        'args.predicted_frame = args.training_stage == "predicted_mask"'
+        'args.predicted_frame = args.training_stage in ("predicted_mask", "stage4_fampnn")'
         in apply_block
     )
 
@@ -148,7 +148,7 @@ def test_coevolution_adopts_the_checkpoint_layout(source):
     checkpoint (centre_coord_input False vs True -> `_check_sidechain_arch` aborts;
     q_bs True vs False -> an untrained fusion channel switched on silently).
     """
-    start = source.index('elif args.training_stage in ("coevolution", "predicted_mask")')
+    start = source.index('elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn")')
     block = source[start:source.index("    return configs", start)]
     assert "adopt_sidechain_arch_from_checkpoint(configs, args)" in block, (
         "Stage III/IV must adopt the warm-start checkpoint's side-chain layout"

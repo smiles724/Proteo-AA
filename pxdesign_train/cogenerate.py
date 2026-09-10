@@ -22,6 +22,7 @@ import logging
 
 import torch
 
+from pxdesign_train.aa.masking import assign_aa
 from pxdesign_train.sampler import build_aa20_to_restype36, _unmask_counts
 
 
@@ -43,6 +44,7 @@ def cogenerate(
     seq_patience: int = 3,
     seq_mode: str = "complete_unmask",
     refinement_steps: int = 3,
+    seed: int = 0,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -74,6 +76,14 @@ def cogenerate(
     Returns {coordinate, sequence (aa20 per design token, -1 elsewhere),
              trajectory}.
     """
+    if getattr(model, "aa_backend", "mlp") == "fampnn":
+        if not sidechain_cycle:
+            raise ValueError("FaMPNN co-generation requires sidechain_cycle=True")
+        if stop_on_seq_stable:
+            raise ValueError("Stage IV currently uses a fixed budget; adaptive stopping is not enabled")
+        from pxdesign_train.stage4 import generate
+        return generate(model, input_feature_dict, N_step=N_step, temperature=temperature,
+                        refinement_steps=refinement_steps, seed=seed)
     from protenix.model.protenix import update_input_feature_dict
 
     assert model.aa_input_source == "diffusion_internal", (
@@ -92,6 +102,7 @@ def cogenerate(
             "refinement_steps to control the refinement rollout."
         )
     model.eval()
+    torch.manual_seed(seed)
 
     feat = dict(input_feature_dict)
     feat = model.diffusion_module.diffusion_conditioning.relpe.generate_relp(feat)
@@ -339,7 +350,8 @@ def cogenerate(
             logits = logits.squeeze(0)  # [N_token, 20]
         probs = torch.softmax(logits, dim=-1)
         final_aa_probs = probs
-        conf, pred = probs.max(dim=-1)
+        conf = probs.max(dim=-1).values
+        pred = assign_aa(logits, temperature)
 
         if seq_mode == "sequential":
             # LLaDA-style progressive commit: reveal the top-k highest-confidence

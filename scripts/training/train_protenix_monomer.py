@@ -296,16 +296,16 @@ def build_source_components(
         "name": dataset_name,
         **protenix_configs.data[dataset_name].base_info,
         "cropping_configs": protenix_configs.data[dataset_name].cropping_configs,
-        "msa_featurizer": get_msa_featurizer(protenix_configs, dataset_name, "train"),
+        "msa_featurizer": get_msa_featurizer(protenix_configs, dataset_name, "train") if args.use_msa else None,
         "template_featurizer": get_template_featurizer(
             protenix_configs, dataset_name, "train"
-        ),
+        ) if args.use_template else None,
         "lig_atom_rename": False,
         "shuffle_mols": False,
         "shuffle_sym_ids": False,
         "constraint": {},
         "ref_pos_augment": bool(args.ref_pos_augment),
-        "limits": int(args.dataset_limit),
+        "limits": -1 if args.training_stage == "stage4_fampnn" and "ppi" in source_name else int(args.dataset_limit),
     }
     base_dataset = BaseSingleDataset(**dataset_param)
     provider = ProtenixComplexProvider(
@@ -314,6 +314,14 @@ def build_source_components(
         expose_sample_indice=True,
     )
 
+    if args.training_stage == "stage4_fampnn" and "ppi" in source_name:
+        from pxdesign_train.data.clusters import ClusterPartitionProvider
+        frame = base_dataset.indices_list
+        if not hasattr(frame, "columns") or "cluster_id" not in frame:
+            raise ValueError("Stage IV requires row-aligned Protenix cluster_id metadata")
+        provider = ClusterPartitionProvider(provider, frame.cluster_id.astype(str).tolist(),
+            validation=getattr(args, "_dataset_role", "train") == "validation",
+            fraction=float(args.binder_validation_fraction), seed=int(args.eval_seed), limit=int(args.dataset_limit))
     src = DesignSourceDataset(
         provider=provider,
         source_name=source_name,
@@ -388,8 +396,11 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         pinder_root=Path(args.pinder_root),
         cif_cache_dir=Path(args.pinder_cif_cache),
         archive_path=Path(args.pinder_archive),
-        split="train",
+        split="val" if getattr(args, "_dataset_role", "train") == "validation" else "train",
         limit=int(args.complex_limit_index),
+        min_n_token=int(args.min_n_token), max_n_token=int(args.complex_max_n_token),
+        cluster_disjoint=args.training_stage == "stage4_fampnn",
+        max_binder_tokens=int(args.crop_size * args.complex_max_binder_fraction) if args.training_stage == "stage4_fampnn" else 0,
     )
     src = DesignSourceDataset(
         provider=provider,
@@ -409,10 +420,11 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         max_crop_retries=int(args.max_crop_retries),
         seed=int(args.seed),
     )
+    from pxdesign_train.data.clusters import source_weights
     multi = CurriculumMultiDataset(
         datasets=[src],
         source_names=["pinder_ppi_complex"],
-        per_item_weights=[[1.0] * len(src)],
+        per_item_weights=[source_weights(src, required=args.training_stage == "stage4_fampnn")],
     )
     schedule = CurriculumSchedule(
         stage1={"pinder_ppi_complex": 1.0},
@@ -449,7 +461,8 @@ def build_mixed_components(
     )
     datasets = [mono_components.train_dataset.datasets[0]]
     source_names = ["protenix_monomer"]
-    per_item_weights = [[1.0] * len(datasets[0])]
+    from pxdesign_train.data.clusters import source_weights
+    per_item_weights = [source_weights(datasets[0])]
     source_counts = {
         "monomer": n_mono,
         "protenix_complex": 0,
@@ -469,7 +482,7 @@ def build_mixed_components(
         ds = complex_components.train_dataset.datasets[0]
         datasets.append(ds)
         source_names.append("protenix_ppi_complex")
-        per_item_weights.append([1.0] * len(ds))
+        per_item_weights.append(source_weights(ds, required=args.training_stage == "stage4_fampnn"))
         source_counts["protenix_complex"] = n_complex
 
     if args.complex_provider in {"pinder", "both"}:
@@ -481,7 +494,7 @@ def build_mixed_components(
         ds = complex_components.train_dataset.datasets[0]
         datasets.append(ds)
         source_names.append("pinder_ppi_complex")
-        per_item_weights.append([1.0] * len(ds))
+        per_item_weights.append(source_weights(ds, required=args.training_stage == "stage4_fampnn"))
         source_counts["pinder_complex"] = n_complex
 
     start_monomer = float(args.stage2_start_monomer_frac)
@@ -580,6 +593,32 @@ def build_eval_dataloader(args: argparse.Namespace, output_dir: Path):
     return eval_loader, len(eval_dataset), filtered_index
 
 
+def build_stage4_binder_validation(args, protenix_index, pinder_manifest):
+    from torch.utils.data import DataLoader
+    from pxdesign_train.runner import select_protenix_chain_2
+    from pxdesign_train.runner.trainer import _identity_collate
+    if args.eval_interval <= 0 or args.eval_samples <= 0:
+        return {}
+    eval_args = argparse.Namespace(**vars(args))
+    eval_args._dataset_role = "validation"
+    eval_args.ref_pos_augment = False
+    eval_args.dataset_limit = int(args.eval_samples)
+    eval_args.complex_limit_index = int(args.eval_samples)
+    loaders = {}
+    if protenix_index is not None:
+        component, _ = build_source_components(eval_args,protenix_index,source_name="protenix_ppi_validation",
+            binder_selector_fn=select_protenix_chain_2(),max_binder_fraction=float(args.complex_max_binder_fraction))
+        loaders["binder_protenix"] = DataLoader(component.train_dataset.datasets[0],batch_size=1,
+            shuffle=False,num_workers=int(args.eval_num_workers),collate_fn=_identity_collate)
+    if pinder_manifest is not None:
+        component, _ = build_pinder_source_components(eval_args,pinder_manifest)
+        loaders["binder_pinder"] = DataLoader(component.train_dataset.datasets[0],batch_size=1,
+            shuffle=False,num_workers=int(args.eval_num_workers),collate_fn=_identity_collate)
+    if not loaders:
+        raise ValueError("Stage IV validation requires an explicit binder source (mixed_monomer_complex)")
+    return loaders
+
+
 def build_configs(args: argparse.Namespace, device):
     from protenix.config.config import parse_configs
     from pxdesign_train.configs.configs_train import (
@@ -593,6 +632,9 @@ def build_configs(args: argparse.Namespace, device):
     configs.load_strict = False
 
     configs.training.crop_size = int(args.crop_size)
+    configs.training.diffusion_batch_size = int(args.diffusion_batch_size)
+    if configs.training.diffusion_batch_size < 1:
+        raise ValueError("--diffusion-batch-size must be positive")
     configs.training.max_steps = int(args.max_steps)
     configs.training.lr = float(args.lr)
     configs.training.warmup_steps = int(args.warmup_steps)
@@ -828,7 +870,7 @@ def build_configs(args: argparse.Namespace, device):
         configs.training.trainable_param_keywords = ["design_residue_type_head."]
         configs.training.ema_decay = 0.0
         adopt_sidechain_arch_from_checkpoint(configs, args)
-    elif args.training_stage in ("coevolution", "predicted_mask"):
+    elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn"):
         # Paper Stage III (coevolution) and Stage IV (predicted_mask). Neither had
         # an entry here: `joint` above is BB + AA head with the side chain OFF, so
         # the co-evolution machinery that Stage III is *about* -- S_phi, the
@@ -845,7 +887,7 @@ def build_configs(args: argparse.Namespace, device):
         # This switch changes only data routing, not parameter shapes/layout, and
         # B_post still refines B_pre's predicted x_hat_0 in both stages.
         configs.sidechain.predicted_frame = (
-            args.training_stage == "predicted_mask"
+            args.training_stage in ("predicted_mask", "stage4_fampnn")
         )
         configs.sidechain.per_sigma = True
         configs.sidechain.template_init = True
@@ -856,7 +898,7 @@ def build_configs(args: argparse.Namespace, device):
         # side-chain module all carry over, so no prefix filter.
         configs.training.checkpoint_include_prefixes = []
         configs.training.trainable_param_keywords = []
-        if args.training_stage == "predicted_mask":
+        if args.training_stage in ("predicted_mask", "stage4_fampnn"):
             # Stage IV: instantiate the atom set from the PREDICTED identity, and
             # supervise coordinates only where that identity is right. Turning
             # predicted_mask on is also what makes L_aa^post safe to supervise:
@@ -871,6 +913,38 @@ def build_configs(args: argparse.Namespace, device):
         # LAYOUT has to be whatever that checkpoint was trained with -- not this
         # stage's defaults. Adopt it from the checkpoint's own record.
         adopt_sidechain_arch_from_checkpoint(configs, args)
+    if args.training_stage == "stage4_fampnn":
+        if not args.fampnn_checkpoint or not Path(args.fampnn_checkpoint).is_file():
+            raise ValueError("Stage IV requires --fampnn-checkpoint with released pretrained weights")
+        if args.load_aa_head_from:
+            raise ValueError("Stage IV replaces the old AA head; --load-aa-head-from is incompatible")
+        if bool(configs.sidechain.edm):
+            raise ValueError("Stage IV requires a one-step donor (sidechain.edm=false)")
+        if args.allow_binder_sidechain_leakage:
+            raise ValueError("Stage IV requires strict inference-safe binder featurization")
+        configs.residue_type.backend = "fampnn"
+        configs.residue_type.fampnn_checkpoint = str(Path(args.fampnn_checkpoint).resolve())
+        configs.training.train_mode = "joint"
+        configs.training.ema_decay = 0.0
+        configs.loss.aa_time_weighting = False
+        configs.sidechain.detach_feedback = False
+        configs.sidechain.mismatch_loss = "none"
+        configs.sidechain.pack_loss = float(args.stage4_weight_physical)
+        configs.sidechain.predicted_frame = True
+        configs.sidechain.predicted_mask = True
+        configs.sidechain.per_sigma = True
+        configs.loss.weight_sc_pack = float(args.stage4_weight_physical)
+        configs.stage4.phase = args.stage4_phase
+        for key in ("train_rounds", "inference_rounds", "decode_blocks", "query_fraction", "whole_mask_probability",
+                    "temperature", "sc_to_aa", "sc_to_bb", "aa_lr", "sc_lr", "bb_lr", "weight_physical"):
+            setattr(configs.stage4, key, getattr(args, "stage4_" + key))
+        if args.stage4_phase == "IV-A":
+            configs.loss.weight_mse = 0.0
+            configs.loss.weight_lddt = 0.0
+            configs.loss.weight_disto = 0.0
+            configs.loss.weight_bb_post = 0.0
+        if args.stage4_inference_rounds < 2:
+            raise ValueError("Stage IV production inference requires at least two outer rounds")
     return configs
 
 
@@ -1066,7 +1140,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.predicted_frame = False
         args.per_sigma = True
         args.trunk_grad_scale = 0.0
-    elif args.training_stage in ("coevolution", "predicted_mask"):
+    elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn"):
         args.disable_sidechain = False
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
@@ -1074,7 +1148,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         # Stage III teacher-forces only S_phi's backbone geometry. Stage IV opens
         # that input to the predicted frame; learned B_pre features remain live in
         # both stages.
-        args.predicted_frame = args.training_stage == "predicted_mask"
+        args.predicted_frame = args.training_stage in ("predicted_mask", "stage4_fampnn")
         args.per_sigma = True
 
 
@@ -1114,7 +1188,7 @@ def parse_args() -> argparse.Namespace:
         default="backbone_only",
         choices=[
             "backbone_only", "aa_head_warmup", "sidechain_warmup", "joint",
-            "aa_head_on_stage2", "coevolution", "predicted_mask",
+            "aa_head_on_stage2", "coevolution", "predicted_mask", "stage4_fampnn",
         ],
         help="Training objective bundle. backbone_only is the default pretraining "
              "stage; 'coevolution' is paper Stage III (both modules + the "
@@ -1233,6 +1307,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dtype", default="bf16", choices=["fp32", "bf16", "fp16"])
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--export-stage4-validation", action="store_true", help="Save strict binder batches and cluster manifests for generated-state evaluation")
+    p.add_argument("--diffusion-batch-size", type=int, default=8, help="Backbone noise samples per training item; Stage IV warmup uses 1")
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -1358,6 +1434,21 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--protenix-code-dir", default="")
     p.add_argument("--pxdesign-code-dir", default="")
+    p.add_argument("--binder-validation-fraction", type=float, default=0.1)
+    p.add_argument("--fampnn-checkpoint", default="")
+    p.add_argument("--stage4-phase", choices=["IV-A", "IV-B", "IV-C"], default="IV-A")
+    p.add_argument("--stage4-train-rounds", type=int, default=1)
+    p.add_argument("--stage4-inference-rounds", type=int, default=3)
+    p.add_argument("--stage4-decode-blocks", type=int, default=4)
+    p.add_argument("--stage4-query-fraction", type=float, default=0.5)
+    p.add_argument("--stage4-whole-mask-probability", type=float, default=0.1)
+    p.add_argument("--stage4-temperature", type=float, default=0.0)
+    p.add_argument("--stage4-sc-to-aa", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--stage4-sc-to-bb", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--stage4-aa-lr", type=float, default=1e-5)
+    p.add_argument("--stage4-sc-lr", type=float, default=1e-5)
+    p.add_argument("--stage4-bb-lr", type=float, default=1e-6)
+    p.add_argument("--stage4-weight-physical", type=float, default=0.1)
     return p.parse_args()
 
 
@@ -1515,7 +1606,18 @@ def main() -> None:
         components, n_items = build_components(args, filtered_index)
     eval_loader, n_eval, eval_filtered_index = build_eval_dataloader(args, output_dir)
     components.eval_dataloader = eval_loader
+    if args.training_stage == "stage4_fampnn":
+        components.named_eval_dataloaders = build_stage4_binder_validation(args,protenix_complex_index,pinder_manifest)
+        if eval_loader is not None:
+            components.named_eval_dataloaders["monomer_retention"] = eval_loader
     configs = build_configs(args, device)
+    if args.training_stage == "stage4_fampnn":
+        import json
+        (output_dir / "resolved_config.json").write_text(json.dumps(configs.to_dict(), indent=2, default=str))
+        (output_dir / "arguments.json").write_text(json.dumps(vars(args), indent=2, default=str))
+        if args.export_stage4_validation:
+            from pxdesign_train.stage4_validation import export_validation
+            export_validation(components, output_dir / "validation_batches")
     if args.dry_run:
         dry_run_components(components, n_items)
         if eval_loader is not None:

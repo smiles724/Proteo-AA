@@ -30,7 +30,8 @@ def sidechain_local_loss(
     — otherwise the loss would scale with N_sample. This is a masked mean, so its
     scale is invariant to N_sample.
     """
-    se = ((pred_local - gt_local) ** 2).sum(dim=-1)   # [..., A] (may broadcast)
+    delta = torch.where(mask.bool()[..., None], pred_local - gt_local, 0.)
+    se = delta.square().sum(dim=-1)   # [..., A] (may broadcast)
     m = mask.to(se.dtype).expand_as(se)               # match numerator's coverage
     return (se * m).sum() / (m.sum() + eps)
 
@@ -81,8 +82,10 @@ def sidechain_global_frame_aligned_loss(
     `pred_global` is already in the global frame, so gradients flow to S_phi's coordinate
     output but not through `frame_R` / `frame_t`.
     """
-    target = to_global(gt_local, frame_R.detach(), frame_t.detach())
-    se = ((pred_global - target) ** 2).sum(dim=-1)
+    clean_target = torch.where(mask.bool()[..., None], gt_local, 0.)
+    target = to_global(clean_target, frame_R.detach(), frame_t.detach())
+    delta = torch.where(mask.bool()[..., None], pred_global - target, 0.)
+    se = delta.square().sum(dim=-1)
     m = mask.to(se.dtype).expand_as(se)
     if row_weight is not None:
         # EDM lambda(sigma), one per batch ROW. It multiplies BOTH the numerator and

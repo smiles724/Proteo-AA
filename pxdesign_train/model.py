@@ -34,7 +34,7 @@ from pxdesign_train.sidechain.init import (
     template_init_local,
     templates_available,
 )
-from pxdesign_train.sidechain.coevolution import ATokenFusion, HResInjector, QAtomFusion
+from pxdesign_train.sidechain.coevolution import ATokenFusion, HResInjector, QAtomFusion, pool_side_chain_atoms
 from pxdesign_train.sidechain.frames import to_global, to_local
 from pxdesign_train.sidechain.physical import physical_loss
 
@@ -115,7 +115,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 c_token=configs.model.design_diffusion_distogram.c_z,
                 no_bins=configs.model.design_diffusion_distogram.no_bins,
             )
-        if self.enable_residue_type_head:
+        if self.enable_residue_type_head or getattr(configs, "enable_sidechain", False):
             res_cfg = getattr(configs, "residue_type", None)
             vocab_size = getattr(res_cfg, "vocab_size", 20) if res_cfg is not None else 20
             use_time = bool(getattr(res_cfg, "use_time_embedding", True)) if res_cfg is not None else True
@@ -147,9 +147,16 @@ class ProtenixDesignTrain(ProtenixDesign):
                 c_in = getattr(configs, "c_s_inputs", None)
                 if c_in is None:
                     c_in = getattr(getattr(configs, "model", object()), "c_s_inputs", 449)
-            self.design_residue_type_head = DesignResidueTypeHead(
-                c_s=c_in, no_bins=vocab_size, use_time=use_time,
-            )
+            self.aa_backend = str(getattr(res_cfg, "backend", "mlp"))
+            if self.aa_backend == "mlp" and self.enable_residue_type_head:
+                self.design_residue_type_head = DesignResidueTypeHead(
+                    c_s=c_in, no_bins=vocab_size, use_time=use_time,
+                )
+            elif self.aa_backend == "fampnn":
+                from pxdesign_train.aa.fampnn_head import FaMPNNHead
+                self.aa_head = FaMPNNHead(res_cfg.fampnn_checkpoint)
+            elif self.aa_backend != "mlp":
+                raise ValueError(f"Unknown AA backend {self.aa_backend!r}")
         # Capture (and, under sidechain.a_direct, REPLACE) the internal per-token
         # representation via a forward hook — NO edit to the Protenix/PXDesign
         # submodule source. Registered below, after the side-chain switches are
@@ -187,10 +194,6 @@ class ProtenixDesignTrain(ProtenixDesign):
         # ---- Side-Chain Module S_phi (Stage II-A) ----
         self.enable_sidechain = getattr(configs, "enable_sidechain", False)
         if self.enable_sidechain:
-            assert self.enable_residue_type_head, (
-                "enable_sidechain requires enable_residue_type_head (S_phi conditions "
-                "on the residue-type logits and reads the same h_res=a_token)."
-            )
             sc_cfg = getattr(configs, "sidechain", None)
             # h_res dim == the representation the AA head reads (a_token c_token
             # for diffusion_internal, else s_inputs dim).
@@ -516,7 +519,7 @@ class ProtenixDesignTrain(ProtenixDesign):
         # A forward hook that returns non-None REPLACES the module's output, which
         # is how a'_bb becomes the token the atom decoder actually consumes.
         if (
-            self.enable_residue_type_head
+            (self.enable_residue_type_head or self.enable_sidechain)
             and self.aa_input_source == "diffusion_internal"
         ) or self.sc_a_direct:
             self.diffusion_module.layernorm_a.register_forward_hook(
@@ -560,11 +563,11 @@ class ProtenixDesignTrain(ProtenixDesign):
         repeated call recomputes the same a'_bb instead of compounding a residual.
         """
         cache = (
-            self.enable_residue_type_head
+            (self.enable_residue_type_head or self.enable_sidechain)
             and self.aa_input_source == "diffusion_internal"
         )
         fused = None
-        if getattr(self, "_a_direct_active", False):     # refinement pass only
+        if getattr(self, "_a_direct_active", False) and getattr(self, "sc_a_direct", False):
             a_sc = getattr(self, "_a_sc_cache", None)    # None on the first pass
             if a_sc is not None:
                 a_sc = self._align_a_sc(a_sc, out)
@@ -695,9 +698,6 @@ class ProtenixDesignTrain(ProtenixDesign):
         """
         q_sc = getattr(self, "_q_sc_cache", None)
         bb_idx = getattr(self, "_q_bb_idx_cache", None)
-        if q_sc is None or bb_idx is None:
-            return None                       # first pass: S_phi has not run yet
-
         pos = None
         if "q_skip" in kwargs:
             q_in = kwargs["q_skip"]
@@ -715,14 +715,16 @@ class ProtenixDesignTrain(ProtenixDesign):
             calls = self._q_inject_calls = {}
         key = id(q_in)
         if key in calls:
-            pass                                   # recompute of an injected call -> inject
-        elif getattr(self, "_q_direct_active", False):
+            # Each round retains its own feedback, even after final/auxiliary
+            # packing overwrites the live caches before backward recomputation.
+            _, q_sc, bb_idx = calls[key]
+        elif getattr(self, "_q_direct_active", False) and q_sc is not None and bb_idx is not None:
             # Only register under grad: the registry exists solely so the backward
             # RECOMPUTE of a checkpointed decoder call reaches the same decision as its
             # forward. Under no_grad (inference) there is no recompute, so registering
             # would just strong-reference every step's q_skip for the whole sampling run.
             if torch.is_grad_enabled():
-                calls[key] = q_in                  # forward of the refinement pass
+                calls[key] = (q_in, q_sc, bb_idx)  # immutable inputs for this round
         else:
             return None                            # first pass (or unarmed) -> never inject
 
@@ -847,33 +849,30 @@ class ProtenixDesignTrain(ProtenixDesign):
                 "falls back to the backbone-independent marginal.",
             )
             return None, None
-        ri = ri.detach().cpu().reshape(-1)[:n_token]
-        ai = ai.detach().cpu().reshape(-1)[:n_token]
-
+        def rows(value, trailing):
+            value = value.detach().cpu()
+            if value.ndim == trailing:
+                value = value.unsqueeze(0)
+            value = value.reshape(-1, *value.shape[-trailing:])
+            if n_rows % value.shape[0]:
+                raise ValueError("Template conditioning item/sample axes cannot be aligned")
+            return value.repeat_interleave(n_rows // value.shape[0], dim=0)
+        ri, ai = rows(ri, 1), rows(ai, 1)
         bb_idx = input_feature_dict.get("sc_bb_atom_idx")
         if bb_idx is None:
             return None, None
-        bb_idx = bb_idx.detach().cpu().long().reshape(-1, bb_idx.shape[-1])[:n_token]
-        # The featurizer fills the backbone slots for BINDER tokens only; everything else
-        # is -1 (and sc_bb_coords is all-zero there). Without this mask the GT branch would
-        # read those zeros as real coordinates, find a "peptide bond" of length 0, and hand
-        # back a confident-looking dihedral of three coincident points.
-        have = (bb_idx[:, :3] >= 0).all(dim=-1)
-
+        bb_idx = rows(bb_idx, 2).long()
+        have = (bb_idx[..., :3] >= 0).all(-1)
         xden = out.get("x_denoised")
         phi = psi = None
         if use_predicted and xden is not None:
-            x = xden.detach().cpu().float()
-            x = x.reshape(-1, x.shape[-2], x.shape[-1])          # [B*N_sample, N_atom, 3]
+            x = rows(xden, 2).float()
             phi, psi = backbone_phi_psi(x, bb_idx, ri, ai)
         else:
-            gt = input_feature_dict.get("sc_bb_coords")          # [.., L, 4, 3] (N,CA,C,O)
+            gt = input_feature_dict.get("sc_bb_coords")
             if gt is not None:
-                g = gt.detach().cpu().float()
-                g = g.reshape(-1, g.shape[-3], g.shape[-2], g.shape[-1])
-                phi, psi = phi_psi_from_ncac(
-                    g[..., 0, :], g[..., 1, :], g[..., 2, :], ri, ai, have=have
-                )
+                g = rows(gt, 3).float()
+                phi, psi = phi_psi_from_ncac(g[...,0,:], g[...,1,:], g[...,2,:], ri, ai, have=have)
         if phi is None:
             return None, None
 
@@ -894,6 +893,13 @@ class ProtenixDesignTrain(ProtenixDesign):
                 )
                 return None, None
         return phi.contiguous(), psi.contiguous()
+
+    def backbone_features(self, sigma):
+        """Read the current structural state independently of the AA backend."""
+        a = self._a_token_cache
+        if a is None:
+            raise RuntimeError("Stage IV requires captured predicted backbone h/a features")
+        return a
 
     def _warn_once(self, flag: str, msg: str) -> None:
         if not getattr(self, flag, False):
@@ -983,6 +989,9 @@ class ProtenixDesignTrain(ProtenixDesign):
             chunk_size=chunk_size,
         )
 
+        if getattr(self, "aa_backend", "mlp") == "fampnn":
+            input_feature_dict = dict(input_feature_dict, stage4_fixed_context=True)
+
         # 2. One-step denoising under EDM training noise.
         x_gt_aug, x_denoised, sigma, x_noisy = sample_diffusion_training(
             noise_sampler=self.training_noise_sampler,
@@ -1010,7 +1019,10 @@ class ProtenixDesignTrain(ProtenixDesign):
         # 3. Distogram on conditioning pair z, when enabled.
         if self.enable_distogram_head:
             out["distogram_logits"] = self.design_distogram_head(z)
-        if self.enable_residue_type_head:
+        if getattr(self, "aa_backend", "mlp") == "fampnn":
+            from pxdesign_train.stage4 import training_forward
+            return training_forward(self, input_feature_dict, out, s_inputs, s, z)
+        if self.enable_residue_type_head or self.enable_sidechain:
             aa_t = input_feature_dict.get("aa_t")
             token_repr = s_inputs
             a_full = None  # per-sample (per-sigma) representation, if available
@@ -1056,6 +1068,115 @@ class ProtenixDesignTrain(ProtenixDesign):
                 if a_full is not None else out["aa_logits_reduced"]
             )
 
+        self.pack_backbone_state(input_feature_dict, out)
+
+        # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
+        #    using the side-chain-informed h_res'. h_res' is injected into the
+        #    (zero) token trunk s_trunk, then the backbone denoise is re-run.
+        #    NOTE: s_trunk is sample-shared in the Protenix diffusion (the N_sample
+        #    axis is created inside the module), so we inject the sigma-REDUCED
+        #    h_res' here. True per-sigma feedback needs a per-sample s_trunk
+        #    (submodule change) — see README. post_aa stays gated (M2).
+        if getattr(self, "enable_coevolution", False) and "h_res_prime_reduced" in out:
+            h_res_prime = out["h_res_prime_reduced"]
+            # INDIRECT token-level feedback (sidechain.hres_inject, default ON = today's
+            # behaviour): h_res' -> HResInjector -> s_trunk, and the DiffusionModule then
+            # recomputes a_token from it. Turning this OFF is what makes a TRUE no-feedback
+            # control possible: the refinement pass still runs (B_theta is still called a
+            # second time), but it carries NO side-chain information at all. That is the
+            # arm that answers "does the co-evolution channel buy anything?" -- it is NOT
+            # the same as enable_coevolution=False, which removes the refinement pass
+            # entirely and would confound "second pass" with "side-chain feedback".
+            # Explicit pass identity is independent of the feedback ablation:
+            # even a no-feedback B_post still receives x_hat_0 rather than x_sigma.
+            s_trunk_refine = s + self.refinement_pass_embedding.to(s.dtype)
+            if getattr(self, "sc_hres_inject", True):
+                s_trunk_refine = (
+                    s_trunk_refine + self.hres_injector(h_res_prime).to(s.dtype)
+                )
+            # DIRECT a-level feedback (sidechain.a_direct): arm the layernorm_a hook
+            # for the duration of THIS call only. The first pass above ran with the
+            # flag down (and with _a_sc_cache=None), so a'_bb = a_bb + MLP(...) can
+            # only happen here, in the refinement pass — which is also the only pass
+            # where a_sc exists. The finally-clause disarms it even if the diffusion
+            # call raises, so a later first pass can never inherit a live flag.
+            self._a_direct_active = bool(
+                (getattr(self, "sc_a_direct", False) or getattr(self, "sc_a_direct_pre", False)) and self._a_sc_cache is not None
+            )
+            # Same pass scoping for the ATOM-level channel: the decoder pre-hook only
+            # rewrites q_skip while this flag is up, i.e. inside the refinement call —
+            # the only pass where q_sc_bb exists ("only available after the first-round").
+            self._q_direct_active = bool(
+                getattr(self, "sc_q_direct", False)
+                and self._q_sc_cache is not None
+                and self._q_bb_idx_cache is not None
+            )
+            try:
+                # Continue from the structure produced by B_pre. This is iterative
+                # refinement, not a second prediction of the original noisy state:
+                #
+                #   x_noisy -> B_pre -> x_denoised -> B_post -> x_denoised_post
+                #
+                # B_post also receives the side-chain feedback through
+                # s_trunk_refine and the armed a/q hooks. Reusing x_gt_aug preserves
+                # the first pass's coordinate frame. Do NOT reuse B_pre's randomly
+                # sampled physical sigma here: B_post's input is already x_hat_0,
+                # not x_sigma. Train and inference instead share one explicit
+                # refinement sigma so they learn/execute the same transition.
+                # `torch.full_like` below changes only DiffusionModule conditioning
+                # and EDM c_skip/c_out; it does NOT add noise to x_denoised. The
+                # coordinate input remains B_pre's prediction exactly.
+                refinement_sigma = torch.full_like(
+                    sigma, self.sc_refinement_sigma
+                )
+                x_gt_aug_post, x_denoised_post, sigma_post, _ = sample_diffusion_training(
+                    noise_sampler=self.training_noise_sampler,
+                    denoise_net=self.diffusion_module,
+                    label_dict=label_dict,
+                    input_feature_dict=input_feature_dict,
+                    s_inputs=s_inputs,
+                    s_trunk=s_trunk_refine,
+                    z_trunk=z,
+                    N_sample=N_sample,
+                    precomputed_input=(x_gt_aug, refinement_sigma, x_denoised),
+                )
+            finally:
+                self._a_direct_active = False
+                self._q_direct_active = False
+            out["post_pred_coordinate"] = x_denoised_post
+            out["post_gt_coordinate_aug"] = x_gt_aug_post
+            out["post_sigma"] = sigma_post
+            # Refined AA logits from the side-chain-aware refinement pass.
+            # M2: ONLY when side chains were instantiated from predicted type.
+            # With GT-type teacher-forcing, h_res' carries GT atom composition,
+            # so supervising post_aa here would be an identity leak — skip it.
+            if self.enable_residue_type_head and not self.sc_predicted_mask:
+                if not getattr(self, "_warned_post_aa_skip", False):
+                    logging.getLogger(__name__).warning(
+                        "coevolution: post_aa_logits NOT emitted because "
+                        "sidechain.predicted_mask=False (GT atom composition would "
+                        "leak residue identity into the AA-refinement objective). "
+                        "Set sidechain.predicted_mask=True once S_phi instantiates "
+                        "the atom set from predicted type."
+                    )
+                    self._warned_post_aa_skip = True
+            if self.enable_residue_type_head and self.sc_predicted_mask:
+                a_post = self._a_token_cache
+                if a_post is not None:
+                    g = self.aa_trunk_grad_scale
+                    # Per-sample (per-sigma) refined logits, same treatment as the
+                    # primary AA loss; the loss averages over the N_sample axis.
+                    a_post = a_post.to(s_inputs.dtype)
+                    if g != 1.0:
+                        a_post = g * a_post + (1.0 - g) * a_post.detach()
+                    out["post_aa_logits"] = self.design_residue_type_head(
+                        a_post, aa_t=input_feature_dict.get("aa_t")
+                    )
+
+        return out
+
+    def pack_backbone_state(self, input_feature_dict, out):
+        """One shared call to the donor packer, including its a/q feedback."""
         # 4. Side-Chain Module (Stage II-A): one-step global-coordinate decode + feedback.
         if self.enable_sidechain and "sc_atom_name_ids" in input_feature_dict:
             # Per-sigma (Stage II-B main line) vs single reduced-h_res (warmup).
@@ -1116,26 +1237,13 @@ class ProtenixDesignTrain(ProtenixDesign):
             sc_type_idx = None
             if getattr(self, "sc_predicted_mask", False):
                 from pxdesign_train.sidechain.instantiate import instantiate_from_type_indices
-                ptype = out["aa_logits_reduced"].argmax(dim=-1)   # [L] or [B, L]
-                if ptype.dim() > 1:
-                    # Batch>1 not yet supported here: predicted-type instantiation +
-                    # routing use item 0. Fine for the current batch_size=1 trainer;
-                    # warn so it isn't a silent bug if macro-batch grows (see
-                    # docs/method_status.md).
-                    if ptype.shape[0] > 1 and not getattr(self, "_warned_predmask_batch", False):
-                        logging.getLogger(__name__).warning(
-                            "predicted_mask: batch>1 detected; per-item atom-set "
-                            "instantiation/routing not implemented — using item 0."
-                        )
-                        self._warned_predmask_batch = True
-                    ptype = ptype[0]
-                pids, pmask = instantiate_from_type_indices(ptype)
-                sc_ids = pids.to(sc_ids.device)
-                # Predicted-type instantiation carries no resolution information, so
-                # chemistry and supervision coincide on this branch.
-                sc_mask = pmask.to(sc_mask.device)
-                sc_slot = sc_mask
-                sc_type_idx = ptype                              # [L] predicted type
+                # Assignments, inventories and loss routing retain item/sample axes.
+                ptype = out.get("assigned_aa")
+                if ptype is None:
+                    ptype = aa_logits.argmax(dim=-1) if use_per_sigma else out["aa_logits_reduced"].argmax(dim=-1)
+                sc_ids, sc_slot = instantiate_from_type_indices(ptype)
+                # sc_mask remains the independent native observation mask.
+                sc_type_idx = ptype
             else:
                 # Teacher forcing: sc_ids / sc_mask come from the GT residue type,
                 # so the init template must use that same GT type (aa_clean).
@@ -1175,6 +1283,18 @@ class ProtenixDesignTrain(ProtenixDesign):
             sc_slot = sc_slot.to(h_res.device).bool()
             if sc_type_idx is not None:
                 sc_type_idx = sc_type_idx.to(h_res.device).long()
+            ownership = input_feature_dict.get("design_token_mask")
+            frame_index = input_feature_dict.get("sc_bb_atom_idx")
+            if ownership is None or frame_index is None:
+                raise ValueError("Side-chain generation requires design ownership and backbone frame indices")
+            ownership = ownership.to(h_res.device).bool()
+            have_frame = (frame_index.to(h_res.device)[..., :3] >= 0).all(-1)
+            if use_per_sigma:
+                ownership = _tile_per_sigma(ownership, trailing_ndim=1)
+                have_frame = _tile_per_sigma(have_frame, trailing_ndim=1)
+            sc_slot = sc_slot & (ownership & have_frame)[..., None]
+            sc_mask = sc_mask & sc_slot
+            sc_ids = torch.where(sc_slot, sc_ids, 0)
             if not getattr(self, "sc_type_logits_input", True):
                 # Ablation: hold shapes and parameters fixed, remove the information.
                 # A uniform distribution makes w_aa's contribution the mean of its 20
@@ -1361,8 +1481,12 @@ class ProtenixDesignTrain(ProtenixDesign):
                     # whose O is unresolved).
                     bb_idx = bb_idx[..., :3]
                     xden_flat = xden.reshape(-1, xden.shape[-2], xden.shape[-1]).to(h_res.device).float()
+                    from pxdesign_train.sidechain.frames import gather_backbone
+                    bb_idx = _tile_per_sigma(bb_idx, trailing_ndim=2)
                     R_hat, t_hat, _fvalid = frames_from_backbone_index(xden_flat, bb_idx)
-                    bb_pred = xden_flat[:, bb_idx.clamp_min(0), :]   # [B*N_sample, L, 3, 3] (N,CA,C)
+                    bb_pred, _ = gather_backbone(xden_flat, bb_idx)
+                    sc_slot = sc_slot & _fvalid[..., None]
+
 
             # Active frame for S_phi context, global initialization, physical
             # regularization, and coordinate supervision. Under Stage II-B this
@@ -1679,8 +1803,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             # sigma axis like h_res_prime_reduced: the refinement pass draws FRESH
             # sigmas, so its row s carries no correspondence to round-1 row s —
             # pretending otherwise would pair a_sc with the wrong noise level.
-            if getattr(self, "sc_a_direct", False):
-                a_sc = self.a_token_fusion.pool(
+            if getattr(self, "sc_a_direct", False) or getattr(self, "sc_a_direct_pre", False):
+                a_sc = pool_side_chain_atoms(
                     atom_feats.detach() if self.sc_detach_feedback else atom_feats,
                     sc_slot,
                 )                                   # [B*N_sample, L, c_atom] (per-sigma)
@@ -1720,7 +1844,9 @@ class ProtenixDesignTrain(ProtenixDesign):
             if fR is not None and ft is not None:
                 out["sc_frame_R"] = fR
                 out["sc_frame_t"] = ft
-            out["sc_atom_mask"] = sc_mask
+            out["sc_atom_mask"] = sc_mask & sc_slot
+            out["sc_generation_mask"] = sc_slot
+            out["sc_atom_name_ids"] = sc_ids
             if sc_sigma is not None:
                 from pxdesign_train.sidechain.edm import edm_loss_weight
 
@@ -1803,20 +1929,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             if self.sc_route_by_type or getattr(self, "sc_predicted_mask", False):
                 aa_clean = input_feature_dict.get("aa_clean")
                 if aa_clean is not None:
-                    # Use the REDUCED predicted type — the same one that
-                    # instantiated the predicted mask — so routing is consistent.
-                    pred = out["aa_logits_reduced"].argmax(dim=-1)   # [L] or [B, L]
+                    pred = sc_type_idx if getattr(self, "sc_predicted_mask", False) else out["aa_logits_reduced"].argmax(-1)
                     aa_clean = aa_clean.to(pred.device)
-                    # Keep the item axis: collapsing to item 0 here would gate item 1..B-1's
-                    # side-chain coordinate loss with item 0's (pred == GT) pattern — the same
-                    # batch bug the init path just fixed, silently, on the same aa_clean tensor.
-                    if pred.dim() == 1 and aa_clean.dim() > 1:
-                        aa_clean = aa_clean[0]
-                    elif aa_clean.dim() == 1 and pred.dim() > 1:
-                        aa_clean = aa_clean.unsqueeze(0).expand_as(pred)
-                    tm = (pred == aa_clean)                          # [L] or [B, L]
                     if use_per_sigma:
-                        tm = _tile_per_sigma(tm, trailing_ndim=1)
+                        aa_clean = _tile_per_sigma(aa_clean, trailing_ndim=1)
+                    tm = pred == aa_clean
                     out["sc_type_match"] = tm
 
             # Mismatched-residue regularizer (0722 L_compat; arm chosen by
@@ -1905,109 +2022,6 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["sc_pack_val"] = pack["total"]
                 out["sc_pack_clash"] = pack["clash"].detach()
                 out["sc_pack_contact"] = pack["contact"].detach()
-
-        # 5. Cycle closure (Stage II-B): reuse B_theta to refine backbone/type
-        #    using the side-chain-informed h_res'. h_res' is injected into the
-        #    (zero) token trunk s_trunk, then the backbone denoise is re-run.
-        #    NOTE: s_trunk is sample-shared in the Protenix diffusion (the N_sample
-        #    axis is created inside the module), so we inject the sigma-REDUCED
-        #    h_res' here. True per-sigma feedback needs a per-sample s_trunk
-        #    (submodule change) — see README. post_aa stays gated (M2).
-        if getattr(self, "enable_coevolution", False) and "h_res_prime_reduced" in out:
-            h_res_prime = out["h_res_prime_reduced"]
-            # INDIRECT token-level feedback (sidechain.hres_inject, default ON = today's
-            # behaviour): h_res' -> HResInjector -> s_trunk, and the DiffusionModule then
-            # recomputes a_token from it. Turning this OFF is what makes a TRUE no-feedback
-            # control possible: the refinement pass still runs (B_theta is still called a
-            # second time), but it carries NO side-chain information at all. That is the
-            # arm that answers "does the co-evolution channel buy anything?" -- it is NOT
-            # the same as enable_coevolution=False, which removes the refinement pass
-            # entirely and would confound "second pass" with "side-chain feedback".
-            # Explicit pass identity is independent of the feedback ablation:
-            # even a no-feedback B_post still receives x_hat_0 rather than x_sigma.
-            s_trunk_refine = s + self.refinement_pass_embedding.to(s.dtype)
-            if getattr(self, "sc_hres_inject", True):
-                s_trunk_refine = (
-                    s_trunk_refine + self.hres_injector(h_res_prime).to(s.dtype)
-                )
-            # DIRECT a-level feedback (sidechain.a_direct): arm the layernorm_a hook
-            # for the duration of THIS call only. The first pass above ran with the
-            # flag down (and with _a_sc_cache=None), so a'_bb = a_bb + MLP(...) can
-            # only happen here, in the refinement pass — which is also the only pass
-            # where a_sc exists. The finally-clause disarms it even if the diffusion
-            # call raises, so a later first pass can never inherit a live flag.
-            self._a_direct_active = bool(
-                getattr(self, "sc_a_direct", False) and self._a_sc_cache is not None
-            )
-            # Same pass scoping for the ATOM-level channel: the decoder pre-hook only
-            # rewrites q_skip while this flag is up, i.e. inside the refinement call —
-            # the only pass where q_sc_bb exists ("only available after the first-round").
-            self._q_direct_active = bool(
-                getattr(self, "sc_q_direct", False)
-                and self._q_sc_cache is not None
-                and self._q_bb_idx_cache is not None
-            )
-            try:
-                # Continue from the structure produced by B_pre. This is iterative
-                # refinement, not a second prediction of the original noisy state:
-                #
-                #   x_noisy -> B_pre -> x_denoised -> B_post -> x_denoised_post
-                #
-                # B_post also receives the side-chain feedback through
-                # s_trunk_refine and the armed a/q hooks. Reusing x_gt_aug preserves
-                # the first pass's coordinate frame. Do NOT reuse B_pre's randomly
-                # sampled physical sigma here: B_post's input is already x_hat_0,
-                # not x_sigma. Train and inference instead share one explicit
-                # refinement sigma so they learn/execute the same transition.
-                # `torch.full_like` below changes only DiffusionModule conditioning
-                # and EDM c_skip/c_out; it does NOT add noise to x_denoised. The
-                # coordinate input remains B_pre's prediction exactly.
-                refinement_sigma = torch.full_like(
-                    sigma, self.sc_refinement_sigma
-                )
-                x_gt_aug_post, x_denoised_post, sigma_post, _ = sample_diffusion_training(
-                    noise_sampler=self.training_noise_sampler,
-                    denoise_net=self.diffusion_module,
-                    label_dict=label_dict,
-                    input_feature_dict=input_feature_dict,
-                    s_inputs=s_inputs,
-                    s_trunk=s_trunk_refine,
-                    z_trunk=z,
-                    N_sample=N_sample,
-                    precomputed_input=(x_gt_aug, refinement_sigma, x_denoised),
-                )
-            finally:
-                self._a_direct_active = False
-                self._q_direct_active = False
-            out["post_pred_coordinate"] = x_denoised_post
-            out["post_gt_coordinate_aug"] = x_gt_aug_post
-            out["post_sigma"] = sigma_post
-            # Refined AA logits from the side-chain-aware refinement pass.
-            # M2: ONLY when side chains were instantiated from predicted type.
-            # With GT-type teacher-forcing, h_res' carries GT atom composition,
-            # so supervising post_aa here would be an identity leak — skip it.
-            if self.enable_residue_type_head and not self.sc_predicted_mask:
-                if not getattr(self, "_warned_post_aa_skip", False):
-                    logging.getLogger(__name__).warning(
-                        "coevolution: post_aa_logits NOT emitted because "
-                        "sidechain.predicted_mask=False (GT atom composition would "
-                        "leak residue identity into the AA-refinement objective). "
-                        "Set sidechain.predicted_mask=True once S_phi instantiates "
-                        "the atom set from predicted type."
-                    )
-                    self._warned_post_aa_skip = True
-            if self.enable_residue_type_head and self.sc_predicted_mask:
-                a_post = self._a_token_cache
-                if a_post is not None:
-                    g = self.aa_trunk_grad_scale
-                    # Per-sample (per-sigma) refined logits, same treatment as the
-                    # primary AA loss; the loss averages over the N_sample axis.
-                    a_post = a_post.to(s_inputs.dtype)
-                    if g != 1.0:
-                        a_post = g * a_post + (1.0 - g) * a_post.detach()
-                    out["post_aa_logits"] = self.design_residue_type_head(
-                        a_post, aa_t=input_feature_dict.get("aa_t")
-                    )
 
         return out
 

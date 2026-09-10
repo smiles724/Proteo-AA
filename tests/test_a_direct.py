@@ -305,7 +305,7 @@ def test_single_item_tiling_unchanged():
 
 def test_no_item0_collapse_left_in_the_type_source():
     """Source guard so the regression cannot silently return."""
-    src = inspect.getsource(ProtenixDesignTrain._train_forward)
+    src = inspect.getsource(ProtenixDesignTrain.pack_backbone_state)
     assert "sc_type_idx = sc_type_idx[0]" not in src
     assert "_tile_per_sigma(sc_type_idx" in src
 

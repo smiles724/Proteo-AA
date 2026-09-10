@@ -41,10 +41,13 @@ if [[ ${1:-} == --dry-run ]]; then
   shift
   RUN_OPTIONS=(--dry-run --device cpu)
 else
-  module load slurm
-  module load nvhpc
-  module load cudnn/cuda12/9.3.0.75
-  module load mps
+  # Marlowe needs these; the HAI cluster has no module system at all. Load what
+  # exists and keep going, instead of failing the job on a missing modulefile.
+  if command -v module >/dev/null 2>&1; then
+    for _mod in slurm nvhpc cudnn/cuda12/9.3.0.75 mps; do
+      module load "$_mod" 2>/dev/null || echo "note: module $_mod unavailable on this cluster" >&2
+    done
+  fi
 fi
 "$PYTHON_BIN" scripts/training/train_protenix_monomer.py \
   --training-stage stage4_fampnn --stage4-phase "$STAGE4_PHASE" \

@@ -85,13 +85,21 @@ so 0.35 × 31 = 10.85 Å. **Verified against ProtDBench's released per-design
 scores: its `af2_easy` reproduces A-CODE Table 4's PXDesign row on all ten
 targets to two decimal places** (mean absolute deviation 0.00, r = 1.000).
 
-ProtDBench also ships a stricter filter, `af2_opt` — `pLDDT > 0.9`,
-`unscaled_i_pAE < 7.0`, `binder RMSD < 1.5 Å`. **That is not the Table 4
-protocol.** On the same designs it gives a mean of 9.70% against `af2_easy`'s
-21.19%, and individual targets move by up to 300× (H1 12.08 → 0.04, IL7RA
-29.80 → 0.26). Reporting both is fine and probably worth doing — but the column
-you place next to Table 4 has to be `af2_easy`, or the percentages are not
-comparable.
+ProtDBench also ships an alternative, more stringent AF2-IG filter, `af2_opt` —
+`pLDDT > 0.9`, `unscaled_i_pAE < 7.0`, `af2_binder_pred_design_rmsd < 1.5 Å`.
+**That is not the Table 4 protocol**, and it is not `af2_easy` with tighter
+numbers: it drops the ipTM criterion, and its RMSD measures something else.
+`af2_easy`'s RMSD is the binder predicted alone against the binder chain of the
+complex prediction; `af2_opt`'s is the binder predicted alone against the
+original design (`protdbench/tools/af2/main_af2_monomer.py`). On the same
+designs the two give a mean of 21.19% and 9.70%, and individual targets move by
+up to 300× (H1 12.08 → 0.04, IL7RA 29.80 → 0.26). Reporting both is fine and
+probably worth doing — but the column you place next to Table 4 has to be
+`af2_easy`, or the percentages are not comparable.
+
+`verify_filter_protocol.py` in this directory recomputes the comparison from
+ProtDBench's released per-design scores; `filter_protocol_check.csv` is its
+output.
 
 A-CODE reports the co-designed sequence and a ProteinMPNN-redesigned variant
 separately; for us those are the two halves of the same question, since the
@@ -99,10 +107,14 @@ PMPNN variant is close to a re-run of PXDesign's row.
 
 Two caveats worth knowing before spending compute:
 
-**MSA.** `msa` is unset in every config. PXDesign calls it optional but
-recommended and produced its published numbers with one, so a run without MSA is
-not comparable to the table above. Nine of the ten still need one; only PDL1
-ships an example.
+**MSA.** `msa` is unset in every config, and for reproducing Table 4 that is
+fine. Neither the diffusion generation nor the AF2-IG filter uses an MSA:
+ProtDBench's `af2` block sets `use_initial_guess` and `use_binder_template` and
+has no `use_msa` key at all, while `use_msa: True` appears only under `ptx` and
+`ptx_mini`. PXDesign's README says the same from the other side — MSA is
+"Required for 'Extended' mode (Protenix evaluation)". So an MSA is needed if you
+want to add the Protenix-based filters as a cross-check, not for the AF2-IG
+column. Only PDL1 ships an example; `pxdesign prepare-msa` fills in the rest.
 
 **Three different filters are in play; do not mix them.** AlphaProteo's own
 in-silico benchmark uses pAE < 10, binder RMSD < 1 Å, pLDDT > 80. A-CODE Table 4

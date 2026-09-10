@@ -57,19 +57,25 @@ the same thing ProtDBench ships as `af2_easy`):
 pLDDT > 0.80     confident about the binder's own fold
 ipTM  > 0.50     confident the two chains form an interface
 ipAE  < 10.85 A  confident about how they sit relative to each other
-RMSD  < 3.5 A    bound vs unbound binder, i.e. it does not need the target to fold
+RMSD  < 3.5 A    the binder takes the same shape predicted alone as predicted bound
 ```
 
 The `10.85` looks arbitrary because it is a unit conversion: BindCraft and the
 ColabDesign family write this threshold as `i_pAE < 0.35`, having divided PAE by
 its 31.0 A ceiling. 0.35 x 31 = 10.85.
 
-**There is a second, stricter filter and it is easy to reach for by mistake:**
-ProtDBench's `af2_opt` — `pLDDT > 0.9`, `unscaled_i_pAE < 7.0`,
-`binder RMSD < 1.5 A`. Reporting it alongside is worthwhile, but it is **not**
-the Table 4 protocol. On ProtDBench's released PXDesign designs the two filters
-give 21.19% and 9.70% on average, and up to 300x apart on single targets. Only
-`af2_easy` reproduces Table 4 (verified: all ten targets match to two decimals).
+**There is a second, more stringent AF2-IG filter and it is easy to reach for by
+mistake:** ProtDBench's `af2_opt` — `pLDDT > 0.9`, `unscaled_i_pAE < 7.0`,
+`af2_binder_pred_design_rmsd < 1.5 A`. It is harder to pass, but it is not
+`af2_easy` with the thresholds tightened: it drops the ipTM criterion, and its
+RMSD is a different measurement. `af2_easy` compares the binder predicted alone
+against the binder chain of the complex prediction; `af2_opt` compares the
+binder predicted alone against the original design
+(`protdbench/tools/af2/main_af2_monomer.py`). Reporting both is worthwhile, but
+only `af2_easy` is the Table 4 protocol — on ProtDBench's released PXDesign
+designs the two give 21.19% and 9.70% on average, and up to 300x apart on single
+targets. Rerun the check yourself with
+`benchmarks/alphaproteo10/verify_filter_protocol.py`.
 
 This is a **prediction, not a measurement**. AlphaProteo has real experimental
 hit rates (9–88% by target) but those need a wet lab. Designability is the

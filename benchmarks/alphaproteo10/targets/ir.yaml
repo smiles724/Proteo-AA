@@ -13,9 +13,11 @@
 # because reproducing its Table 4 is the point; AlphaProteo's per-target range
 # is recorded above so the other convention stays available.
 #
-# MSA is left unset. PXDesign calls it optional but recommended, and its
-# published numbers were produced with one, so a run without MSA is not
-# comparable to the Table 4 baselines.
+# MSA is left unset, and for reproducing Table 4 that is fine. Neither the
+# diffusion generation nor the AF2-IG filter uses one: ProtDBench's `af2` config
+# has no `use_msa` key at all (it sets use_initial_guess and use_binder_template),
+# and PXDesign's README scopes MSA to "Extended mode (Protenix evaluation)".
+# Add one only if you also want the Protenix-based filters as a cross-check.
 
 target:
   file: "./benchmarks/alphaproteo10/structures/4zxb.cif"
@@ -24,4 +26,9 @@ target:
       crop: ["6-155"]
       hotspots: [64, 88, 96]
 
-binder_length: 105   # midpoint of A-CODE's 80-130; sweep the range for a full run
+# SMOKE / DEFAULT VALUE -- not the benchmark protocol. A-CODE samples 80-130
+# uniformly across all ten targets; 105 is that range's midpoint, one length,
+# enough to check the pipeline runs end to end. A production run sweeps a range
+# instead: A-CODE's uniform 80-130, or this target's own range recorded above,
+# which is what ProtDBench does (every integer in it).
+binder_length: 105

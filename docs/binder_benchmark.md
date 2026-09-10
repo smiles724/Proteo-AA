@@ -118,10 +118,14 @@ One invocation produces one design. A full benchmark run loops it: A-CODE sample
 328–728 binders per target at lengths 80–130. Roughly 60 GPU-hours all in, so
 about 15 hours on four cards — compute is not the constraint here.
 
-**`binder_length` in the configs is a single value (105, the midpoint of
-A-CODE's range), not the range itself.** A run that leaves it there samples one
-length ten times over, which is not the published protocol; vary it per design to
-cover 80–130.
+**`binder_length` in the configs is a smoke/default value, not the benchmark
+protocol.** It is a single number — 105, the midpoint of A-CODE's 80–130 — which
+is enough to check the pipeline runs end to end, but a run that leaves it there
+samples one length ten times over. A production run sweeps a range, and there are
+two conventions: A-CODE's uniform 80–130 across all ten targets, or the
+per-target range each YAML records in its comments, which is what ProtDBench uses
+(every integer in it — BHRF1 gets 80…120, IL-17A gets 50…140). Pick one and say
+which; the length distribution changes the percentages.
 
 **Which checkpoint.** One with all three components trained: backbone, AA head
 and side-chain module — i.e. the *output* of Stage III / binder training, not the

@@ -62,12 +62,16 @@ fi
 # Accumulation and clipping follow the Stage III binder run by default.
 # CHECKPOINT_INTERVAL defaults below EVAL_INTERVAL because validation runs
 # before checkpoint saving; an earlier save bounds work lost on failure.
+# 500, not 1000: IV-A measures 5.7 s/step here, so 1000 is ~95 min unsaved,
+# and jobs 113677/113714 both died on a bad crop at steps 800 and 150 with
+# nothing on disk. At ~3.1 GiB a checkpoint and ~15k steps per 24h slot that
+# is ~93 GiB per run, against 2.9 TiB free on scratch.
 exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_binder.sh" "${RUN_OPTIONS[@]}" \
   --iters-to-accumulate "${ITERS_TO_ACCUMULATE:-8}" \
   --grad-clip-norm "${GRAD_CLIP_NORM:-1.0}" \
   --warmup-steps "${WARMUP_STEPS:-500}" \
   --max-crop-retries "${MAX_CROP_RETRIES:-64}" \
-  --checkpoint-interval "${CHECKPOINT_INTERVAL:-1000}" \
+  --checkpoint-interval "${CHECKPOINT_INTERVAL:-500}" \
   --log-interval "${LOG_INTERVAL:-50}" \
   --eval-interval "${EVAL_INTERVAL:-2000}" \
   --num-workers "${NUM_WORKERS:-4}" "$@"

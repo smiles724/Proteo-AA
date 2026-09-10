@@ -209,3 +209,42 @@ def test_retry_loop_treats_the_tokenizer_skip_as_retryable():
     ds._get_one = _fail_once_then_work
     assert ds[7]["sample_id"].startswith("p")
     assert calls["n"] == 2, "the tokenizer skip should have been retried exactly once"
+
+
+def test_empty_binder_selection_is_a_retryable_rejection():
+    """A crop that keeps no binder atom must be skipped, not crash the worker.
+
+    `canonicalise_backbone_reference_metadata` builds `ref_pos` with
+    `np.stack([...])`, which raises `ValueError('need at least one array to
+    stack')` on an empty selection. That message does not carry the
+    `InferenceSafeBinder:` prefix, so `DesignSourceDataset.__getitem__`
+    re-raised it out of a DataLoader worker instead of probing another index --
+    which is how Stage IV jobs 113677 and 113714 died at steps 800 and 150,
+    both before their first checkpoint.
+    """
+    from pxdesign_train.runner.data import _canonical_backbone_binder_atom_array
+
+    aa = _full_atom_complex()
+    empty = np.zeros(len(aa), dtype=bool)
+
+    with pytest.raises(ValueError) as excinfo:
+        _canonical_backbone_binder_atom_array(aa, empty)
+
+    message = str(excinfo.value)
+    assert message.startswith("InferenceSafeBinder:"), message
+    assert "no binder atoms" in message
+    assert "need at least one array to stack" not in message
+
+
+def test_canonicalise_metadata_is_a_noop_on_an_empty_row_selection():
+    """The shared helper has a caller that may legitimately reach zero rows."""
+    from pxdesign_train.runner.data import canonicalise_backbone_reference_metadata
+
+    aa = _full_atom_complex()
+    before_res = np.asarray(aa.res_name).copy()
+    before_ref = np.asarray(aa.ref_pos).copy()
+
+    canonicalise_backbone_reference_metadata(aa, np.zeros(len(aa), dtype=bool))
+
+    assert np.array_equal(np.asarray(aa.res_name), before_res)
+    assert np.array_equal(np.asarray(aa.ref_pos), before_ref)

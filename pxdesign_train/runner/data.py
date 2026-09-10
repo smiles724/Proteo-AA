@@ -345,7 +345,11 @@ def canonicalise_backbone_reference_metadata(atom_array, rows) -> None:
     atom_array.res_name[rows] = "GLY"
     if "cano_seq_resname" in categories:
         atom_array.cano_seq_resname[rows] = "GLY"
-    if "ref_pos" in categories:
+    if "ref_pos" in categories and rows.any():
+        # np.stack raises on an empty list, so an all-False `rows` would abort
+        # the caller instead of being the no-op it is. The eval harness's
+        # drop-and-report policy can legitimately reach zero surviving rows;
+        # the training caller rejects that case itself, before getting here.
         atom_array.ref_pos[rows] = np.stack(
             [_CANONICAL_BACKBONE_REF[str(name)] for name in names[rows]]
         )
@@ -380,6 +384,17 @@ def _canonical_backbone_binder_atom_array(atom_array, binder_atom_mask):
     keep = ~binder | np.isin(names, np.asarray(_BACKBONE_NAMES))
     safe = atom_array[keep].copy()
     safe_binder = binder[keep]
+    if not safe_binder.any():
+        # A crop can land entirely on the receptor. There is no binder to
+        # design, so the item is unusable -- and it has to say so with the
+        # retryable prefix, or `DesignSourceDataset.__getitem__` re-raises it
+        # out of a DataLoader worker and kills the run. Measured: this aborted
+        # Stage IV jobs 113677 (step 800) and 113714 (step 150) via
+        # `np.stack([])` further down, before either had checkpointed.
+        raise ValueError(
+            "InferenceSafeBinder: crop retained no binder atoms "
+            f"({len(atom_array)} atoms in, {len(safe)} kept)"
+        )
 
     # Enforce the exact inference topology: one N/CA/C/O row per binder
     # residue.  Silent missing/duplicate rows would reintroduce atom-count

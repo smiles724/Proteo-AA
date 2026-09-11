@@ -146,3 +146,11 @@ sbatch scripts/evaluation/slurm_summarize_alphaproteo_designability.sh
 2. 再比较同一 Proteo-AA backbone 的 `MPNN` 和三个 AA readout：差值主要反映 AA head。
 3. 必须同时看 `coverage`；本流程将缺失 scoring 计为失败，但 coverage 过低时不能下模型结论。
 4. smoke 只验证流程，不估计 designability。每 target 一条的结果不能与论文百分比比较。
+
+## 已知的协议问题
+
+**本流程目前不把靶点当固定条件。** `design()` 走的是 `cogenerate()`，那是自由
+共生成采样器（靶点也从噪声重建），所以第 1 步「后者下降即 backbone 有问题」
+的推论并不成立 —— 下降里混入了「重建靶点」的难度。第一次全量结果和证据见
+[`alphaproteo10_designability_result_zh.md`](alphaproteo10_designability_result_zh.md)；
+在接上目标条件化采样器之前，Proteo-AA 臂的 designability 不可解读。

@@ -1001,7 +1001,27 @@ class PXDesignTrainer:
             recorded = ckpt.get("stage4_identity")
             expected = checkpoint_identity(self.raw_model)
             if not params_only and recorded != expected:
-                raise ValueError("Stage IV resume identity differs; use an explicit params-only warm start")
+                # Say WHICH field moved. The gate is deliberately strict, but a
+                # bare "identity differs" leaves you unable to tell a changed
+                # objective from an edited docstring -- `implementation_sha256`
+                # covers every pxdesign_train/**/*.py, and `proteoaa_revision`
+                # is git HEAD, so it also trips on a commit that touched
+                # nothing this run reads. Knowing that is the difference
+                # between "restart, the experiment changed" and "this resume
+                # is safe, take the params-only warm start deliberately".
+                differing = sorted(
+                    key for key in set(recorded or {}) | set(expected)
+                    if (recorded or {}).get(key) != expected.get(key)
+                )
+                detail = ", ".join(
+                    f"{key}: {str((recorded or {}).get(key))[:60]!r} -> {str(expected.get(key))[:60]!r}"
+                    for key in differing
+                ) or "recorded identity is absent"
+                raise ValueError(
+                    f"Stage IV resume identity differs ({detail}). A full resume is refused; "
+                    "rerun with --warm-start-params-only to accept losing optimizer state and "
+                    "the step count, or check out the recorded revision to resume properly."
+                )
             if recorded is not None:
                 for key in ("backend", "upstream_revision", "checkpoint_sha256", "model_config", "mapping_version"):
                     if recorded.get(key) != expected.get(key):

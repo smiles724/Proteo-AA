@@ -5,7 +5,7 @@ Worktree `/hai/users/s/h/shenjm/Proteo-AA-ligandmpnn`, branch
 11 September 2026.
 
 **Status: integration, unverified as science.** The backend loads released
-weights, resolves configuration, passes 608 tests including exact parity with
+weights, resolves configuration, passes 612 tests including exact parity with
 upstream's own decoder, and clears a bounded real-model GPU smoke (HAI job
 **114335**). No training result, no FaMPNN comparison and no binding-quality
 claim exists. Read [Open problems](#open-problems) before reporting any number
@@ -252,6 +252,38 @@ Marlowe-native with a HAI wrapper on top, and nothing here runs on Marlowe.
 The donor is the same Stage III checkpoint (`111408/step6000`) the FaMPNN runs
 use, so the two backends differ in the sequence network and nothing else.
 
+### Resuming
+
+The launcher prefers a checkpoint in `$OUTPUT_DIR/checkpoints/` over the
+donor, picking the highest step number (numerically — `step150` must not beat
+`step1000`, and mtime is the wrong key because an interrupted save is newer).
+Only if none exists does it warm-start from the Stage III donor with
+`--warm-start-params-only`.
+
+This matters because the jobs are `--requeue` and a requeued job keeps its job
+ID, so `OUTPUT_DIR` — which embeds it — still holds everything written before
+the preemption. The launcher used to hardcode the donor path, so a restart
+silently began again at step 0.
+
+A full resume restores step, optimizer, scheduler and RNG. **It is refused if
+the Stage IV identity moved**, and `implementation_identity()` hashes git HEAD
+plus every `pxdesign_train/**/*.py`, so *any* commit trips it — including one
+that touched nothing the run reads. The refusal is deliberate and is left
+strict here; what changed is that it now names the differing fields, because
+"identity differs" alone cannot tell a changed objective from an edited
+docstring, and the two call for opposite responses. Loud refusal is also the
+right failure: silently warm-starting instead would discard the run without
+saying so.
+
+Practical consequence, and it is sharp: **editing the repo while runs are in
+flight makes their checkpoints unresumable.** The checkpoints written by
+114341/114342/114345 before commit `b4d5708` already cannot be fully resumed.
+Either freeze the branch while runs are live, or accept that a preemption
+costs the run rather than an interval. Narrowing the gate to the fields that
+actually affect correctness (backend, mapping, cycle, phase, optimizer policy
+— all separately checked a few lines below) is the obvious fix and is
+yfsun's call, since he set the strictness deliberately.
+
 ### Failure modes, all of them observed
 
 Two carried over from `stage4_fampnn.md`:
@@ -327,7 +359,7 @@ because masking, parity and gradient flow are properties of the decode path:
 * upstream's two constant tables are re-registered as non-persistent buffers
   so they follow `.to(device)` — see below
 
-608 tests pass.
+612 tests pass.
 
 **HAI job 114335** ran the real model on one 48-token PINDER complex
 (`1aw8__A1_P0A790--1aw8__C1_P0A790`, 101 observed binder side-chain atoms

@@ -128,6 +128,33 @@ if [[ ${1:-} == --dry-run ]]; then
   RUN_OPTIONS=(--dry-run --device cpu)
 fi
 
+# Resume, or warm-start from the donor. These jobs are --requeue, and a
+# requeued job keeps its job ID, so OUTPUT_DIR -- which embeds it -- still
+# holds the checkpoints written before the preemption. Without this the
+# restart silently began again from the Stage III donor at step 0 and threw
+# away every hour already spent.
+#
+# Highest step wins, chosen numerically: `sort -V` on names, not mtime, since
+# a resumed run rewrites nothing and an interrupted save could leave a newer
+# but smaller file.
+RESUME_FROM=""
+if [[ -d $OUTPUT_DIR/checkpoints ]]; then
+  RESUME_FROM=$(ls -1 "$OUTPUT_DIR"/checkpoints/step*.pt 2>/dev/null |
+                sed 's#.*/step\([0-9]*\)\(_.*\)\?\.pt#\1 &#' |
+                sort -k1,1n | tail -1 | cut -d' ' -f2-)
+fi
+if [[ -n $RESUME_FROM ]]; then
+  # A full resume restores step, optimizer, scheduler and RNG. It is REFUSED
+  # if the Stage IV identity moved -- including any edit under
+  # pxdesign_train/ -- and that refusal is loud on purpose: silently
+  # warm-starting instead would discard the run without saying so.
+  echo "RESUMING from ${RESUME_FROM}"
+  START_OPTIONS=(--load-checkpoint "$RESUME_FROM")
+else
+  echo "No checkpoint in ${OUTPUT_DIR}/checkpoints; warm-starting from donor"
+  START_OPTIONS=(--load-checkpoint "$STAGE3_CHECKPOINT" --warm-start-params-only)
+fi
+
 # CHECKPOINT_INTERVAL stays BELOW EVAL_INTERVAL on purpose: validation runs
 # before the checkpoint save in the training loop, so a failure in the eval
 # path discards everything since the last save. Jobs 113677 and 113714 both
@@ -135,7 +162,7 @@ fi
 "$PYTHON_BIN" scripts/training/train_protenix_monomer.py \
   --training-stage stage4_ligandmpnn --stage4-phase "$STAGE4_PHASE" \
   --stage4-train-rounds "$TRAIN_ROUNDS" --stage4-inference-rounds "$INFERENCE_ROUNDS" \
-  --load-checkpoint "$STAGE3_CHECKPOINT" --warm-start-params-only \
+  "${START_OPTIONS[@]}" \
   --ligandmpnn-checkpoint "$LIGANDMPNN_CHECKPOINT" \
   --ligandmpnn-source "$LIGANDMPNN_SOURCE" \
   --protenix-code-dir "$PROTEOAA_REPO/Protenix" --pxdesign-code-dir "$PROTEOAA_REPO/PXDesign" \

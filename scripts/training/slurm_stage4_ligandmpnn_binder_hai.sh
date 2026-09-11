@@ -32,7 +32,13 @@
 # decoder and are NOT memory-proven at this crop -- start smaller and watch.
 set -euo pipefail
 
-export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/s/h/shenjm/Proteo-AA}
+# Derived from this script's own location, NOT hardcoded. A fixed default
+# points at whichever checkout it was written against, so running this file
+# from a worktree would silently train the OTHER tree's code -- argparse
+# rejecting `--training-stage stage4_ligandmpnn` is the lucky failure; a
+# subtler drift between branches would just produce wrong numbers.
+_here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+export PROTEOAA_REPO=${PROTEOAA_REPO:-$_here}
 export PROTEOAA_DATA_ROOT=${PROTEOAA_DATA_ROOT:-/hai/scratch/yfsun}
 export PYTHON_BIN=${PYTHON_BIN:-/hai/users/s/h/shenjm/miniconda3/envs/proteoaa/bin/python}
 

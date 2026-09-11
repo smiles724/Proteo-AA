@@ -104,3 +104,22 @@ def test_codesign_backends_cover_both_heads():
 
 def test_generator_prefixes_do_not_include_the_head():
     assert not any(p.startswith("aa_head") for p in GENERATOR_PREFIXES)
+
+
+def test_launcher_derives_its_repo_from_its_own_location():
+    """A hardcoded PROTEOAA_REPO silently trains the wrong checkout.
+
+    This file exists in a worktree. A launcher defaulting to a fixed absolute
+    path runs the OTHER tree's code with this tree's arguments -- argparse
+    rejecting an unknown --training-stage is the lucky failure mode; a branch
+    that merely drifted would just produce wrong numbers with no complaint.
+    """
+    import pathlib
+
+    script = (pathlib.Path(__file__).resolve().parents[1]
+              / "scripts" / "training" / "slurm_stage4_ligandmpnn_binder_hai.sh")
+    text = script.read_text()
+    assert 'PROTEOAA_REPO=${PROTEOAA_REPO:-$_here}' in text
+    assert 'dirname -- "${BASH_SOURCE[0]}"' in text
+    # Still overridable, and still the thing the run actually cd's into.
+    assert 'cd "$PROTEOAA_REPO"' in text

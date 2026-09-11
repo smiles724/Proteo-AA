@@ -23,6 +23,12 @@ training_configs["enable_residue_type_head"] = True
 training_configs["residue_type"] = {
     "backend": "mlp",
     "fampnn_checkpoint": "",
+    "ligandmpnn_checkpoint": "",
+    "ligandmpnn_source": "",
+    # Upstream concatenates fixed-residue side chains into the same per-residue
+    # context channel it uses for ligand atoms. Off, LigandMPNN sees strictly
+    # less than FaMPNN's Atom37 and the two backends stop being comparable.
+    "ligandmpnn_side_chain_context": True,
     "vocab_size": 20,
     "ignore_index": -100,
     "loss_on_design_only": True,

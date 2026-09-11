@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import torch
 
+from pxdesign_train.aa import uses_codesign
 from pxdesign.model.pxdesign import ProtenixDesign
 from protenix.model.protenix import update_input_feature_dict
 
@@ -155,6 +156,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             elif self.aa_backend == "fampnn":
                 from pxdesign_train.aa.fampnn_head import FaMPNNHead
                 self.aa_head = FaMPNNHead(res_cfg.fampnn_checkpoint)
+            elif self.aa_backend == "ligandmpnn":
+                from pxdesign_train.aa.ligandmpnn_head import LigandMPNNHead
+                self.aa_head = LigandMPNNHead(
+                    res_cfg.ligandmpnn_checkpoint, res_cfg.ligandmpnn_source,
+                    use_side_chain_context=bool(res_cfg.ligandmpnn_side_chain_context))
             elif self.aa_backend != "mlp":
                 raise ValueError(f"Unknown AA backend {self.aa_backend!r}")
         # Capture (and, under sidechain.a_direct, REPLACE) the internal per-token
@@ -989,7 +995,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             chunk_size=chunk_size,
         )
 
-        if getattr(self, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self):
             input_feature_dict = dict(input_feature_dict, stage4_fixed_context=True)
 
         # 2. One-step denoising under EDM training noise.
@@ -1019,7 +1025,7 @@ class ProtenixDesignTrain(ProtenixDesign):
         # 3. Distogram on conditioning pair z, when enabled.
         if self.enable_distogram_head:
             out["distogram_logits"] = self.design_distogram_head(z)
-        if getattr(self, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self):
             from pxdesign_train.stage4 import training_forward
             return training_forward(self, input_feature_dict, out, s_inputs, s, z)
         if self.enable_residue_type_head or self.enable_sidechain:

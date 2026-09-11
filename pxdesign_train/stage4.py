@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import torch
 import torch.nn.functional as F
+from .aa import uses_codesign  # noqa: F401 - re-exported for stage4 callers
 from .codesign import CoDesignState, CycleConfig, run_cycle
 from .sidechain.frames import gather_backbone
 from .sidechain.instantiate import instantiate_from_type_indices
@@ -166,20 +167,36 @@ def training_forward(model, feat, out, s_inputs, s_trunk, z_trunk):
     return out
 
 
+# Packer, feedback channels and fusion: the generator side of the cycle,
+# trained together in every phase that trains anything but the head.
+GENERATOR_PREFIXES = ("sidechain_module.", "sidechain_feedback.", "hres_injector.",
+                      "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding")
+PHASES = ("IV-0", "IV-A", "IV-F", "IV-B", "IV-C")
+
+
 def apply_phase(model):
     """Reapply after model.train(): frozen module mode and autograd are distinct."""
     phase = str(model.configs.stage4.phase)
-    if phase not in ("IV-0", "IV-A", "IV-B", "IV-C"):
+    if phase not in PHASES:
         raise ValueError(f"Unknown Stage IV phase {phase}")
+    bb_prefixes = tuple(model.configs.stage4.bb_trainable_prefixes)
+    generator = GENERATOR_PREFIXES + bb_prefixes if bb_prefixes else GENERATOR_PREFIXES
     for name, param in model.named_parameters():
         if phase == "IV-0":
             enabled = False
         elif phase == "IV-A":
             enabled = name.startswith("aa_head.")
+        elif phase == "IV-F":
+            # Frozen sequence head, generator trained against it. `requires_grad
+            # = False` on the head does NOT stop gradient: the AA cross-entropy
+            # still reaches the backbone through the head's coordinate inputs,
+            # which is the whole objective here -- produce backbones the frozen
+            # designer reads as native. Losing that route leaves the packer
+            # training alone and the backbone receiving no sequence signal, so
+            # it is asserted, not assumed (test_frozen_head_still_passes_gradient).
+            enabled = name.startswith(generator)
         else:
-            bb_prefixes = tuple(model.configs.stage4.bb_trainable_prefixes)
-            enabled = name.startswith(("aa_head.", "sidechain_module.", "sidechain_feedback.", "hres_injector.",
-                "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding")) or bool(bb_prefixes and name.startswith(bb_prefixes))
+            enabled = name.startswith(("aa_head.",) + generator)
         param.requires_grad_(enabled)
     for module in model.children():
         if not any(p.requires_grad for p in module.parameters()):

@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import logging
 
+from pxdesign_train.aa import uses_codesign
 import torch
 
 from pxdesign_train.aa.masking import assign_aa
@@ -76,7 +77,7 @@ def cogenerate(
     Returns {coordinate, sequence (aa20 per design token, -1 elsewhere),
              trajectory}.
     """
-    if getattr(model, "aa_backend", "mlp") == "fampnn":
+    if uses_codesign(model):
         if not sidechain_cycle:
             raise ValueError("FaMPNN co-generation requires sidechain_cycle=True")
         if stop_on_seq_stable:

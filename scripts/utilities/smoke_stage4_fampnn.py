@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded real-model Stage IV test: gradients, update, save/resume and export."""
+"""Bounded real-model Stage IV test: gradients, update, save/resume and export.
+
+Backend-agnostic: `--backend` selects which frozen sequence network is loaded.
+Everything it asserts -- that the head updates, that the frozen parameters do
+not, that all three feedback routes reach the packer, that a checkpoint round
+trips, that generation exports -- is a property of the cycle, not of FaMPNN.
+"""
 import argparse
 import json
 import hashlib
@@ -31,7 +37,10 @@ def main():
     parser.add_argument("--donor",required=True)
     parser.add_argument("--output",required=True)
     parser.add_argument("--data-root",required=True)
-    parser.add_argument("--fampnn-checkpoint",required=True)
+    parser.add_argument("--backend",choices=["fampnn","ligandmpnn"],default="fampnn")
+    parser.add_argument("--fampnn-checkpoint",default="")
+    parser.add_argument("--ligandmpnn-checkpoint",default="")
+    parser.add_argument("--ligandmpnn-source",default="")
     parser.add_argument("--cpu",action="store_true")
     a=parser.parse_args()
     root=Path(__file__).resolve().parents[2]
@@ -51,8 +60,16 @@ def main():
     old=sys.argv
     sys.argv=[old[0]]
     args=driver.parse_args();sys.argv=old
-    args.training_stage="stage4_fampnn";args.load_checkpoint=a.donor
-    args.fampnn_checkpoint=a.fampnn_checkpoint;args.warm_start_params_only=True
+    args.training_stage=f"stage4_{a.backend}";args.load_checkpoint=a.donor
+    if a.backend == "fampnn":
+        if not a.fampnn_checkpoint: parser.error("--fampnn-checkpoint is required for --backend fampnn")
+        args.fampnn_checkpoint=a.fampnn_checkpoint
+    else:
+        if not (a.ligandmpnn_checkpoint and a.ligandmpnn_source):
+            parser.error("--ligandmpnn-checkpoint and --ligandmpnn-source are required for --backend ligandmpnn")
+        args.ligandmpnn_checkpoint=a.ligandmpnn_checkpoint
+        args.ligandmpnn_source=a.ligandmpnn_source
+    args.warm_start_params_only=True
     args.stage4_phase="IV-B";args.stage4_train_rounds=2;args.stage4_decode_blocks=2
     args.stage4_whole_mask_probability=0.;args.stage4_query_fraction=0.5
     args.crop_size=128;args.max_n_token=128;args.diffusion_batch_size=1

@@ -305,7 +305,7 @@ def build_source_components(
         "shuffle_sym_ids": False,
         "constraint": {},
         "ref_pos_augment": bool(args.ref_pos_augment),
-        "limits": -1 if args.training_stage == "stage4_fampnn" and "ppi" in source_name else int(args.dataset_limit),
+        "limits": -1 if _is_stage4(args) and "ppi" in source_name else int(args.dataset_limit),
     }
     base_dataset = BaseSingleDataset(**dataset_param)
     provider = ProtenixComplexProvider(
@@ -314,7 +314,7 @@ def build_source_components(
         expose_sample_indice=True,
     )
 
-    if args.training_stage == "stage4_fampnn" and "ppi" in source_name:
+    if _is_stage4(args) and "ppi" in source_name:
         from pxdesign_train.data.clusters import ClusterPartitionProvider
         frame = base_dataset.indices_list
         if not hasattr(frame, "columns") or "cluster_id" not in frame:
@@ -399,8 +399,8 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         split="val" if getattr(args, "_dataset_role", "train") == "validation" else "train",
         limit=int(args.complex_limit_index),
         min_n_token=int(args.min_n_token), max_n_token=int(args.complex_max_n_token),
-        cluster_disjoint=args.training_stage == "stage4_fampnn",
-        max_binder_tokens=int(args.crop_size * args.complex_max_binder_fraction) if args.training_stage == "stage4_fampnn" else 0,
+        cluster_disjoint=_is_stage4(args),
+        max_binder_tokens=int(args.crop_size * args.complex_max_binder_fraction) if _is_stage4(args) else 0,
     )
     src = DesignSourceDataset(
         provider=provider,
@@ -424,7 +424,7 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
     multi = CurriculumMultiDataset(
         datasets=[src],
         source_names=["pinder_ppi_complex"],
-        per_item_weights=[source_weights(src, required=args.training_stage == "stage4_fampnn")],
+        per_item_weights=[source_weights(src, required=_is_stage4(args))],
     )
     schedule = CurriculumSchedule(
         stage1={"pinder_ppi_complex": 1.0},
@@ -482,7 +482,7 @@ def build_mixed_components(
         ds = complex_components.train_dataset.datasets[0]
         datasets.append(ds)
         source_names.append("protenix_ppi_complex")
-        per_item_weights.append(source_weights(ds, required=args.training_stage == "stage4_fampnn"))
+        per_item_weights.append(source_weights(ds, required=_is_stage4(args)))
         source_counts["protenix_complex"] = n_complex
 
     if args.complex_provider in {"pinder", "both"}:
@@ -494,7 +494,7 @@ def build_mixed_components(
         ds = complex_components.train_dataset.datasets[0]
         datasets.append(ds)
         source_names.append("pinder_ppi_complex")
-        per_item_weights.append(source_weights(ds, required=args.training_stage == "stage4_fampnn"))
+        per_item_weights.append(source_weights(ds, required=_is_stage4(args)))
         source_counts["pinder_complex"] = n_complex
 
     start_monomer = float(args.stage2_start_monomer_frac)
@@ -617,6 +617,18 @@ def build_stage4_binder_validation(args, protenix_index, pinder_manifest):
     if not loaders:
         raise ValueError("Stage IV validation requires an explicit binder source (mixed_monomer_complex)")
     return loaders
+
+
+# Stage IV is a training MODE, not a single backend: `stage4_fampnn` and
+# `stage4_ligandmpnn` differ only in which frozen sequence network is loaded.
+# Everything else -- strict binder featurisation, cluster-disjoint PPI
+# sampling, the binder validation loaders, the provenance dump -- is shared,
+# so it is keyed off this and not off a backend name.
+STAGE4_STAGES = {"stage4_fampnn": "fampnn", "stage4_ligandmpnn": "ligandmpnn"}
+
+
+def _is_stage4(args) -> bool:
+    return args.training_stage in STAGE4_STAGES
 
 
 def build_configs(args: argparse.Namespace, device):
@@ -870,7 +882,7 @@ def build_configs(args: argparse.Namespace, device):
         configs.training.trainable_param_keywords = ["design_residue_type_head."]
         configs.training.ema_decay = 0.0
         adopt_sidechain_arch_from_checkpoint(configs, args)
-    elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn"):
+    elif args.training_stage in ("coevolution", "predicted_mask") or _is_stage4(args):
         # Paper Stage III (coevolution) and Stage IV (predicted_mask). Neither had
         # an entry here: `joint` above is BB + AA head with the side chain OFF, so
         # the co-evolution machinery that Stage III is *about* -- S_phi, the
@@ -887,7 +899,7 @@ def build_configs(args: argparse.Namespace, device):
         # This switch changes only data routing, not parameter shapes/layout, and
         # B_post still refines B_pre's predicted x_hat_0 in both stages.
         configs.sidechain.predicted_frame = (
-            args.training_stage in ("predicted_mask", "stage4_fampnn")
+            args.training_stage == "predicted_mask" or _is_stage4(args)
         )
         configs.sidechain.per_sigma = True
         configs.sidechain.template_init = True
@@ -898,7 +910,7 @@ def build_configs(args: argparse.Namespace, device):
         # side-chain module all carry over, so no prefix filter.
         configs.training.checkpoint_include_prefixes = []
         configs.training.trainable_param_keywords = []
-        if args.training_stage in ("predicted_mask", "stage4_fampnn"):
+        if args.training_stage == "predicted_mask" or _is_stage4(args):
             # Stage IV: instantiate the atom set from the PREDICTED identity, and
             # supervise coordinates only where that identity is right. Turning
             # predicted_mask on is also what makes L_aa^post safe to supervise:
@@ -913,17 +925,33 @@ def build_configs(args: argparse.Namespace, device):
         # LAYOUT has to be whatever that checkpoint was trained with -- not this
         # stage's defaults. Adopt it from the checkpoint's own record.
         adopt_sidechain_arch_from_checkpoint(configs, args)
-    if args.training_stage == "stage4_fampnn":
-        if not args.fampnn_checkpoint or not Path(args.fampnn_checkpoint).is_file():
-            raise ValueError("Stage IV requires --fampnn-checkpoint with released pretrained weights")
+    if _is_stage4(args):
+        backend = STAGE4_STAGES[args.training_stage]
         if args.load_aa_head_from:
             raise ValueError("Stage IV replaces the old AA head; --load-aa-head-from is incompatible")
         if bool(configs.sidechain.edm):
             raise ValueError("Stage IV requires a one-step donor (sidechain.edm=false)")
         if args.allow_binder_sidechain_leakage:
             raise ValueError("Stage IV requires strict inference-safe binder featurization")
-        configs.residue_type.backend = "fampnn"
-        configs.residue_type.fampnn_checkpoint = str(Path(args.fampnn_checkpoint).resolve())
+        configs.residue_type.backend = backend
+        if backend == "fampnn":
+            if not args.fampnn_checkpoint or not Path(args.fampnn_checkpoint).is_file():
+                raise ValueError("Stage IV requires --fampnn-checkpoint with released pretrained weights")
+            configs.residue_type.fampnn_checkpoint = str(Path(args.fampnn_checkpoint).resolve())
+        else:
+            if not args.ligandmpnn_checkpoint or not Path(args.ligandmpnn_checkpoint).is_file():
+                raise ValueError("Stage IV requires --ligandmpnn-checkpoint with released pretrained weights")
+            if not args.ligandmpnn_source or not (Path(args.ligandmpnn_source) / "model_utils.py").is_file():
+                raise ValueError("Stage IV requires --ligandmpnn-source pointing at the pinned upstream checkout")
+            configs.residue_type.ligandmpnn_checkpoint = str(Path(args.ligandmpnn_checkpoint).resolve())
+            configs.residue_type.ligandmpnn_source = str(Path(args.ligandmpnn_source).resolve())
+            configs.residue_type.ligandmpnn_side_chain_context = bool(args.ligandmpnn_side_chain_context)
+            if not args.ligandmpnn_side_chain_context:
+                # FaMPNN reads fixed side chains through Atom37 unconditionally.
+                # Turning this off makes LigandMPNN see strictly less, so any
+                # head-to-head number stops being a backend comparison.
+                logging.getLogger(__name__).warning(
+                    "LigandMPNN side-chain context is OFF: not comparable with a FaMPNN run")
         configs.training.train_mode = "joint"
         configs.training.ema_decay = 0.0
         configs.loss.aa_time_weighting = False
@@ -938,11 +966,27 @@ def build_configs(args: argparse.Namespace, device):
         for key in ("train_rounds", "inference_rounds", "decode_blocks", "query_fraction", "whole_mask_probability",
                     "temperature", "sc_to_aa", "sc_to_bb", "aa_lr", "sc_lr", "bb_lr", "weight_physical"):
             setattr(configs.stage4, key, getattr(args, "stage4_" + key))
+        if args.stage4_bb_trainable_prefixes:
+            configs.stage4.bb_trainable_prefixes = [
+                p for p in args.stage4_bb_trainable_prefixes.split(",") if p.strip()]
         if args.stage4_phase == "IV-A":
+            # Only the head moves, so the structural losses can only add noise
+            # to a gradient that cannot reach the structure anyway.
             configs.loss.weight_mse = 0.0
             configs.loss.weight_lddt = 0.0
             configs.loss.weight_disto = 0.0
             configs.loss.weight_bb_post = 0.0
+        if args.stage4_phase == "IV-F":
+            # The mirror image of IV-A, so the IV-A zeroing must NOT apply: the
+            # backbone is what is being trained, and the AA cross-entropy
+            # through a frozen head is not a geometry objective. Dropping the
+            # structural losses here lets the backbone chase the designer's
+            # opinion and drift off physical structure entirely.
+            if all(float(getattr(configs.loss, key)) == 0.0
+                   for key in ("weight_mse", "weight_lddt", "weight_disto")):
+                raise ValueError(
+                    "IV-F trains the backbone with a frozen head; it needs at least one "
+                    "structural loss, otherwise only the AA term constrains geometry")
         if args.stage4_inference_rounds < 2:
             raise ValueError("Stage IV production inference requires at least two outer rounds")
     return configs
@@ -1140,7 +1184,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         args.predicted_frame = False
         args.per_sigma = True
         args.trunk_grad_scale = 0.0
-    elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn"):
+    elif args.training_stage in ("coevolution", "predicted_mask") or _is_stage4(args):
         args.disable_sidechain = False
         args.disable_aa_loss = False
         args.aa_mask_mode = "all"
@@ -1148,7 +1192,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         # Stage III teacher-forces only S_phi's backbone geometry. Stage IV opens
         # that input to the predicted frame; learned B_pre features remain live in
         # both stages.
-        args.predicted_frame = args.training_stage in ("predicted_mask", "stage4_fampnn")
+        args.predicted_frame = args.training_stage == "predicted_mask" or _is_stage4(args)
         args.per_sigma = True
 
 
@@ -1189,6 +1233,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "backbone_only", "aa_head_warmup", "sidechain_warmup", "joint",
             "aa_head_on_stage2", "coevolution", "predicted_mask", "stage4_fampnn",
+            "stage4_ligandmpnn",
         ],
         help="Training objective bundle. backbone_only is the default pretraining "
              "stage; 'coevolution' is paper Stage III (both modules + the "
@@ -1436,7 +1481,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pxdesign-code-dir", default="")
     p.add_argument("--binder-validation-fraction", type=float, default=0.1)
     p.add_argument("--fampnn-checkpoint", default="")
-    p.add_argument("--stage4-phase", choices=["IV-A", "IV-B", "IV-C"], default="IV-A")
+    p.add_argument("--ligandmpnn-checkpoint", default="")
+    p.add_argument("--ligandmpnn-source", default="",
+                   help="pinned upstream LigandMPNN checkout (revision is verified)")
+    p.add_argument("--ligandmpnn-side-chain-context", action=argparse.BooleanOptionalAction,
+                   default=True)
+    # Not previously reachable from the CLI, and IV-F needs both: the frozen
+    # head means these are the only weights that move.
+    p.add_argument("--stage4-bb-trainable-prefixes", default="",
+                   help="comma-separated; empty keeps the configured default")
+    p.add_argument("--stage4-phase", choices=["IV-A", "IV-F", "IV-B", "IV-C"], default="IV-A")
     p.add_argument("--stage4-train-rounds", type=int, default=1)
     p.add_argument("--stage4-inference-rounds", type=int, default=3)
     p.add_argument("--stage4-decode-blocks", type=int, default=4)
@@ -1606,12 +1660,12 @@ def main() -> None:
         components, n_items = build_components(args, filtered_index)
     eval_loader, n_eval, eval_filtered_index = build_eval_dataloader(args, output_dir)
     components.eval_dataloader = eval_loader
-    if args.training_stage == "stage4_fampnn":
+    if _is_stage4(args):
         components.named_eval_dataloaders = build_stage4_binder_validation(args,protenix_complex_index,pinder_manifest)
         if eval_loader is not None:
             components.named_eval_dataloaders["monomer_retention"] = eval_loader
     configs = build_configs(args, device)
-    if args.training_stage == "stage4_fampnn":
+    if _is_stage4(args):
         import json
         (output_dir / "resolved_config.json").write_text(json.dumps(configs.to_dict(), indent=2, default=str))
         (output_dir / "arguments.json").write_text(json.dumps(vars(args), indent=2, default=str))

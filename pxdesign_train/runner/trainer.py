@@ -33,6 +33,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from pxdesign_train.aa import uses_codesign
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -238,7 +239,7 @@ class PXDesignTrainer:
     def _init_model(self) -> None:
         self.raw_model = ProtenixDesignTrain(self.configs).to(self.device)
         self._apply_trainable_filter()
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self.raw_model):
             from pxdesign_train.stage4 import apply_phase
             apply_phase(self.raw_model)
         if self.use_ddp:
@@ -319,7 +320,7 @@ class PXDesignTrainer:
     def _init_optimizer(self) -> None:
         cfg = self.configs.training
         self.train_mode = str(getattr(cfg, "train_mode", "joint"))
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self.raw_model):
             if self.train_mode != "joint":
                 raise ValueError("FaMPNN Stage IV requires joint backward with AA/SC/BB parameter groups")
         warmup = int(getattr(cfg, "warmup_steps", 0))
@@ -392,7 +393,7 @@ class PXDesignTrainer:
             )
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
-            if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            if uses_codesign(self.raw_model):
                 from pxdesign_train.stage4 import optimizer_groups
                 params = optimizer_groups(self.raw_model)
             if not params:
@@ -549,7 +550,7 @@ class PXDesignTrainer:
     def train_step(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Single training step. Returns the loss-component dict for logging."""
         self.model.train()
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self.raw_model):
             from pxdesign_train.stage4 import apply_phase
             apply_phase(self.raw_model)
         dtype = self._train_precision()
@@ -815,7 +816,7 @@ class PXDesignTrainer:
             # never saw. Recorded separately so an evaluator can reconstruct it.
             "sidechain_edm_hparams": self._sidechain_edm_hparams(),
         }
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self.raw_model):
             from pxdesign_train.stage4 import checkpoint_identity
             state["stage4_identity"] = checkpoint_identity(self.raw_model)
             from pathlib import Path
@@ -995,7 +996,7 @@ class PXDesignTrainer:
 
     def load_checkpoint(self, path: str, params_only: bool = False) -> None:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self.raw_model):
             from pxdesign_train.stage4 import checkpoint_identity
             recorded = ckpt.get("stage4_identity")
             expected = checkpoint_identity(self.raw_model)
@@ -1019,7 +1020,7 @@ class PXDesignTrainer:
         if not self.use_ddp and any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
         state = self._migrate_atom_name_vocab(state)
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if uses_codesign(self.raw_model):
             required = {k: v for k,v in self.model.state_dict().items() if k.removeprefix("module.").startswith(("diffusion_module.", "sidechain_module.", "input_embedder."))}
             incompatible = [k for k,v in required.items() if k not in state or state[k].shape != v.shape]
             if incompatible:

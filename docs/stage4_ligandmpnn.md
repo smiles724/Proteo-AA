@@ -7,8 +7,9 @@ Worktree `/hai/users/s/h/shenjm/Proteo-AA-ligandmpnn`, branch
 **Status: integration, unverified as science.** The backend loads released
 weights, resolves configuration, passes 612 tests including exact parity with
 upstream's own decoder, and clears a bounded real-model GPU smoke (HAI job
-**114335**). No training result, no FaMPNN comparison and no binding-quality
-claim exists. Read [Open problems](#open-problems) before reporting any number
+**114335**). Three training runs are in flight and have produced their first
+validation points (see [First validation readings](#first-validation-readings)),
+but no FaMPNN comparison and no binding-quality claim exists yet. Read [Open problems](#open-problems) before reporting any number
 from this path.
 
 This is the sibling of [`stage4_fampnn.md`](stage4_fampnn.md), which owns the
@@ -397,11 +398,66 @@ Measured GPU use says there was never a reason to pay that: IV-A at 384 sits
 at 38.0 GiB, IV-F at 256 at 47.2 GiB, IV-F at 384 at 78.8 GiB — all against
 143.8 GiB on an H200. 114345 exists to retire 114342.
 
-IV-A's step-50 readings, **for orientation only** --
-one job, fifty steps, an untrained cycle: `stage4/aa_pre` 2.83–3.48 against
-ln 20 = 3.00, `recovery_pre` 6.9–17%, `loss_bb` 0 as IV-A intends. One log
-line per accumulation micro-batch, not per step. Nothing here is a
-measurement and nothing should be compared to FaMPNN yet.
+### First validation readings
+
+At **2026-09-11 13:30**, ≈9.7 h into the 23:50 slot and with no requeues, the
+three runs stand at step 9050 / 5050 / 5550. Validation runs every 2000 steps
+over 128 items per named loader, so these are the first numbers on this branch
+that are not single-batch orientation. `ce` is `stage4/aa_pre`, the
+pre-revision AA cross-entropy, against ln 20 = 3.00 for a uniform head; `rec`
+is `recovery_pre`.
+
+| job | phase | step | PINDER ce | PINDER rec | monomer ce | monomer rec |
+| --- | --- | --- | --- | --- | --- | --- |
+| 114341 | IV-A 384 | 2000 | 2.615 | 18.8% | 2.704 | 16.8% |
+| | | 4000 | 2.550 | 20.5% | 2.674 | 17.1% |
+| | | 6000 | **2.488** | **23.0%** | 2.655 | 18.1% |
+| | | 8000 | 2.571 | 20.2% | 2.682 | 17.0% |
+| 114342 | IV-F 256 | 2000 | 2.794 | 18.6% | 2.983 | 13.2% |
+| | | 4000 | 2.758 | 18.3% | 2.940 | 14.7% |
+| 114345 | IV-F 384 | 2000 | 2.791 | 18.1% | 2.968 | 15.3% |
+| | | 4000 | 2.858 | 17.0% | 3.032 | 12.2% |
+
+Read the shape only. IV-A is the only arm whose head moves and the only one
+whose AA loss falls, and it does not fall monotonically — step 8000 gives back
+most of what 6000 gained. The IV-F arms sit where a frozen head should, near
+2.8 on PINDER; their monomer cross-entropy above ln 20 is a frozen designer
+reading an off-distribution monomer backbone, not a training failure. Four
+points on 128 items cannot separate these arms, and none of this is yet a
+result.
+
+**The matched comparison is now verified rather than intended.** Diffing
+114341's `arguments.json` against yfsun's FaMPNN IV-A at the same crop
+(113954) leaves only paths, `training_stage`, each head's own checkpoint and
+source arguments, and `stage4_bb_trainable_prefixes` — a flag added on this
+branch and inert under IV-A, which trains nothing outside `aa_head.`. Every
+data, mixture, crop, phase, lr and cycle argument is identical. His run stopped at step 5500 and his checkpoints under
+`/hai/scratch/yfsun/proteo_aa_runs/stage4_fampnn_binder/113954/checkpoints/`
+are readable, so a head-to-head at matched steps is available today. His
+per-step logs live in his home, which we cannot read, so the FaMPNN side has
+to be computed here, not copied from his curves.
+
+**Crop 256 is not even buying throughput.** 114341 and 114342 share
+`haic-hgx-6` while 114345 has `haic-hgx-9` to itself, and the co-located
+crop-256 IV-F run is doing 520 steps/h against 587 for the crop-384 one. At
+these rates the slot ends near 22.2k / 12.4k / 14.0k steps, so none of the
+three reaches `--max-steps 30000`. One more reason 114345 retires 114342.
+
+**These three are already unresumable, and it is too late to prevent it.**
+`implementation_identity()` is `@lru_cache`d, so each process froze the HEAD
+it started on: 114341 and 114342 record `bd5ddad`, 114345 records `b74be19`,
+against a HEAD that has since moved. Verified by reading their newest
+checkpoints. Further commits cost these runs nothing — the mismatch already
+exists — so the rule to carry forward is the narrower one: **freeze the branch
+between launching a run and its first checkpoint**, or accept that a
+preemption costs the run rather than an interval.
+
+A few PINDER items die in tokenisation with `ValueError: Unknown atom element:
+X`: `Gen data failed` at `data_pipeline.py:105`, caught, sample skipped. By
+step 9750 / 5400 / 5950 the counts were 6 / 9 / 0 — they accumulate, so read
+them against a step, not as a fixed number. Benign at this rate, against
+thousands of items each: it is the PDB reader's guessed element reaching a
+tokenizer that will not guess.
 
 Per-step logs are the record; this table is only the index. They live in
 `<worktree>/logs/training/stage4_ligandmpnn/<name>-<jobid>.err`, one line per

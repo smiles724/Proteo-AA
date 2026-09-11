@@ -15,6 +15,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--score-root", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--mpnn-sequences", type=int, default=1)
+    # Generation emits every sequence arm from one trajectory, but scoring each
+    # is a separate GPU job. Restricting the arms here keeps the emitted task
+    # indices contiguous, which is what the queue manager's TASK_START/TASK_END
+    # range can actually select; filtering downstream cannot.
+    p.add_argument(
+        "--arms",
+        default="",
+        help="comma-separated sequence arms to score; empty means every arm",
+    )
     return p.parse_args()
 
 
@@ -22,14 +31,31 @@ def main() -> None:
     args = parse_args()
     generation_root = Path(args.generation_root).expanduser().resolve()
     score_root = Path(args.score_root).expanduser().resolve()
+    keep_arms = {arm for arm in args.arms.split(",") if arm.strip()}
     groups: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
     manifests = sorted(generation_root.glob("*/manifest.csv"))
     if not manifests:
         raise FileNotFoundError(f"no */manifest.csv under {generation_root}")
+    seen_arms: set[str] = set()
     for manifest in manifests:
         with manifest.open() as handle:
             for row in csv.DictReader(handle):
-                groups[(row["model_label"], row["target"], row["sequence_arm"])].append(row)
+                arm = row["sequence_arm"]
+                seen_arms.add(arm)
+                if keep_arms and arm not in keep_arms:
+                    continue
+                groups[(row["model_label"], row["target"], arm)].append(row)
+    if not groups:
+        raise ValueError(
+            f"--arms {args.arms!r} matched nothing; manifests contain: "
+            f"{sorted(seen_arms)}"
+        )
+    unknown = keep_arms - seen_arms
+    if unknown:
+        raise ValueError(
+            f"--arms names arms absent from every manifest: {sorted(unknown)}; "
+            f"manifests contain: {sorted(seen_arms)}"
+        )
 
     rows = []
     for task_index, ((model, target, arm), items) in enumerate(sorted(groups.items())):

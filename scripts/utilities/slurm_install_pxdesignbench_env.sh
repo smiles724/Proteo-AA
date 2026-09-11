@@ -21,9 +21,15 @@ ENV_NAME="${ENV_NAME:-pxdbench}"
 ENV_PATH="${CONDA_BASE}/envs/${ENV_NAME}"
 CACHE_ROOT="${CACHE_ROOT:-/hai/scratch/shenjm/pxdesign_install_cache}"
 CUDA_VERSION="${CUDA_VERSION:-12.1}"
+DEEPSPEED_VERSION="${DEEPSPEED_VERSION:-0.15.1}"
+CONSTRAINT_FILE="${REPO_ROOT:-/hai/users/s/h/shenjm/Proteo-AA}/scripts/utilities/pxdesignbench_constraints.txt"
 
 [[ -f "${PXDBENCH_DIR}/install.sh" ]] || {
   echo "ERROR: missing ${PXDBENCH_DIR}/install.sh" >&2
+  exit 2
+}
+[[ -f "${CONSTRAINT_FILE}" ]] || {
+  echo "ERROR: missing ${CONSTRAINT_FILE}" >&2
   exit 2
 }
 mkdir -p "${CACHE_ROOT}/tmp" "${CACHE_ROOT}/pip" "${CACHE_ROOT}/conda-pkgs"
@@ -31,9 +37,38 @@ export TMPDIR="${CACHE_ROOT}/tmp"
 export PIP_CACHE_DIR="${CACHE_ROOT}/pip"
 export CONDA_PKGS_DIRS="${CACHE_ROOT}/conda-pkgs"
 export PATH="${CONDA_BASE}/bin:${PATH}"
+export PIP_CONSTRAINT="${CONSTRAINT_FILE}"
+
+check_environment() {
+  "${ENV_PATH}/bin/python" - <<'PY'
+import torch
+import jax
+import colabdesign
+import protenix
+import pxdbench
+import pxdbench.tasks
+print("torch", torch.__version__, "cuda", torch.version.cuda)
+print("jax", jax.__version__)
+print("PXDesignBench task import check: OK")
+PY
+}
+
+pin_deepspeed() {
+  echo "Pinning DeepSpeed ${DEEPSPEED_VERSION} for PyTorch 2.3 compatibility"
+  DS_BUILD_OPS=0 "${ENV_PATH}/bin/python" -m pip install \
+    --no-cache-dir \
+    --no-deps \
+    --force-reinstall \
+    "deepspeed==${DEEPSPEED_VERSION}"
+}
 
 if [[ -x "${ENV_PATH}/bin/python" ]]; then
-  if "${ENV_PATH}/bin/python" -c 'import torch, jax, colabdesign, protenix, pxdbench'; then
+  # Protenix only declares deepspeed>=0.15.1. Pip may therefore select a much
+  # newer DeepSpeed that calls torch.library.custom_op, which does not exist in
+  # the PyTorch 2.3.1 version required by PXDesignBench. Repair that resolver
+  # mismatch in-place, then exercise the same task import used by scoring.
+  pin_deepspeed
+  if check_environment; then
     echo "PXDesignBench environment is already complete: ${ENV_PATH}"
     exit 0
   fi
@@ -48,16 +83,8 @@ bash install.sh \
   --pkg_manager conda \
   --cuda-version "${CUDA_VERSION}"
 
-"${ENV_PATH}/bin/python" - <<'PY'
-import torch
-import jax
-import colabdesign
-import protenix
-import pxdbench
-print("torch", torch.__version__, "cuda", torch.version.cuda)
-print("jax", jax.__version__)
-print("PXDesignBench import check: OK")
-PY
+pin_deepspeed
+check_environment
 
 echo "environment=${ENV_PATH}"
 echo "large_cache=${CACHE_ROOT}"

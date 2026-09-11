@@ -10,8 +10,10 @@
 # PXDesign's technical report Table 3 lists A31, A32, A113, C73, C87 for this
 # target -- three hotspots more than AlphaProteo's A113, C73. A-CODE says it
 # follows PXDesign's protocol, so PXDesign's set is what reproduces its row.
-# Uncomment the wider set to match PXDesign; the narrow set below is
-# AlphaProteo Table S1 as published.
+# This file now carries PXDesign's wider set, because the benchmark run it feeds
+# is being compared against PXDesign's row. AlphaProteo Table S1 as published is
+# the narrow set A113, C73; switch back to it only for a run that is not being
+# compared to PXDesign, and never mix the two in one table.
 #
 # AlphaProteo's own benchmark binder length for this target: 50-120.
 # A-CODE (arXiv:2605.03360 S4.2) instead samples 80-130 uniformly across all
@@ -28,12 +30,12 @@ target:
   chains:
     A:
       crop: ["12-157"]
-      hotspots: [113]
+      hotspots: [31, 32, 113]
     B:
       crop: ["12-157"]
       # no hotspot on this chain; the epitope sits on the chain(s) above
     C:
       crop: ["12-157"]
-      hotspots: [73]
+      hotspots: [73, 87]
 
 binder_length: 105   # midpoint of A-CODE's 80-130; sweep the range for a full run

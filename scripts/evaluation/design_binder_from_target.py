@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import string
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,9 @@ logger = logging.getLogger(__name__)
 # binder does not need real identities -- only a valid backbone shape.
 XPB = "xpb"
 BACKBONE = ("N", "CA", "C", "O")
+# Keep output IDs compatible with PDB-based evaluators such as PXDesignBench.
+# Z is reserved for the (single) binder throughout this evaluation pipeline.
+TARGET_CHAIN_IDS = tuple(string.ascii_uppercase.replace("Z", ""))
 
 
 # --------------------------------------------------------------------------
@@ -81,8 +85,144 @@ def load_target_config(path: str | Path) -> dict:
 # target
 # --------------------------------------------------------------------------
 
+def _set_string_annotation(atom_array: Any, name: str, value: str) -> None:
+    """Replace a string annotation without inheriting a too-short dtype."""
+    atom_array.set_annotation(
+        name,
+        np.full(atom_array.array_length(), value, dtype=f"<U{max(1, len(value))}"),
+    )
+
+
+def _select_and_normalize_target_chains(
+    atoms: Any, chains: dict,
+) -> tuple[Any, np.ndarray]:
+    """Select one source chain per config entry and assign canonical IDs.
+
+    ``DataPipeline.get_data_from_mmcif()`` returns a biological assembly.  An
+    author chain can consequently appear more than once: for example, 5vli's
+    author chain A becomes structural chains A, A.1 and A.2.  Selecting only by
+    ``auth_asym_id`` silently includes every assembly copy.  The source
+    ``label_asym_id`` identifies the unsuffixed/source copy: after assembly
+    expansion its first structural ``chain_id`` is still exactly that label,
+    while additional copies receive suffixes.  For these ten inputs the first
+    assembly operation is the identity operation.
+
+    Configs remain in published author numbering.  Selected output chains are
+    canonicalised to A, B, C, ... in YAML order.  This preserves PXDesign's
+    deterministic chain ordering while deliberately using one-character IDs
+    for PXDesignBench.  Z is reserved for the binder.
+    """
+    required = {"auth_asym_id", "label_asym_id", "mol_type", "auth_seq_id"}
+    missing = required - set(atoms.get_annotation_categories())
+    if missing:
+        raise ValueError(f"structure is missing required annotations: {sorted(missing)}")
+    if len(chains) > len(TARGET_CHAIN_IDS):
+        raise ValueError(
+            f"at most {len(TARGET_CHAIN_IDS)} target chains are supported; "
+            "chain Z is reserved for the binder"
+        )
+
+    raw = np.asarray(atoms.auth_seq_id, dtype=str)
+    auth = np.full(raw.shape, -1, dtype=np.int64)
+    numeric = np.char.isdigit(np.char.lstrip(raw, "-"))
+    auth[numeric] = raw[numeric].astype(np.int64)
+
+    index_pieces = []
+    hotspot_pieces = []
+    output_id_pieces = []
+    for output_chain, (author_chain, (crops, hotspots)) in zip(
+        TARGET_CHAIN_IDS, chains.items()
+    ):
+        author_match = (
+            (np.asarray(atoms.auth_asym_id) == author_chain)
+            & (np.asarray(atoms.mol_type) == "protein")
+        )
+        if not author_match.any():
+            available = sorted({
+                str(value)
+                for value in np.asarray(atoms.auth_asym_id)[
+                    np.asarray(atoms.mol_type) == "protein"
+                ]
+            })
+            raise ValueError(
+                f"chain {author_chain} has no protein atoms "
+                f"(structure has author chains {available})"
+            )
+
+        # The unsuffixed/source copy has chain_id == source label_asym_id.
+        # Copies created by assembly operators retain label_asym_id but are
+        # renamed A.1, A.2, ... by Protenix.
+        primary = author_match & (
+            np.asarray(atoms.chain_id) == np.asarray(atoms.label_asym_id)
+        )
+        primary_ids = sorted({
+            str(value) for value in np.asarray(atoms.chain_id)[primary]
+        })
+        if len(primary_ids) != 1:
+            candidates = sorted({
+                str(value) for value in np.asarray(atoms.chain_id)[author_match]
+            })
+            raise ValueError(
+                f"author chain {author_chain} does not resolve to exactly one "
+                f"unsuffixed structural chain (primary={primary_ids}, all={candidates})"
+            )
+        source_chain = primary_ids[0]
+        on_chain = primary & (np.asarray(atoms.chain_id) == source_chain)
+
+        selected = on_chain.copy() if not crops else np.zeros(len(atoms), dtype=bool)
+        for lo, hi in crops:
+            span = on_chain & (auth >= lo) & (auth <= hi)
+            if not span.any():
+                raise ValueError(
+                    f"chain {author_chain} crop {lo}-{hi} selected nothing; the "
+                    f"source chain spans {auth[on_chain].min()}-{auth[on_chain].max()} "
+                    "in author numbering"
+                )
+            selected |= span
+
+        chain_hotspot = np.zeros(len(atoms), dtype=bool)
+        for residue in hotspots:
+            at = on_chain & (auth == residue)
+            if not at.any():
+                raise ValueError(
+                    f"chain {author_chain} hotspot {residue} not present on "
+                    f"source structural chain {source_chain}"
+                )
+            chain_hotspot |= at
+
+        selected_indices = np.flatnonzero(selected)
+        index_pieces.append(selected_indices)
+        hotspot_pieces.append(chain_hotspot[selected_indices])
+        output_id_pieces.append(
+            np.full(len(selected_indices), output_chain, dtype="<U1")
+        )
+
+        copies = sorted({
+            str(value) for value in np.asarray(atoms.chain_id)[author_match]
+        })
+        ignored = [chain_id for chain_id in copies if chain_id != source_chain]
+        suffix = f"; ignored assembly copies {ignored}" if ignored else ""
+        logger.info(
+            "  target author chain %s (label %s) -> %s%s",
+            author_chain,
+            source_chain,
+            output_chain,
+            suffix,
+        )
+
+    if not index_pieces:
+        raise ValueError("target config contains no chains")
+    # Slice once so bonds between selected target chains survive. Integer-array
+    # indexing also puts chains into YAML order before IDs are canonicalised.
+    target = atoms[np.concatenate(index_pieces)]
+    output_ids = np.concatenate(output_id_pieces)
+    for annotation in ("chain_id", "auth_asym_id", "label_asym_id"):
+        target.set_annotation(annotation, output_ids.copy())
+    return target, np.concatenate(hotspot_pieces)
+
+
 def parse_and_crop(structure_path: str, chains: dict) -> tuple[Any, np.ndarray]:
-    """Parse the structure and keep only the configured author-numbered spans.
+    """Parse, crop and canonically relabel configured author-numbered chains.
 
     Returns the cropped AtomArray and, per kept atom, whether it is a hotspot.
     """
@@ -93,47 +233,7 @@ def parse_and_crop(structure_path: str, chains: dict) -> tuple[Any, np.ndarray]:
     )
     if "atom_array" not in bio:
         raise RuntimeError(f"could not parse {structure_path}")
-    atoms = bio["atom_array"]
-
-    # auth_seq_id is a string annotation and non-polymer rows (waters, glycans,
-    # buffer) can carry an empty one, so a blanket astype(int) raises on most
-    # structures. 5o45 happens to have none, which is how this passed on PDL1
-    # and failed on the other nine. Blanks become -1, which no crop selects --
-    # and every selection below is already restricted to protein atoms.
-    raw = np.asarray(atoms.auth_seq_id, dtype=str)
-    auth = np.full(raw.shape, -1, dtype=np.int64)
-    numeric = np.char.isdigit(np.char.lstrip(raw, "-"))
-    auth[numeric] = raw[numeric].astype(np.int64)
-    keep = np.zeros(atoms.array_length(), dtype=bool)
-    hotspot = np.zeros(atoms.array_length(), dtype=bool)
-
-    for chain_id, (crops, hotspots) in chains.items():
-        # Author chain id, not the renumbered one, for the same reason as the
-        # residue numbers: it is what the published table names.
-        on_chain = (atoms.auth_asym_id == chain_id) & (atoms.mol_type == "protein")
-        if not on_chain.any():
-            raise ValueError(
-                f"chain {chain_id} has no protein atoms "
-                f"(structure has {sorted(set(atoms.auth_asym_id))})"
-            )
-        for lo, hi in crops:
-            span = on_chain & (auth >= lo) & (auth <= hi)
-            if not span.any():
-                raise ValueError(
-                    f"chain {chain_id} crop {lo}-{hi} selected nothing; the "
-                    f"chain spans {auth[on_chain].min()}-{auth[on_chain].max()} "
-                    f"in author numbering"
-                )
-            keep |= span
-        for h in hotspots:
-            at = on_chain & (auth == h)
-            if not at.any():
-                raise ValueError(f"chain {chain_id} hotspot {h} not present")
-            hotspot |= at
-
-    if not keep.any():
-        raise ValueError("crop selected no atoms at all")
-    return atoms[keep], hotspot[keep]
+    return _select_and_normalize_target_chains(bio["atom_array"], chains)
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +283,17 @@ def fabricate_binder(template: Any, length: int, chain_id: str = "Z") -> Any:
 
     binder.chain_id = np.array([chain_id] * binder.array_length())
     binder.auth_asym_id = np.array([chain_id] * binder.array_length())
+    if "label_asym_id" in binder.get_annotation_categories():
+        _set_string_annotation(binder, "label_asym_id", chain_id)
+    if "label_entity_id" in binder.get_annotation_categories():
+        # The binder is a new sequence/entity, not another symmetry copy of the
+        # target residue that happened to donate its backbone annotations.
+        existing = set(np.asarray(template.label_entity_id, dtype=str))
+        numeric = [int(value) for value in existing if value.isdigit()]
+        entity_id = str(max(numeric, default=0) + 1)
+        while entity_id in existing:
+            entity_id = str(int(entity_id) + 1)
+        _set_string_annotation(binder, "label_entity_id", entity_id)
     ids = np.repeat(np.arange(1, n_res + 1), per_res)
     binder.res_id = ids
     binder.auth_seq_id = ids.astype(template.auth_seq_id.dtype)
@@ -222,14 +333,21 @@ def build_features(target: Any, binder: Any, hotspot_on_target: np.ndarray) -> d
     tokens, and every downstream index (atom_to_token_idx, centre atoms, the
     side-chain backbone gather) is positional.
     """
-    import biotite.structure as struc
     from protenix.data.core.featurizer import Featurizer
+    from protenix.data.core.parser import AddAtomArrayAnnot
     from protenix.data.tokenizer import AtomArrayTokenizer
     from protenix.data.utils import data_type_transform, make_dummy_feature
 
     from pxdesign_train.data import DesignFeaturizer, DesignSelection
 
     combined = target + binder
+    # Sliced target chains and the fabricated binder carry integer identifiers
+    # from their source assembly/donor. Recompute them from the canonical chain
+    # and entity annotations so the model sees the binder as its own asymmetry
+    # unit rather than as part of a target chain.
+    combined = AddAtomArrayAnnot.add_int_id(combined)
+    combined = AddAtomArrayAnnot.find_equiv_mol_and_assign_ids(combined)
+    combined = AddAtomArrayAnnot.add_ref_space_uid(combined)
     is_binder = np.concatenate(
         [np.zeros(target.array_length(), bool), np.ones(binder.array_length(), bool)]
     )

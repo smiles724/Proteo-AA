@@ -21,7 +21,8 @@ mkdir -p logs/validation/alphaproteo10 "${RUN_ROOT}/scores"
   --generation-root "${RUN_ROOT}/generation" \
   --score-root "${RUN_ROOT}/scores" \
   --output "${TASK_FILE}" \
-  --mpnn-sequences "${MPNN_SEQUENCES:-1}"
+  --mpnn-sequences "${MPNN_SEQUENCES:-1}" \
+  --arms "${SCORE_ARMS:-}"
 
 n_tasks="$(( $(wc -l < "${TASK_FILE}") - 1 ))"
 if (( TASK_START >= n_tasks )); then

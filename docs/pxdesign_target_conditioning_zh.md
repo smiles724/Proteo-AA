@@ -131,19 +131,52 @@ monomer，但那是**侧链** warmup，不是 backbone 生成。
 93.9% 越界，`alpha 0.00 / beta 0.00 / loop 0.96`。**这正是 PXDesign 第一阶段
 存在的理由所要解决的问题。**
 
-## 下一步：先做最便宜的判别实验
+## 已测：问题早于 Stage III，而且 Stage III 在变好
 
-**无条件 monomer 生成。** 用同一个 checkpoint 生成单体 backbone，测 CA–CA 键长
-和二级结构。
+用同一个 harness、同靶点、同 seed、同 400 步跑 Stage III 的 warm-start 起点
+（Stage II `fixed_global_decay_from_50k/step52500.pt`，job 114649）：
 
-* 如果**单体也坏** → 模型根本没学会主链几何，和靶点无关。那就该按 PXDesign 的
-  课程补一个 monomer 加权阶段，而不是在 binder 任务上继续训。
-* 如果**单体正常、只有复合体坏** → 问题在靶点条件化的学习或复合体数据，
-  那时再往条件化方向查才有依据。
+| checkpoint | bhrf1 CA–CA 中位 / 坏键 / 最短 / Rg | pdl1 |
+| --- | --- | --- |
+| PXDesign official | 3.83 / **0.0%** / 2.93 / 13.7 | 3.81 / **0.0%** / 3.74 / 12.9 |
+| **Stage II 52500** | **1.82 / 98.1% / 0.12 / 6.8** | **1.74 / 97.8% / 0.39 / 6.9** |
+| Stage III 111408 s6000 | 2.96 / 85.2% / 0.50 / 15.6 | 2.89 / 88.8% / 0.43 / 14.1 |
 
-这个实验比任何改动都便宜，而且两个结果指向完全不同的方向。PXDesign 自己就有
-无条件 monomer benchmark（报告 Figure 2a，长度 200–1400，ProteinMPNN-CA +
-ESMFold，scRMSD < 2 判 designable），协议可以直接照搬。
+两个靶点一致，结论有两条：
 
-在这个判别做出来之前，不建议改任何训练代码 —— 我们已经有两次基于未验证假设的
-误判了。
+**1. 问题完全早于 Stage III。** Stage II 的自由生成是彻底塌缩的 —— 104 残基的链
+Rg 只有 6.8 Å（正常应 ~13），相邻 CA 最短 0.12 Å，98% 键长越界。那不是蛋白，
+是一团点。
+
+这本来就该预料到：**Stage II 是侧链 warmup，从来没有被训练过、也从来没有被评估过
+「从噪声生成主链」这件事**。Stage III 直接从它 warm start，等于在一个不会生成主链的
+底座上开始训 binder 设计。
+
+**2. Stage III 的 6650 步是在变好，只是远远不够。** 坏键 98.1% → 85.2%，
+Rg 6.8 → 15.6（从塌缩恢复到大致正确的尺寸）。方向是对的，量级不够。
+
+这直接对上 PXDesign 报告 p24 那句话 —— 他们的第一阶段 upweight monomer 蒸馏数据，
+就是为了「learn the fundamentals of protein backbone geometry in an unconditional
+setting」。**我们跳过了这一阶段**，Stage II 用 monomer 但做的是侧链，不是主链生成。
+
+## 下一步
+
+判别已经做完，方向清楚了：**缺的是无条件主链生成的训练阶段，不是靶点条件化。**
+
+1. **按 PXDesign 补一个 monomer 加权的主链生成阶段**，在进 binder 任务之前。
+   报告的做法是第一阶段上调 monomer-only 蒸馏数据（AFDB + MGnify），
+   学会无条件主链几何后再逐步转向复合体。我们现在是恒定 0.25 monomer，
+   而且 Stage II 练的是侧链。
+2. **判据用无条件 monomer designability**，不要用 binder。PXDesign 有现成协议
+   （报告 Figure 2a：长度 200–1400，ProteinMPNN-CA + ESMFold，scRMSD < 2）。
+   在主链几何没达标之前，任何 binder 数字都读不出信息 —— 这次 0/3280 就是例子。
+3. **规模差距也要正视**：PXDesign crop 640 / batch 64 / diffusion batch 8 /
+   from scratch；我们 crop 448 / batch 1 / 6650 步超时。即使课程补对，
+   这个量级的训练预算差异也要先想清楚。
+
+顺带记一个 worktree 的坑：`benchmarks/alphaproteo10/.gitignore` 忽略
+`structures/`，所以新建 worktree 里那 10 个 PDB 结构不存在，而报错信息是
+`could not parse <file>.cif` 而不是「文件缺失」，会把人引向解析逻辑。
+软链主仓库的那份即可。另外别手搓已有 launcher 的等价命令 ——
+`slurm_generate_alphaproteo_designability.sh` 传了 `--sampler-mode pxdesign_native`，
+漏掉它会静默换成 `minimal_euler`，测的就不是同一条轨迹了。

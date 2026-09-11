@@ -350,14 +350,33 @@ Submitted 11 September 2026, 23:50 slots, same donor as the FaMPNN runs.
 
 | job | phase | crop | what it tests |
 | --- | --- | --- | --- |
-| **114341** | IV-A | 384 | trains the LigandMPNN head only. Matched to yfsun's FaMPNN IV-A: same donor, same data, same mixture, so the two are directly comparable |
-| **114342** | IV-F | 256 | trains packer + atom-attention decoder against the FROZEN head. Crop reduced from 384 because this phase is not memory-proven |
+| **114341** | IV-A | 384 | trains the LigandMPNN head only. Matched to yfsun's FaMPNN IV-A: same donor, same data, same mixture, so the two are directly comparable. Do not change this crop — the match is the point |
+| **114342** | IV-F | 256 | trains packer + atom-attention decoder against the FROZEN head. The conservative control |
+| **114345** | IV-F | 384 | the same, at IV-A's crop |
 
-Both reached training. IV-A's step-50 readings, **for orientation only** --
+All three reached training.
+
+**Crop 256 was over-cautious and costs nearly half the data.**
+`max_binder_tokens = crop x 0.75` is a hard filter, so at 256 only 664,664 of
+1,219,793 cluster-disjoint PINDER rows are eligible (54.5%), and the excluded
+ones are systematically the larger binders — median binder tokens among the
+survivors drops from 175 to 104. At 384 it is 96.6%, at 448 it is 100%.
+Measured GPU use says there was never a reason to pay that: IV-A at 384 sits
+at 38.0 GiB, IV-F at 256 at 47.2 GiB, IV-F at 384 at 78.8 GiB — all against
+143.8 GiB on an H200. 114345 exists to retire 114342.
+
+IV-A's step-50 readings, **for orientation only** --
 one job, fifty steps, an untrained cycle: `stage4/aa_pre` 2.83–3.48 against
 ln 20 = 3.00, `recovery_pre` 6.9–17%, `loss_bb` 0 as IV-A intends. One log
 line per accumulation micro-batch, not per step. Nothing here is a
 measurement and nothing should be compared to FaMPNN yet.
+
+Per-step logs are the record; this table is only the index. They live in
+`<worktree>/logs/training/stage4_ligandmpnn/<name>-<jobid>.err`, one line per
+accumulation micro-batch, so roughly 150k lines per job per day -- grep them,
+do not read them. Job-level events (FAILED, REQUEUED, preemption) are not in
+there at all and come from `sacct -j <id>`. Both survive any session, so
+there is nothing to carry forward by hand beyond this table.
 
 Four earlier submissions died and are worth keeping straight, because each
 one is a distinct trap now covered above: 114336/114337 on the sbatch script

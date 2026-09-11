@@ -8,6 +8,10 @@
 #SBATCH --time=23:50:00
 #SBATCH --output=logs/training/stage4_ligandmpnn/%x-%j.out
 #SBATCH --error=logs/training/stage4_ligandmpnn/%x-%j.err
+# Slurm defaults to TRUNCATE, and these jobs are requeueable. A preemption or
+# node failure would otherwise overwrite hours of logs with the restart's
+# first line -- the one case where you most need to see what came before.
+#SBATCH --open-mode=append
 
 # Stage IV with the LigandMPNN sequence backend, HAI-native.
 #

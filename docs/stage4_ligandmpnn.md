@@ -5,7 +5,7 @@ Worktree `/hai/users/s/h/shenjm/Proteo-AA-ligandmpnn`, branch
 11 September 2026.
 
 **Status: integration, unverified as science.** The backend loads released
-weights, resolves configuration, passes 604 tests including exact parity with
+weights, resolves configuration, passes 608 tests including exact parity with
 upstream's own decoder, and clears a bounded real-model GPU smoke (HAI job
 **114335**). No training result, no FaMPNN comparison and no binding-quality
 claim exists. Read [Open problems](#open-problems) before reporting any number
@@ -215,6 +215,14 @@ a 24-hour slot a single run writes roughly 57 GiB. That does not fit in home
 at all, which is why `OUTPUT_DIR` defaults to scratch and why
 `TRITON_CACHE_DIR` is overridden -- its default is `~/.triton`.
 
+**PINDER is read from yfsun's tree but extracted into ours.** The manifest
+and the 168 GiB `pdbs.zip` are readable and are used in place; `--pinder-root`
+points at `/hai/scratch/shenjm/pinder/2024-02` instead, because his `pdbs/` is
+both partly unreadable and not writable by us. Structures are materialised
+from the archive at first use, ~200 KiB each, so a 30k-step run adds roughly
+6 GiB. The launcher preflights all three: archive readable, manifest readable,
+root writable.
+
 Two things stay in home deliberately. The worktree is source only; its
 `Protenix` and `PXDesign` submodules are symlinks to the main checkout rather
 than second copies. The upstream LigandMPNN clone stays next to
@@ -244,19 +252,48 @@ Marlowe-native with a HAI wrapper on top, and nothing here runs on Marlowe.
 The donor is the same Stage III checkpoint (`111408/step6000`) the FaMPNN runs
 use, so the two backends differ in the sequence network and nothing else.
 
-Two operational notes carried over from `stage4_fampnn.md`, both still live:
+### Failure modes, all of them observed
 
-* `sbatch` from inside an interactive allocation silently inherits the shell's
-  memory request over the script's own `#SBATCH`. Strip `SLURM_*` (keeping
-  `SLURM_CONF`) before submitting and confirm `ReqTRES`.
-* `CHECKPOINT_INTERVAL` stays below `EVAL_INTERVAL` because validation runs
-  before the checkpoint save; jobs 113677 and 113714 both died before their
-  first checkpoint and lost everything.
+Two carried over from `stage4_fampnn.md`:
 
-A third, learned here: **the worktree must live on shared storage.** Compute
-nodes cannot see `/tmp`, which is node-local — a job submitted against a
-`/tmp` path fails instantly at `cd`. This worktree lives under
-`/hai/users/s/h/shenjm/` for that reason.
+* **`sbatch` from inside an interactive allocation** silently inherits the
+  shell's CPU and memory request over the script's own `#SBATCH`. Strip
+  `SLURM_*` (keeping `SLURM_CONF`) before submitting and confirm with
+  `scontrol show job <id> | grep ReqTRES` — it must read
+  `cpu=8,mem=192G,gres/gpu:h200=1`.
+* **`CHECKPOINT_INTERVAL` stays below `EVAL_INTERVAL`**, because validation
+  runs before the checkpoint save. Jobs 113677 and 113714 both died before
+  their first checkpoint and lost everything.
+
+Four learned here. Every one of them is the same shape — **something that can
+be found or stat'ed, but not used, was treated as usable** — and the first is
+by far the most dangerous, because it is the only one that fails quietly.
+
+* **`PROTEOAA_REPO` must be resolved, never hardcoded.** The default pointed
+  at the main checkout while this script lives in a worktree, so a plain
+  `sbatch` `cd`'d into the *other* tree and ran its code with this tree's
+  arguments. Here it failed loudly — the main checkout has no
+  `stage4_ligandmpnn` stage, so argparse rejected it. Two branches that merely
+  drifted would produce wrong numbers with nothing to say so.
+* **`BASH_SOURCE` alone does not fix that.** `sbatch` COPIES the script to
+  `/var/lib/slurm/slurmd/job<ID>/slurm_script`, so under Slurm it resolves to
+  a slurmd-owned directory and the job dies in a second on `mkdir: cannot
+  create directory 'logs': Permission denied` (jobs 114336, 114337). The
+  launcher now tries `SLURM_SUBMIT_DIR` first, then `BASH_SOURCE`, accepts a
+  candidate only if it contains `pxdesign_train/aa/ligandmpnn_head.py`, and
+  exits 2 rather than guessing.
+* **A third of the shared PINDER tree is unreadable.** yfsun's runs extracted
+  `/hai/scratch/yfsun/pinder/2024-02/pdbs` under a restrictive umask, leaving
+  ~35% at mode 600. `_ensure_cif` selected candidates with `Path.is_file()`,
+  which only stats, so an unopenable file passed, the archive fallback sitting
+  right below it was skipped, and the run died later inside `pdb_to_cif` with
+  `PermissionError` in a DataLoader worker (jobs 114339, 114340). All three
+  decision points now use `_is_readable_file`. See
+  [Where things live](#where-things-live) for the writable-root half of the
+  fix.
+* **The worktree must be on shared storage.** Compute nodes cannot see
+  `/tmp`, which is node-local; a job submitted against a `/tmp` path fails
+  instantly at `cd`. This worktree lives under `/hai/users/s/h/shenjm/`.
 
 The smoke is backend-agnostic:
 
@@ -290,7 +327,7 @@ because masking, parity and gradient flow are properties of the decode path:
 * upstream's two constant tables are re-registered as non-persistent buffers
   so they follow `.to(device)` — see below
 
-604 tests pass.
+608 tests pass.
 
 **HAI job 114335** ran the real model on one 48-token PINDER complex
 (`1aw8__A1_P0A790--1aw8__C1_P0A790`, 101 observed binder side-chain atoms
@@ -306,6 +343,25 @@ Its step-1 readings, for orientation only and not a measurement: `aa_pre`
 an untrained cycle says nothing about either backend.
 
 These are bounded engineering checks; none of them measures design quality.
+
+## Runs in flight
+
+Submitted 11 September 2026, 23:50 slots, same donor as the FaMPNN runs.
+
+| job | phase | crop | what it tests |
+| --- | --- | --- | --- |
+| **114341** | IV-A | 384 | trains the LigandMPNN head only. Matched to yfsun's FaMPNN IV-A: same donor, same data, same mixture, so the two are directly comparable |
+| **114342** | IV-F | 256 | trains packer + atom-attention decoder against the FROZEN head. Crop reduced from 384 because this phase is not memory-proven |
+
+Both reached training. IV-A's step-50 readings, **for orientation only** --
+one job, fifty steps, an untrained cycle: `stage4/aa_pre` 2.83–3.48 against
+ln 20 = 3.00, `recovery_pre` 6.9–17%, `loss_bb` 0 as IV-A intends. One log
+line per accumulation micro-batch, not per step. Nothing here is a
+measurement and nothing should be compared to FaMPNN yet.
+
+Four earlier submissions died and are worth keeping straight, because each
+one is a distinct trap now covered above: 114336/114337 on the sbatch script
+copy, 114339/114340 on unreadable PINDER structures.
 
 ## Open problems
 

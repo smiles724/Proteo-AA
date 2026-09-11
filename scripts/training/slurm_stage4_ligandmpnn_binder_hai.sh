@@ -40,7 +40,7 @@ export PYTHON_BIN=${PYTHON_BIN:-/hai/users/s/h/shenjm/miniconda3/envs/proteoaa/b
 # that the tree is clean, and records the weight SHA-256 in the checkpoint, so
 # these are provenance inputs and not merely paths.
 export LIGANDMPNN_SOURCE=${LIGANDMPNN_SOURCE:-/hai/users/s/h/shenjm/tools/LigandMPNN}
-export LIGANDMPNN_CHECKPOINT=${LIGANDMPNN_CHECKPOINT:-/hai/users/s/h/shenjm/tools/ligandmpnn_weights/ligandmpnn_v_32_010_25.pt}
+export LIGANDMPNN_CHECKPOINT=${LIGANDMPNN_CHECKPOINT:-/hai/scratch/shenjm/ligandmpnn_weights/ligandmpnn_v_32_010_25.pt}
 
 # Same Stage III donor as the FaMPNN runs, so the two backends differ in the
 # sequence network and nothing else. Job 111408 timed out at step 6650 of
@@ -60,6 +60,11 @@ export PROTENIX_ROOT_DIR=$PROTEOAA_DATA_ROOT/protenix_data
 export LAYERNORM_TYPE=${LAYERNORM_TYPE:-openfold}
 export USE_DEEPSPEED_EVO_ATTENTION=${USE_DEEPSPEED_EVO_ATTENTION:-false}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+# Default is ~/.triton, i.e. the 50G home volume. Everything this run writes
+# that grows -- checkpoints at 1.9 GiB each, the PINDER CIF cache, compiler
+# caches -- belongs on scratch.
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/hai/scratch/shenjm/triton_cache}
+mkdir -p "$TRITON_CACHE_DIR"
 export PYTHONUNBUFFERED=1
 # LigandMPNN is imported BY PATH from the pinned checkout (see
 # pxdesign_train/aa/ligandmpnn_head.py), so it is deliberately absent here: on

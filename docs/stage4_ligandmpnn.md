@@ -194,10 +194,40 @@ a Stage III run and reports nothing wrong. Both collapsed to one place:
 `test_stage_four_backends_share_one_predicate` asserts that no site goes back
 to testing a name directly.
 
+## Where things live
+
+Home (`/hai/users/s/h/shenjm`) is a **50 GiB** volume, already 54% full;
+scratch (`/hai/scratch/shenjm`) has 5 TiB. Anything that grows goes to
+scratch, matching the convention the rest of the project already follows
+(`pxdesign_tool_weights` is 5.3 GiB there).
+
+| | path | size |
+| --- | --- | --- |
+| released weights | `/hai/scratch/shenjm/ligandmpnn_weights/` | 21 MiB |
+| run outputs, checkpoints, PINDER CIF cache | `/hai/scratch/shenjm/proteo_aa_runs/stage4_ligandmpnn_*/` | **1.9 GiB per checkpoint** |
+| Triton compile cache | `/hai/scratch/shenjm/triton_cache` | — |
+| upstream LigandMPNN source | `/hai/users/s/h/shenjm/tools/LigandMPNN` | 21 MiB |
+| this worktree | `/hai/users/s/h/shenjm/Proteo-AA-ligandmpnn` | 12 MiB |
+| Slurm logs | `<worktree>/logs/training/stage4_ligandmpnn/` | ~2 MiB per 24 h job |
+
+A checkpoint is **1.9 GiB**, so at `CHECKPOINT_INTERVAL=500` and ~15k steps in
+a 24-hour slot a single run writes roughly 57 GiB. That does not fit in home
+at all, which is why `OUTPUT_DIR` defaults to scratch and why
+`TRITON_CACHE_DIR` is overridden -- its default is `~/.triton`.
+
+Two things stay in home deliberately. The worktree is source only; its
+`Protenix` and `PXDesign` submodules are symlinks to the main checkout rather
+than second copies. The upstream LigandMPNN clone stays next to
+`PXDesignBench` because the head verifies its revision and that its tree is
+clean, so it is a provenance input, and scratch is the volume with a purge
+policy. Its 21 MiB is mostly `outputs/` and `inputs/` example data shipped in
+the repo -- do **not** delete those to save space, the clean-tree check
+(`git status --porcelain`) would then refuse to build the head.
+
 ## Running it
 
 Upstream checkout `~/tools/LigandMPNN` at `26ec57ac`; released weights in
-`~/tools/ligandmpnn_weights/` (`ligandmpnn_v_32_010_25.pt`, SHA-256
+`/hai/scratch/shenjm/ligandmpnn_weights/` (`ligandmpnn_v_32_010_25.pt`, SHA-256
 `161cd264…`; the `_005_` noise variant is also present). The checkpoint
 carries `atom_context_num=25` and `k_neighbors=32`.
 
@@ -232,7 +262,7 @@ The smoke is backend-agnostic:
 
 ```bash
 python scripts/utilities/smoke_stage4_fampnn.py --backend ligandmpnn \
-  --ligandmpnn-checkpoint ~/tools/ligandmpnn_weights/ligandmpnn_v_32_010_25.pt \
+  --ligandmpnn-checkpoint /hai/scratch/shenjm/ligandmpnn_weights/ligandmpnn_v_32_010_25.pt \
   --ligandmpnn-source ~/tools/LigandMPNN \
   --donor /hai/scratch/yfsun/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt \
   --data-root /hai/scratch/yfsun --output runs/lmpnn-smoke

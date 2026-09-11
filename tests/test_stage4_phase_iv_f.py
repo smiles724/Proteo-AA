@@ -106,20 +106,24 @@ def test_generator_prefixes_do_not_include_the_head():
     assert not any(p.startswith("aa_head") for p in GENERATOR_PREFIXES)
 
 
-def test_launcher_derives_its_repo_from_its_own_location():
+def test_launcher_resolves_its_repo_and_refuses_to_guess():
     """A hardcoded PROTEOAA_REPO silently trains the wrong checkout.
 
-    This file exists in a worktree. A launcher defaulting to a fixed absolute
-    path runs the OTHER tree's code with this tree's arguments -- argparse
-    rejecting an unknown --training-stage is the lucky failure mode; a branch
-    that merely drifted would just produce wrong numbers with no complaint.
+    This file lives in a worktree, so a fixed absolute default runs the OTHER
+    tree's code with this tree's arguments. Deriving it from BASH_SOURCE alone
+    is not enough either: `sbatch` COPIES the script to
+    /var/lib/slurm/slurmd/job<ID>/slurm_script, so under Slurm that points at
+    a directory owned by slurmd and the job dies on `mkdir: Permission
+    denied`. Both mechanisms are needed, and neither may fall back to a guess.
     """
     import pathlib
 
     script = (pathlib.Path(__file__).resolve().parents[1]
               / "scripts" / "training" / "slurm_stage4_ligandmpnn_binder_hai.sh")
     text = script.read_text()
-    assert 'PROTEOAA_REPO=${PROTEOAA_REPO:-$_here}' in text
-    assert 'dirname -- "${BASH_SOURCE[0]}"' in text
-    # Still overridable, and still the thing the run actually cd's into.
+    assert "${SLURM_SUBMIT_DIR:-}" in text, "sbatch copies the script; BASH_SOURCE alone is wrong"
+    assert 'dirname -- "${BASH_SOURCE[0]}"' in text, "a direct dry run has no SLURM_SUBMIT_DIR"
+    # A candidate only counts if it actually contains this backend.
+    assert "_repo_marker=pxdesign_train/aa/ligandmpnn_head.py" in text
+    assert "cannot locate the Proteo-AA checkout" in text, "must fail loudly, never guess"
     assert 'cd "$PROTEOAA_REPO"' in text

@@ -32,13 +32,34 @@
 # decoder and are NOT memory-proven at this crop -- start smaller and watch.
 set -euo pipefail
 
-# Derived from this script's own location, NOT hardcoded. A fixed default
-# points at whichever checkout it was written against, so running this file
-# from a worktree would silently train the OTHER tree's code -- argparse
-# rejecting `--training-stage stage4_ligandmpnn` is the lucky failure; a
-# subtler drift between branches would just produce wrong numbers.
-_here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-export PROTEOAA_REPO=${PROTEOAA_REPO:-$_here}
+# Resolved, never hardcoded. A fixed default points at whichever checkout the
+# file was written against, so running it from a worktree would silently train
+# the OTHER tree's code -- and two branches that merely drifted would produce
+# wrong numbers with nothing to say so.
+#
+# Two mechanisms, because neither covers both ways this file is invoked:
+# `sbatch` COPIES the script to /var/lib/slurm/slurmd/job<ID>/slurm_script, so
+# BASH_SOURCE points into a scratch dir owned by slurmd; SLURM_SUBMIT_DIR does
+# not exist when the file is run directly with bash for a dry run.
+_repo_marker=pxdesign_train/aa/ligandmpnn_head.py
+if [[ -z ${PROTEOAA_REPO:-} ]]; then
+  for _candidate in "${SLURM_SUBMIT_DIR:-}" \
+                    "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"; do
+    if [[ -n $_candidate && -f $_candidate/$_repo_marker ]]; then
+      PROTEOAA_REPO=$_candidate
+      break
+    fi
+  done
+fi
+# Never guess. An unresolved repo means the run would either die somewhere far
+# from the cause or, worse, pick up a different checkout.
+[[ -n ${PROTEOAA_REPO:-} && -f ${PROTEOAA_REPO}/${_repo_marker} ]] || {
+  echo "ERROR: cannot locate the Proteo-AA checkout that owns this script." >&2
+  echo "       Set PROTEOAA_REPO explicitly (must contain ${_repo_marker})." >&2
+  echo "       tried SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-}' and BASH_SOURCE='${BASH_SOURCE[0]}'" >&2
+  exit 2
+}
+export PROTEOAA_REPO
 export PROTEOAA_DATA_ROOT=${PROTEOAA_DATA_ROOT:-/hai/scratch/yfsun}
 export PYTHON_BIN=${PYTHON_BIN:-/hai/users/s/h/shenjm/miniconda3/envs/proteoaa/bin/python}
 

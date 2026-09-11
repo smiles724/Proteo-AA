@@ -153,7 +153,9 @@ class DesignSourceDataset(Dataset):
             try:
                 return self._get_one(local_idx)
             except ValueError as exc:
-                if not str(exc).startswith(("DesignCropper:", "InferenceSafeBinder:")):
+                if not str(exc).startswith(
+                    ("DesignCropper:", "InferenceSafeBinder:", "CifProvider:")
+                ):
                     raise
                 last_crop_error = exc
 

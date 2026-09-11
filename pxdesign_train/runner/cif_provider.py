@@ -104,11 +104,30 @@ class CifFileProvider:
         logger.info(f"CifFileProvider: parsing {cif_path}")
 
         # 1. Parse CIF → bioassembly_dict with atom_array + token_array.
-        indices_list, bioassembly_dict = DataPipeline.get_data_from_mmcif(
-            mmcif=cif_path, pdb_cluster_file=None, dataset=self.dataset,
-        )
+        #
+        # Upstream parsing and tokenisation fail on individual PDB entries for
+        # reasons that are properties of the FILE, not of this run -- measured:
+        # PINDER 2atc__A3_P0A786--2atc__B3_P0A7F3 carries an atom with element
+        # "X", and Protenix's tokenizer raises `ValueError: Unknown atom
+        # element: X`. Those escaped as a bare ValueError and a RuntimeError,
+        # neither of which `DesignSourceDataset.__getitem__` recognises as
+        # retryable, so one bad entry killed a DataLoader worker and the run
+        # (job 113955, step 300). Re-tag them with the retryable prefix and
+        # keep the original exception chained, so a SYSTEMIC parse failure
+        # still surfaces -- it exhausts the retry budget instead of being
+        # swallowed.
+        try:
+            indices_list, bioassembly_dict = DataPipeline.get_data_from_mmcif(
+                mmcif=cif_path, pdb_cluster_file=None, dataset=self.dataset,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"CifProvider: {type(exc).__name__} parsing {cif_path}: {exc}"
+            ) from exc
         if "atom_array" not in bioassembly_dict or "token_array" not in bioassembly_dict:
-            raise RuntimeError(f"Failed to parse CIF: {cif_path}")
+            raise ValueError(
+                f"CifProvider: parsed {cif_path} without atom_array/token_array"
+            )
 
         atom_array = bioassembly_dict["atom_array"]
         token_array = bioassembly_dict["token_array"]

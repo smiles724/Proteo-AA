@@ -15,9 +15,11 @@
 （上一轮只提交了 task 0–9，Proteo-AA 那 40 个 task 从未运行，汇总里的 0.0 是
 `missing_scores_count_as_failures=true` 造成的假象）。
 
-**但这个 0% 也不能读作「Proteo-AA 的设计能力为零」。** 原因见
-[采样器与协议不匹配](#采样器与协议不匹配)：这个 harness 不把靶点当固定条件，
-所测任务比 AlphaProteo / PXDesign 的协议难得多，而变难的那部分不是我们想测的东西。
+**但这个 0% 不能读作「Proteo-AA 针对靶点的设计能力为零」，因为 Stage III
+从来没有在这个任务上训练过。** 它的训练目标是整个复合体一起加噪去噪，靶点
+不是固定条件；benchmark 忠实地反映了这一点。详见
+[采样器与协议不匹配](#采样器与协议不匹配)。这和 AlphaProteo / PXDesign 的
+协议（靶点已知）不是同一个任务。
 
 ## 逐靶点
 
@@ -121,15 +123,39 @@ AlphaProteo 和 PXDesign 的协议是**把靶点作为已知条件给定**。任
 而加难的那部分（靶点重建）不是我们要测的能力。官方模型强到不受影响，
 `step6000` 被这一项直接归零。
 
-**目标条件化的采样器在代码库里是存在的** —— `pxdesign_train/stage4.py` 的
-`generate()` 有明确的固定原子还原：
+### 这不是 benchmark 接错函数，而是 Stage III 本身没有靶点条件
+
+一开始我以为换个目标条件化的采样器就能修。**不对。** 训练侧的固定靶点条件化在
+`pxdesign_train/generator.py:101`：
 
 ```python
-xyz = torch.where(atom_design[None, :, None], xyz, fixed_xyz)
+if input_feature_dict.get("stage4_fixed_context", False):
+    design = input_feature_dict["design_token_mask"].bool()
+    atom_design = design[input_feature_dict["atom_to_token_idx"].long()]
+    x_input = torch.where(atom_design[..., None], x_input, x_gt_aug)   # 靶点压回真值
 ```
 
-它在每一步去噪后都把非设计原子压回给定坐标。所以这不是缺功能，是这个
-benchmark 接错了函数。
+而 `stage4_fixed_context` 只有 Stage IV 会设（`model.py:999`，门控在
+`uses_codesign()` 上）。三条独立证据指向同一结论：
+
+* `fixed_atom_xyz` / `fixed_atom_mask` 的**唯一消费者**是 `codesign.py` 和
+  `stage4.py`，Stage III 没有任何消费者
+* 坐标 loss 用 `coordinate_mask`（全部已解析原子），不是 binder-only ——
+  Stage III 被监督去重建整个复合体
+* Stage III 的 slurm 脚本不传 `--use-template` / `--use-msa`，没有 template
+  通道能把靶点结构干净地送进去
+
+**Stage III 训练时整个复合体一起加噪，靶点从来不是干净的给定条件。**
+模型唯一知道「哪些残基是设计区」的途径是 `design_token_mask` 和被设成 XPB 的
+`restype`，几何上它没有任何锚点。
+
+所以 `cogenerate()` 的自由共生成**恰恰是匹配 Stage III 训练的推理路径**。
+这个 benchmark 是忠实的，不是接错了。**把它换成目标条件化的采样器会让
+Stage III 落到分布外，只会更差，不会更好。**
+
+目标条件化是 **Stage IV 才引入的**（`stage4_fixed_context`，以及
+`stage4.py:277,284,285` 每步去噪后的 `torch.where(atom_design, xyz, fixed_xyz)`）。
+换句话说，Stage IV 是第一个真正在训练「针对给定靶点做设计」这个任务的阶段。
 
 ## 能得出和不能得出的结论
 
@@ -183,10 +209,17 @@ print((np.abs(d - 3.8) > 0.3).mean())                  # 坏键比例
 
 ## 下一步
 
-1. **把 benchmark 接到目标条件化的采样器上**，然后重测 Proteo-AA 这一组。
-   在靶点固定之前，Proteo-AA 的 designability 没有意义。参照
-   `stage4.generate()` 的固定原子还原做法。
-2. 重测后如果几何仍然不成立，那才是模型本身的结论，值得单独查（键长普遍偏短
-   这个特征很具体，可能指向去噪终点或 sigma 处理）。
-3. 顺手补两个小坑：汇总脚本的 `mean_*` 列没填；AF2 指标的列表字符串格式
+1. **先确认研究计划的意图**，这是个方向问题不是修 bug：Stage III 到底要不要
+   做「针对给定靶点的 binder 设计」？
+   * 如果要 —— 训练目标缺了靶点条件化，`generator.py:101` 那个分支应该对
+     Stage III 也打开（代价是改变训练任务，之前所有 Stage III 结果不可直接续比）。
+   * 如果不要、由 Stage IV 承担 —— 那么 **Stage III 不该用 AlphaProteo-10
+     评测**，或者只能作为「整复合体自由共生成」的基线来读，不能和论文数字并列。
+2. **不要**只把 benchmark 换成目标条件化采样器。那会让 Stage III 落到分布外，
+   得到一个既不反映训练也不反映论文协议的数。
+3. Stage III 的一步去噪指标看起来是正常的（111408 报告里 crop 448 下
+   val Cα RMSD ≈ 3.2 Å），而 400 步自由生成塌成 93.9% 坏键。扩散模型训练指标
+   与自由采样质量脱节本身常见，但这个量级值得单独查：去噪终点、sigma 调度、
+   以及 `pxdesign_native` 采样器和这个 checkpoint 的约定是否一致。
+4. 顺手补两个小坑：汇总脚本的 `mean_*` 列没填；AF2 指标的列表字符串格式
    容易让人整列读成 NaN。

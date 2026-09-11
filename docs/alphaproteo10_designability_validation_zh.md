@@ -149,8 +149,16 @@ sbatch scripts/evaluation/slurm_summarize_alphaproteo_designability.sh
 
 ## 已知的协议问题
 
-**本流程目前不把靶点当固定条件。** `design()` 走的是 `cogenerate()`，那是自由
-共生成采样器（靶点也从噪声重建），所以第 1 步「后者下降即 backbone 有问题」
-的推论并不成立 —— 下降里混入了「重建靶点」的难度。第一次全量结果和证据见
-[`alphaproteo10_designability_result_zh.md`](alphaproteo10_designability_result_zh.md)；
-在接上目标条件化采样器之前，Proteo-AA 臂的 designability 不可解读。
+**本流程不把靶点当固定条件，而这是 Stage III 训练目标本身决定的。**
+`design()` 走 `cogenerate()`，那是自由共生成采样器（靶点也从噪声重建）；
+训练侧的固定靶点条件化（`generator.py:101`）只有 Stage IV 会打开。
+两边是一致的，所以这不是接错函数 —— 换成目标条件化采样器会让 Stage III
+落到分布外。
+
+后果：第 1 步「若 Proteo-AA+MPNN 下降则 backbone 有问题」的推论**不成立**，
+下降里混入了「从噪声重建靶点」这项 AlphaProteo / PXDesign 协议根本不要求的
+难度。本流程测的是「自由共生成整个复合体」，与论文的「靶点已知」不是同一个
+任务，数字不可并列。
+
+第一次全量结果、证据链和取舍见
+[`alphaproteo10_designability_result_zh.md`](alphaproteo10_designability_result_zh.md)。

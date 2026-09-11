@@ -223,3 +223,30 @@ def test_augment_eps_is_rejected(upstream):
         ligand_mpnn_use_side_chain_context=True, augment_eps=0.1, dropout=0.0)
     with pytest.raises(ValueError, match="augment_eps"):
         LigandMPNNHead.for_network(noisy, upstream)
+
+
+def test_constant_tables_follow_the_module_to_a_device(head):
+    """Upstream keeps two lookup tables as plain attributes, not buffers.
+
+    `nn.Module.to` walks parameters and buffers only, so on a GPU run those
+    tables stayed on the CPU and featurisation died inside `torch.cat`.
+    Upstream never sees it: `run.py` builds the model with `device=` already
+    set, while Proteo-AA builds the whole model and then moves it. Caught by
+    the real-model GPU smoke, not by any CPU test, so it is pinned here.
+    """
+    from pxdesign_train.aa.ligandmpnn_head import CONSTANT_TENSOR_ATTRIBUTES
+
+    features = head.sequence_network.features
+    registered = dict(features.named_buffers())
+    for name in CONSTANT_TENSOR_ATTRIBUTES:
+        assert name in registered, f"{name} would not follow .to(device)"
+    # Non-persistent: a fixed table must not enter the checkpoint, or resume
+    # would need keys the donor does not have.
+    saved = set(features.state_dict())
+    assert saved.isdisjoint(CONSTANT_TENSOR_ATTRIBUTES)
+
+    # A copy, because meta is one-way: `.to()` cannot bring it back.
+    import copy
+    moved = copy.deepcopy(head).to(torch.device("meta"))
+    for name in CONSTANT_TENSOR_ATTRIBUTES:
+        assert getattr(moved.sequence_network.features, name).device.type == "meta"

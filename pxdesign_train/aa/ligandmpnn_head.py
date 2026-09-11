@@ -117,6 +117,7 @@ class LigandMPNNHead(nn.Module):
         # run.py sets 0.0 for inference; a training head must too.
         if float(network.features.augment_eps) != 0.0:
             raise ValueError("LigandMPNN head requires augment_eps=0")
+        _rehome_constant_tensors(network)
         self.sequence_network = network
         self.gather_nodes = model_utils.gather_nodes
         self.cat_neighbors_nodes = model_utils.cat_neighbors_nodes
@@ -240,6 +241,34 @@ class LigandMPNNHead(nn.Module):
             h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw
             h_V = layer(h_V, h_ESV, mask)
         return network.W_out(h_V)
+
+
+# Upstream keeps two lookup tables as PLAIN ATTRIBUTES, not buffers:
+# `side_chain_atom_types` (the element of each of the 32 side-chain Atom37
+# slots) and `periodic_table_features` (group/period per element). `nn.Module.to`
+# only walks parameters and buffers, so both stay on the CPU when the model
+# moves to a GPU and featurisation dies on `torch.cat` / an index_select across
+# devices. Upstream never hits this because `run.py` builds the model with
+# `device=` already set; Proteo-AA builds the whole model first and moves it.
+CONSTANT_TENSOR_ATTRIBUTES = ("side_chain_atom_types", "periodic_table_features")
+
+
+def _rehome_constant_tensors(network) -> None:
+    """Make upstream's constant tables follow `.to(device)`.
+
+    Registered non-persistent so they stay out of `state_dict()`: they are
+    fixed tables, and adding keys would change the checkpoint's shape and
+    break the strict load on resume.
+    """
+    features = network.features
+    for name in CONSTANT_TENSOR_ATTRIBUTES:
+        value = getattr(features, name, None)
+        if value is None or not torch.is_tensor(value):
+            raise ValueError(f"upstream no longer exposes {name} as a tensor")
+        if name in features._buffers:
+            continue
+        delattr(features, name)
+        features.register_buffer(name, value, persistent=False)
 
 
 def _import_upstream(root: Path):

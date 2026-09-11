@@ -77,6 +77,14 @@ export LIGANDMPNN_CHECKPOINT=${LIGANDMPNN_CHECKPOINT:-/hai/scratch/shenjm/ligand
 export STAGE3_CHECKPOINT=${STAGE3_CHECKPOINT:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt}
 export OUTPUT_DIR=${OUTPUT_DIR:-/hai/scratch/shenjm/proteo_aa_runs/stage4_ligandmpnn_binder/${SLURM_JOB_ID:-dry-run}}
 
+# PINDER: the manifest and the 168 GiB archive are read from yfsun's tree, but
+# extraction targets OUR root. About a third of his pdbs/ is mode 600 (his runs
+# extracted it under a restrictive umask), and his tree is not writable by us
+# anyway, so a shared root fails both on read and on write.
+export PINDER_ROOT=${PINDER_ROOT:-/hai/scratch/shenjm/pinder/2024-02}
+export PINDER_ARCHIVE=${PINDER_ARCHIVE:-$PROTEOAA_DATA_ROOT/pinder/2024-02/raw/pdbs.zip}
+export PINDER_MANIFEST=${PINDER_MANIFEST:-$PROTEOAA_DATA_ROOT/pinder/2024-02/indices/pinder_ppi_complex.parquet}
+
 STAGE4_PHASE=${STAGE4_PHASE:-IV-A}
 TRAIN_ROUNDS=${TRAIN_ROUNDS:-1}
 INFERENCE_ROUNDS=${INFERENCE_ROUNDS:-3}
@@ -104,6 +112,11 @@ mkdir -p "$OUTPUT_DIR" logs/training/stage4_ligandmpnn
 [[ -f $STAGE3_CHECKPOINT ]] || { echo "ERROR: donor missing: $STAGE3_CHECKPOINT" >&2; exit 2; }
 [[ -f $LIGANDMPNN_CHECKPOINT ]] || { echo "ERROR: weights missing: $LIGANDMPNN_CHECKPOINT" >&2; exit 2; }
 [[ -f $LIGANDMPNN_SOURCE/model_utils.py ]] || { echo "ERROR: upstream checkout missing: $LIGANDMPNN_SOURCE" >&2; exit 2; }
+[[ -r $PINDER_ARCHIVE ]] || { echo "ERROR: PINDER archive unreadable: $PINDER_ARCHIVE" >&2; exit 2; }
+[[ -r $PINDER_MANIFEST ]] || { echo "ERROR: PINDER manifest unreadable: $PINDER_MANIFEST" >&2; exit 2; }
+# Structures are materialised from the archive into this root at first use.
+mkdir -p "$PINDER_ROOT/pdbs"
+[[ -w $PINDER_ROOT/pdbs ]] || { echo "ERROR: PINDER root not writable: $PINDER_ROOT/pdbs" >&2; exit 2; }
 
 RUN_OPTIONS=()
 if [[ ${1:-} == --dry-run ]]; then
@@ -123,9 +136,9 @@ fi
   --ligandmpnn-source "$LIGANDMPNN_SOURCE" \
   --protenix-code-dir "$PROTEOAA_REPO/Protenix" --pxdesign-code-dir "$PROTEOAA_REPO/PXDesign" \
   --data-root "$PROTEOAA_DATA_ROOT/protenix_data" --data-mode mixed_monomer_complex --complex-provider pinder \
-  --pinder-root "$PROTEOAA_DATA_ROOT/pinder/2024-02" \
-  --pinder-archive "$PROTEOAA_DATA_ROOT/pinder/2024-02/raw/pdbs.zip" \
-  --pinder-manifest "$PROTEOAA_DATA_ROOT/pinder/2024-02/indices/pinder_ppi_complex.parquet" \
+  --pinder-root "$PINDER_ROOT" \
+  --pinder-archive "$PINDER_ARCHIVE" \
+  --pinder-manifest "$PINDER_MANIFEST" \
   --pinder-cif-cache "$OUTPUT_DIR/pinder_cif_cache" \
   --crop-size "${CROP_SIZE:-384}" --max-n-token "${CROP_SIZE:-384}" \
   --complex-max-n-token "${COMPLEX_MAX_N_TOKEN:-640}" \

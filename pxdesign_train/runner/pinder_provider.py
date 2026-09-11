@@ -20,6 +20,20 @@ from typing import Optional, Union
 from pxdesign_train.runner.cif_provider import CifFileProvider
 
 
+def _is_readable_file(path: Path) -> bool:
+    """Present AND openable.
+
+    A bare `is_file()` only stats. A shared PINDER tree can hold structures
+    another user extracted under a restrictive umask -- about a third of
+    /hai/scratch/yfsun/pinder/2024-02/pdbs is mode 600 -- and those satisfy
+    `is_file()`, so the archive fallback below was skipped and the run died
+    later in `pdb_to_cif` with PermissionError, inside a DataLoader worker and
+    far from the cause. A file we cannot open is, for this purpose, missing:
+    the archive already knows how to produce it.
+    """
+    return path.is_file() and os.access(path, os.R_OK)
+
+
 class PinderPdbProvider:
     """Serve selected PINDER holo dimers as Proteo-AA complex-provider items.
 
@@ -132,25 +146,29 @@ class PinderPdbProvider:
                 temporary.unlink()
         return destination
 
+    @staticmethod
+    def _is_readable_file(path: Path) -> bool:
+        return _is_readable_file(path)
+
     def _ensure_cif(self, idx: int) -> Path:
         cif_path = self._cached_cif_path(idx)
         if cif_path.is_file() and cif_path.stat().st_size > 0:
             return cif_path
 
         pdb_path = self.pinder_root / self._pdb_paths[idx]
-        if not pdb_path.is_file():
+        if not _is_readable_file(pdb_path):
             pinder_id = self._pinder_ids[idx]
             pdb_id = pinder_id[:4].lower()
             sharded_path = (
                 self.pinder_root / "pdbs" / pdb_id[1:3] / f"{pinder_id}.pdb"
             )
-            if sharded_path.is_file():
+            if _is_readable_file(sharded_path):
                 pdb_path = sharded_path
             else:
                 pdb_path = self._extract_from_archive(idx, sharded_path)
-        if not pdb_path.is_file():
+        if not _is_readable_file(pdb_path):
             raise FileNotFoundError(
-                f"Missing PINDER holo dimer: {pdb_path}. "
+                f"Missing or unreadable PINDER holo dimer: {pdb_path}. "
                 "Extract the selected structures before training."
             )
 

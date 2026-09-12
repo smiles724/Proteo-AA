@@ -77,7 +77,7 @@ def test_stage_iv_opens_predicted_geometry_and_atom_sets(source):
     """Stage III uses GT geometry/atom sets; Stage IV matches inference inputs."""
     bundle = source[
         source.index('elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn")'):
-        source.index("    return configs")
+        source.rindex("    return configs")
     ]
     assert 'args.training_stage in ("predicted_mask", "stage4_fampnn")' in bundle
     start = source.index('if args.training_stage in ("predicted_mask", "stage4_fampnn")')

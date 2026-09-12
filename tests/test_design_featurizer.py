@@ -357,7 +357,7 @@ def _ser_complex(offset_from_origin: float, unresolved_slots=()):
             else:
                 # A plausible little residue, translated far from the origin.
                 local = {
-                    "N": (-1.2, 0.0, 0.0), "CA": (0.0, 0.0, 0.0), "C": (1.2, 0.0, 0.0),
+                    "N": (-0.8, 1.2, 0.0), "CA": (0.0, 0.0, 0.0), "C": (1.2, 0.0, 0.0),
                     "O": (1.5, 1.0, 0.0), "CB": (0.0, 1.3, 0.6), "OG": (0.6, 2.2, 1.1),
                 }[nm]
                 aa.coord[i] = (

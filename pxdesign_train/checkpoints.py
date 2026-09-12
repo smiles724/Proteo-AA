@@ -166,6 +166,7 @@ def integrated_record(model):
     model = unwrap(model)
     from .stage4 import implementation_identity
     return dict(schema_version=SCHEMA_VERSION, effective_config=plain_config(model.configs),
+        sc_mask_contract="chemical_model_observed_v1",
         component_origins=model.component_origins, fampnn_identity=dict(model.aa_head.identity),
         trainable_parameters=[n for n,p in model.named_parameters() if p.requires_grad],
         implementation=implementation_identity(), rng=rng_state())

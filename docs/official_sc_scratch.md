@@ -43,7 +43,7 @@ integrated checkpoint. The checkpoint records component hashes, initialization
 origins, optimizer state and effective configuration.
 
 Training job **114920**, code **320b5af**, used the corrected curriculum but
-stopped at step 286 when it encountered an unknown/noncanonical residue. The
+stopped between logged steps 250 and 300 when it encountered an unknown/noncanonical residue. The
 input contract now retains such residues as structural context and excludes
 them from SC ownership and coordinate supervision, because they have no
 canonical type or atom inventory. Resolved
@@ -51,6 +51,39 @@ sources: 47,622 training monomers and 308 eligible recent-PDB validation monomer
 (the requested cap is 491). Component preflight confirmed only SC is trainable,
 no SC donor, native frame/inventory flags and disabled feedback/refinement.
 [Submission record](validation/official_sc_scratch/run_114920.json).
+
+Job **114928** was canceled during startup after the native-frame mask review;
+it is not a completed validation or training result.
+
+## SC mask contract
+
+The `chemical_model_observed_v1` contract keeps these roles separate:
+
+| Mask | Source and use |
+|---|---|
+| `sc_chemical_mask` (`sc_slot_mask` alias) | Residue-type atom inventory; independent of coordinates, observations and ownership. |
+| `sc_model_mask` (`sc_generation_mask` alias) | Chemical inventory AND design ownership AND valid active backbone frame; SC attention, output and feedback. |
+| `sc_loss_mask` (`sc_atom_mask` alias) | Observed native SC targets with valid GT frames and plausible geometry, intersected with model output eligibility. |
+
+`sc_observed_mask` records SC coordinate availability independently of frame
+validity. `sc_frame_valid` requires native N/CA/C to be observed, finite,
+noncoincident and noncollinear, with N-CA and CA-C distances within 0.5–2.5 Å.
+These are loose native-data sanity bounds, not a bond-quality metric. Invalid
+GT frames receive identity/zero placeholders with a false validity mask; their
+SC atoms remain in the chemical inventory but supply neither model outputs nor
+coordinate loss. Missing O does not invalidate the N/CA/C frame: its own
+`sc_bb_observed_mask` entry excludes only O from backbone context attention.
+
+Observation annotations are authoritative; a real resolved atom at the origin
+is valid. Providers missing those annotations retain the documented warning and
+SC placeholder heuristic, which cannot identify every possible bogus coordinate.
+Predicted-frame packing derives its model mask from generated geometry and never
+uses GT frame validity or SC observations. Masked NaNs are sanitized before
+attention/frame transforms; all-masked attention has a finite backward pass.
+
+Full regression job **114931** passed **653 tests**. GPU smoke **114930** passed
+observation-independent forward outputs, invalid-frame gating, finite backward,
+frozen pretrained tensors, native packing, validation and save/resume.
 
 ## Subsequent phases
 

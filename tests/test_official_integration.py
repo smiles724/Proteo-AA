@@ -292,7 +292,9 @@ def test_native_sc_warmup_uses_native_frames_and_masks_without_sequence_decoding
     feat=dict(aa_clean=torch.tensor([1,-100]),design_token_mask=torch.tensor([True,True]),
         sc_gt_local=torch.zeros(length,slots,3),sc_frame_R=torch.eye(3).repeat(length,1,1),
         sc_frame_t=torch.tensor([[10.,0.,0.],[30.,0.,0.]]),sc_bb_coords=torch.zeros(length,3,3),
-        sc_atom_mask=torch.tensor([[True,False],[True,True]]),restype=torch.full((length,32),-1.))
+        sc_atom_mask=torch.tensor([[True,False],[True,True]]),restype=torch.full((length,32),-1.),
+        sc_chemical_mask=torch.ones(length,slots,dtype=torch.bool),sc_frame_valid=torch.ones(length,dtype=torch.bool),
+        sc_bb_observed_mask=torch.ones(length,4,dtype=torch.bool))
     labels={'coordinate':torch.randn(8,3)}
     offset=nn.Parameter(torch.ones(3))
     seen=[]
@@ -306,6 +308,7 @@ def test_native_sc_warmup_uses_native_frames_and_masks_without_sequence_decoding
         assert out['aa_logits'].argmax(-1)[0,0,0]==feat['aa_clean'][0]
         assert torch.equal(f['design_token_mask'],torch.tensor([True,False]))
         out.update(sc_generation_mask=f['design_token_mask'][None,:,None].expand(1,length,slots),
+            sc_chemical_mask=f['sc_chemical_mask'],sc_model_mask=f['design_token_mask'][None,:,None].expand(1,length,slots),
             sc_frame_R=f['sc_frame_R'][None],sc_frame_t=f['sc_frame_t'][None],
             sc_pred_global=f['sc_frame_t'][None,:,None,:]+offset[None,None,None,:])
     cfg=SimpleNamespace(phase='sc_warmup',train_rounds=0,sc_to_aa=False,sc_to_bb=False,backbone_refinement_enabled=False)

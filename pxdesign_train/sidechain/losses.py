@@ -12,7 +12,7 @@ from typing import Optional
 
 import torch
 
-from pxdesign_train.sidechain.frames import to_global
+from pxdesign_train.sidechain.frames import to_global, valid_rigid_frame
 
 
 def sidechain_local_loss(
@@ -82,10 +82,18 @@ def sidechain_global_frame_aligned_loss(
     `pred_global` is already in the global frame, so gradients flow to S_phi's coordinate
     output but not through `frame_R` / `frame_t`.
     """
-    clean_target = torch.where(mask.bool()[..., None], gt_local, 0.)
-    target = to_global(clean_target, frame_R.detach(), frame_t.detach())
-    delta = torch.where(mask.bool()[..., None], pred_global - target, 0.)
-    se = delta.square().sum(dim=-1)
+    # A masked target must be removed before the frame transform. Independently
+    # reject invalid frames, including legacy callers without a frame-valid mask.
+    with torch.autocast(device_type=pred_global.device.type, enabled=False):
+        R, t = frame_R.detach().float(), frame_t.detach().float()
+        frame_valid = valid_rigid_frame(R, t)
+        mask = mask.bool() & frame_valid[..., None] & torch.isfinite(gt_local).all(-1)
+        R = torch.where(frame_valid[..., None, None], R, torch.eye(3, device=R.device))
+        t = torch.where(frame_valid[..., None], t, 0.)
+        clean_target = torch.where(mask[..., None], gt_local.float(), 0.)
+        target = to_global(clean_target, R, t)
+        delta = torch.where(mask[..., None], pred_global.float() - target, 0.)
+        se = delta.square().sum(dim=-1)
     m = mask.to(se.dtype).expand_as(se)
     if row_weight is not None:
         # EDM lambda(sigma), one per batch ROW. It multiplies BOTH the numerator and

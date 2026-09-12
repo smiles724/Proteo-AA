@@ -76,6 +76,33 @@ def main():
     torch.testing.assert_close(out['sc_frame_t'].reshape_as(feat['sc_frame_t']),feat['sc_frame_t'])
     assert torch.equal(restype,feat['restype'])
     protocol=out['protocol'];del out
+    # Real-model regression: observation changes cannot affect the packer's
+    # attention/output. An invalid native frame must gate every SC output/loss.
+    bad_feat=dict(feat)
+    bad_feat['sc_atom_mask']=feat['sc_atom_mask'].clone()
+    bad_feat['sc_gt_local']=feat['sc_gt_local'].clone()
+    bad_feat['sc_frame_valid']=feat['sc_frame_valid'].clone()
+    bad_feat['sc_frame_R']=feat['sc_frame_R'].clone()
+    residue=int((feat['sc_atom_mask'].any(-1)&feat['sc_frame_valid']).nonzero()[0])
+    bad_feat['sc_frame_valid'][residue]=False
+    bad_feat['sc_frame_R'][residue]=float('nan')
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        torch.manual_seed(73)
+        with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16):
+            base=model(input_feature_dict=bad_feat,label_dict=labels,mode='train')
+        bad_feat['sc_atom_mask'].zero_()
+        bad_feat['sc_gt_local'].fill_(float('nan'))
+        torch.manual_seed(73)
+        with torch.autocast('cuda',dtype=torch.bfloat16):
+            hidden=model(input_feature_dict=bad_feat,label_dict=labels,mode='train')
+        torch.testing.assert_close(base['sc_pred_global'],hidden['sc_pred_global'])
+        assert not hidden['sc_model_mask'][0,residue].any()
+        assert hidden['sc_chemical_mask'][0,residue].any()
+        assert hidden['sc_gt_mse']==0 and torch.isfinite(hidden['sc_pred_global']).all()
+        hidden['sc_pred_global'].float().square().mean().backward()
+        assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+        model.zero_grad(set_to_none=True)
+    del base,hidden
     parameter=next(p for p in model.sidechain_module.parameters() if p.requires_grad)
     before=parameter.detach().clone()
     losses=[]
@@ -102,6 +129,8 @@ def main():
         pretrained_weights_unchanged=frozen==digest(),frozen_digest=frozen,
         native_frames_and_types_verified=True,no_backbone_training_sampler=True,no_fampnn_decoding=True,
         strict_backbone_restype_unchanged=True,save_resume_and_reconstruction=True,
+        observation_independent_forward=True,invalid_native_frame_gated=True,
+        masked_nan_forward_and_backward_finite=True,
         component_origins=model.component_origins)
     (output/'smoke_result.json').write_text(json.dumps(result,indent=2,default=str)+'\n')
     print('GT_SC_WARMUP_SMOKE_PASSED',json.dumps(result,default=str),flush=True)

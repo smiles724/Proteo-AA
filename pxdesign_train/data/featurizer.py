@@ -513,7 +513,7 @@ class DesignFeaturizer:
         """
         from collections import defaultdict
 
-        from pxdesign_train.sidechain.frames import build_frame, to_local
+        from pxdesign_train.sidechain.frames import build_frame, to_local, valid_ncac
         from pxdesign_train.sidechain.instantiate import (
             ATOM_NAME_TO_ID,
             MAX_SC,
@@ -540,13 +540,11 @@ class DesignFeaturizer:
         # contributing an unlearnable error that dominated the loss (7us9 read
         # 21860 A^2 == 133 atoms x ~416 A) and flat-lined training.
         #
-        # `is_resolved` is the authoritative flag and survives cropping; on 7us9 it
-        # marks all 1034 zero-coordinate atoms correctly. The exact-zero coordinate
-        # test is a belt-and-braces fallback for arrays that lack the annotation (a
-        # real atom sitting exactly on the origin is not physically meaningful, so
-        # dropping it costs nothing).
+        # `is_resolved` is authoritative and survives cropping. A resolved atom
+        # may legitimately sit at the origin; only missing metadata uses a
+        # coordinate heuristic for SC observations.
         if "is_resolved" in atom_array.get_annotation_categories():
-            resolved = np.asarray(atom_array.is_resolved, dtype=bool)
+            resolved = np.asarray(atom_array.is_resolved, dtype=bool).copy()
         else:
             # Assuming "everything is resolved" is the DANGEROUS default: it is
             # exactly the pre-fix behaviour. Verified 108/108 real train+eval
@@ -562,23 +560,28 @@ class DesignFeaturizer:
                 "bound. Unresolved atoms stored at a NON-ZERO placeholder cannot be "
                 "identified in this mode.",
             )
-        resolved &= np.abs(coord).max(axis=1) > 1e-3
+        # Explicit observation metadata is authoritative, including real atoms at
+        # the coordinate origin. Legacy arrays without it use the SC placeholder
+        # heuristic; backbone origins alone cannot diagnose missing coordinates.
+        resolved &= np.isfinite(coord).all(axis=1)
+        bb_resolved = resolved.copy()
+        if "is_resolved" not in atom_array.get_annotation_categories():
+            resolved &= np.abs(coord).max(axis=1) > 1e-3
 
         res_atoms: dict = defaultdict(dict)
         for idx in range(len(atom_array)):
             res_atoms[(chain_id[idx], res_id[idx])][str(atom_name[idx])] = idx
 
         sc_gt_local = np.zeros((n_token, MAX_SC, 3), dtype=np.float32)
-        # TWO masks, because one tensor was answering three different questions.
+        # Independent masks; the runtime derives sc_model_mask from chemistry,
+        # design ownership and the validity of its active backbone frame.
         #
         #   sc_slot_mask -- CHEMISTRY: does this residue type have an atom in this
         #       slot? Purely type-derived, identical for every copy of a residue,
-        #       and available at inference. This is what may gate attention keys,
-        #       the coordinate output, the h_res' pooling and the template init.
+        #       and available at inference. Its legacy alias is sc_slot_mask.
         #   sc_atom_mask -- SUPERVISION: chemistry AND the structure actually
-        #       resolved it AND its geometry is plausible. Only the losses may use
-        #       this; it depends on crystallographic completeness, which does not
-        #       exist at inference.
+        #       resolved it AND its GT frame/target are valid. Alias: sc_loss_mask.
+        #       sc_observed_mask records SC observation separately from the frame.
         #
         # Conflating them is why the unresolved-atom fix had a side effect: gating
         # supervision on `is_resolved` also removed ~9.8% of atoms from S_phi's
@@ -586,6 +589,9 @@ class DesignFeaturizer:
         # set that no inference input can reproduce -- and the atoms it dropped are
         # exactly the flexible surface side chains packing cares about.
         sc_slot_mask = np.zeros((n_token, MAX_SC), dtype=bool)
+        sc_observed_mask = np.zeros((n_token, MAX_SC), dtype=bool)
+        sc_frame_valid = np.zeros(n_token, dtype=bool)
+        sc_bb_observed_mask = np.zeros((n_token, 4), dtype=bool)
         sc_mask = np.zeros((n_token, MAX_SC), dtype=bool)
         sc_ids = np.zeros((n_token, MAX_SC), dtype=np.int64)
         sc_frame_R = np.tile(np.eye(3, dtype=np.float32), (n_token, 1, 1))
@@ -606,24 +612,42 @@ class DesignFeaturizer:
         sc_bb_atom_idx = np.full((n_token, 4), -1, dtype=np.int64)
 
         for ti, ai in enumerate(rep_idx):
+            # Chemistry is independent of design ownership and frame availability.
+            names = sidechain_atoms(str(res_name[ai]))[:MAX_SC]
+            for j, nm in enumerate(names):
+                sc_ids[ti, j] = ATOM_NAME_TO_ID[nm]
+                sc_slot_mask[ti, j] = True
             if not binder[ai]:
                 continue
             atoms = res_atoms[(chain_id[ai], res_id[ai])]
+            for bi, bn in enumerate(XPB_BACKBONE_ATOM_NAMES):
+                if bn in atoms:
+                    idx = atoms[bn]
+                    sc_bb_atom_idx[ti, bi] = idx
+                    sc_bb_observed_mask[ti, bi] = bb_resolved[idx]
+                    if bb_resolved[idx]:
+                        sc_bb_coords[ti, bi] = coord[idx]
+            for j, nm in enumerate(names):
+                sc_observed_mask[ti, j] = nm in atoms and resolved[atoms[nm]]
             if not all(a in atoms for a in ("N", "CA", "C")):
                 continue
             n = torch.from_numpy(coord[atoms["N"]])[None]
             ca = torch.from_numpy(coord[atoms["CA"]])[None]
             c = torch.from_numpy(coord[atoms["C"]])[None]
+            valid = valid_ncac(n, ca, c, torch.from_numpy(sc_bb_observed_mask[ti, :3])[None])
+            # Native frames must also have plausible N-CA and CA-C lengths. This
+            # catches nonzero placeholders lacking trustworthy metadata.
+            lengths = torch.stack(((n-ca).norm(dim=-1), (c-ca).norm(dim=-1)))
+            valid = valid & ((lengths > 0.5) & (lengths < 2.5)).all()
+            if not bool(valid.item()):
+                continue
+            sc_frame_valid[ti] = True
             R, t = build_frame(n, ca, c)
             sc_frame_R[ti] = R[0].numpy()
             sc_frame_t[ti] = t[0].numpy()
             # Indices and coords come from the SAME by-name lookup in the SAME
             # order, so a gather at sc_bb_atom_idx reproduces sc_bb_coords exactly.
-            for bi, bn in enumerate(XPB_BACKBONE_ATOM_NAMES):  # (N, CA, C, O)
-                if bn in atoms:
-                    sc_bb_atom_idx[ti, bi] = atoms[bn]
-                    sc_bb_coords[ti, bi] = coord[atoms[bn]]
-            for j, nm in enumerate(sidechain_atoms(str(res_name[ai]))):
+            for j, nm in enumerate(names):
                 if j >= MAX_SC:
                     break
                 # `sc_ids` stays type-derived: it names the SLOT, which exists for
@@ -662,7 +686,12 @@ class DesignFeaturizer:
         return {
             "sc_gt_local": torch.from_numpy(sc_gt_local),
             "sc_atom_mask": torch.from_numpy(sc_mask),
+            "sc_loss_mask": torch.from_numpy(sc_mask.copy()),
+            "sc_observed_mask": torch.from_numpy(sc_observed_mask),
+            "sc_chemical_mask": torch.from_numpy(sc_slot_mask.copy()),
             "sc_slot_mask": torch.from_numpy(sc_slot_mask),
+            "sc_frame_valid": torch.from_numpy(sc_frame_valid),
+            "sc_bb_observed_mask": torch.from_numpy(sc_bb_observed_mask),
             "sc_atom_name_ids": torch.from_numpy(sc_ids),
             "sc_frame_R": torch.from_numpy(sc_frame_R),
             "sc_frame_t": torch.from_numpy(sc_frame_t),

@@ -1305,9 +1305,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             # A model whose key set depends on crystallographic completeness cannot be
             # reproduced at inference, where no `is_resolved` exists. Falls back to the
             # supervision mask for feature dicts built before the split.
-            sc_slot = input_feature_dict.get("sc_slot_mask")
+            sc_slot = input_feature_dict.get("sc_chemical_mask", input_feature_dict.get("sc_slot_mask"))
             if sc_slot is None:
-                sc_slot = sc_mask
+                # Old feature dictionaries still carry chemical atom names.
+                # Never infer model visibility from experimental completeness.
+                sc_slot = sc_ids != 0
             # Stage III predicted-mask branch: instantiate the side-chain atom set
             # from the PREDICTED residue type (argmax of the reduced logits) instead
             # of the GT type. This is what makes post_aa safe to supervise (M2): the
@@ -1373,10 +1375,20 @@ class ProtenixDesignTrain(ProtenixDesign):
                 raise ValueError("Side-chain generation requires design ownership and backbone frame indices")
             ownership = ownership.to(h_res.device).bool()
             have_frame = (frame_index.to(h_res.device)[..., :3] >= 0).all(-1)
+            if not self.sc_predicted_frame:
+                from pxdesign_train.sidechain.frames import valid_rigid_frame
+                native_valid = input_feature_dict.get("sc_frame_valid")
+                if native_valid is not None:
+                    have_frame = have_frame & native_valid.to(h_res.device).bool()
+                with torch.autocast(device_type=h_res.device.type, enabled=False):
+                    have_frame = have_frame & valid_rigid_frame(
+                        input_feature_dict["sc_frame_R"].to(h_res.device),
+                        input_feature_dict["sc_frame_t"].to(h_res.device))
             if use_per_sigma:
                 ownership = _tile_per_sigma(ownership, trailing_ndim=1)
                 have_frame = _tile_per_sigma(have_frame, trailing_ndim=1)
-            sc_slot = sc_slot & (ownership & have_frame)[..., None]
+            chemical_mask = sc_slot.clone()
+            sc_slot = chemical_mask & (ownership & have_frame)[..., None]
             sc_mask = sc_mask & sc_slot
             sc_ids = torch.where(sc_slot, sc_ids, 0)
             if not getattr(self, "sc_type_logits_input", True):
@@ -1599,6 +1611,10 @@ class ProtenixDesignTrain(ProtenixDesign):
                         ft = ft.expand(B, -1, -1)
                         bb = bb.expand(B, -1, -1, -1)
 
+            if fR is not None and not self.sc_predicted_frame:
+                fR = torch.where(have_frame[..., None, None], fR, torch.eye(3, device=fR.device))
+                ft = torch.where(have_frame[..., None], ft, 0.)
+
             # Validity of every row of `bb`. `bb` is a per-TOKEN table, so its
             # non-binder rows are NOT absent — they are (0,0,0) on the GT path
             # (sc_bb_coords is zero-filled there) and a copy of atom 0 on the
@@ -1617,6 +1633,12 @@ class ProtenixDesignTrain(ProtenixDesign):
                         if _bbi.shape[0] != B:
                             _bbi = _bbi.expand(B, -1, -1)
                     bb_valid = _bbi >= 0                      # [B, L, K] bool
+                    bb_valid = bb_valid & torch.isfinite(bb).all(-1)
+                    if not self.sc_predicted_frame and "sc_bb_observed_mask" in input_feature_dict:
+                        observed_bb = input_feature_dict["sc_bb_observed_mask"].to(h_res.device).bool()[..., :bb.shape[-2]]
+                        if use_per_sigma:
+                            observed_bb = _tile_per_sigma(observed_bb, trailing_ndim=2)
+                        bb_valid = bb_valid & observed_bb & have_frame[..., None]
 
             ca = ft
             if ca is None:
@@ -1739,6 +1761,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             bb_local = sc_res_mask = None
             q_bb_idx = None
             bb_q = None
+            bb_model_mask = None
             if getattr(self, "sc_bb_context", False) and fR is not None and ft is not None:
                 idx4 = input_feature_dict.get("sc_bb_atom_idx")
                 if idx4 is not None:
@@ -1753,6 +1776,11 @@ class ProtenixDesignTrain(ProtenixDesign):
                             idx4 = idx4.expand(B, -1, -1)
                     L4 = idx4.shape[-2]
                     valid4 = idx4 >= 0                              # [B, L, 4]
+                    if not self.sc_predicted_frame and "sc_bb_observed_mask" in input_feature_dict:
+                        observed4 = input_feature_dict["sc_bb_observed_mask"].to(h_res.device).bool()
+                        if use_per_sigma:
+                            observed4 = _tile_per_sigma(observed4, trailing_ndim=2)
+                        valid4 = valid4 & observed4
                     bb4 = None
                     _xden = out.get("x_denoised")
                     if R_hat is not None and _xden is not None:
@@ -1774,15 +1802,18 @@ class ProtenixDesignTrain(ProtenixDesign):
                                     gtbb = gtbb.expand(B, -1, -1, -1)
                             bb4 = gtbb
                     if bb4 is not None:
-                        v4 = valid4[..., None].to(bb4.dtype)
-                        bb_global = (bb4 * v4).detach()
+                        valid4 = valid4 & torch.isfinite(bb4).all(-1)
+                        bb_global = torch.where(valid4[..., None], bb4, 0.).detach()
                         # An absent atom (an unresolved O) is left at the origin by
                         # the `* v4` above — a bounded fallback; its fused row is never
                         # scattered back, because its index is -1. These four slots are
                         # concatenated to the ten side-chain slots and read by ONE
                         # Linear, so they carry the same (global) frame as those.
                         bb_local = bb_global.to(h_res.dtype)
-                        sc_res_mask = valid4[..., :3].all(dim=-1)   # frame atoms present
+                        sc_res_mask = valid4[..., :3].all(dim=-1) & have_frame
+                        if R_hat is not None:
+                            sc_res_mask = sc_res_mask & _fvalid
+                        bb_model_mask = valid4 & sc_res_mask[..., None]
 
                     # ---- B->S gather (sidechain.q_bs): bb_q from this round's cached
                     # encoder q_skip, at the SAME (N, CA, C, O) atom indices used for
@@ -1815,6 +1846,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             sc_kwargs = {}
             if bb_local is not None:
                 sc_kwargs = {"bb_coords": bb_local, "res_mask": sc_res_mask}
+                if bb_model_mask is not None:
+                    sc_kwargs["bb_atom_mask"] = bb_model_mask
             if bb_q is not None:
                 sc_kwargs["bb_q"] = bb_q
             if sc_sigma is not None and ca_for_module is None:
@@ -1923,6 +1956,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 y0_global = y0_global.squeeze(0)
                 sc_mask = sc_mask.squeeze(0)
                 sc_slot = sc_slot.squeeze(0)
+                chemical_mask = chemical_mask.squeeze(0)
                 h_res_prime = h_res_prime.squeeze(0)
                 if fR is not None:
                     fR = fR.squeeze(0)
@@ -1933,6 +1967,9 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["sc_frame_R"] = fR
                 out["sc_frame_t"] = ft
             out["sc_atom_mask"] = sc_mask & sc_slot
+            out["sc_loss_mask"] = out["sc_atom_mask"]
+            out["sc_chemical_mask"] = chemical_mask
+            out["sc_model_mask"] = sc_slot
             out["sc_generation_mask"] = sc_slot
             out["sc_atom_name_ids"] = sc_ids
             if sc_sigma is not None:

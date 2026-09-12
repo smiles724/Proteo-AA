@@ -132,7 +132,9 @@ class _CrossAtomBlock(nn.Module):
             F.softplus(self.dist_scale).view(1, 1, 1, 1, H) * d_atom.unsqueeze(-1)
         )
         scores = scores.masked_fill(~k_ok[:, :, None, :, None], float("-inf"))
-        attn = torch.nan_to_num(torch.softmax(scores, dim=-2))   # rows with no key
+        has_keys = k_ok.any(-1)[:, :, None, None, None]
+        scores = torch.where(has_keys, scores, 0.)
+        attn = torch.where(has_keys, torch.softmax(scores, dim=-2), 0.)
         out = torch.einsum("blakh,blkhd->blahd", attn, v).reshape(B, L, A, c)
         # Zero AFTER the output projection, not before: `self.o` carries a bias, so
         # projecting a zeroed row still yields that bias and a padding slot would
@@ -257,6 +259,7 @@ class SideChainModule(nn.Module):
         ctx_mask: Optional[torch.Tensor] = None,   # [B, L] bool — context (receptor/motif) token
         bb_q: Optional[torch.Tensor] = None,       # [B, L, 4, c_q] backbone q from Backbone Module
         coord_scale: Optional[torch.Tensor] = None,  # [B] EDM c_in, embedding only
+        bb_atom_mask: Optional[torch.Tensor] = None,  # [B,L,4] available context atoms
     ):
         """One-step side-chain denoise.
 
@@ -302,12 +305,17 @@ class SideChainModule(nn.Module):
                 bb_mask = torch.ones(B, L, n_bb, dtype=atom_mask.dtype, device=atom_mask.device)
             else:
                 bb_mask = res_mask[..., None].expand(B, L, n_bb).to(atom_mask.dtype)
+            if bb_atom_mask is not None:
+                bb_mask = bb_mask.bool() & bb_atom_mask.bool()
             ids = torch.cat([bb_ids, atom_name_ids], dim=2)              # [B, L, 14]
             mask = torch.cat([bb_mask, atom_mask], dim=2)                # [B, L, 14]
             coords = torch.cat(
                 [bb_coords.to(noisy_coords.dtype), noisy_coords], dim=2  # [B, L, 14, 3]
             )
         A = ids.shape[2]
+        # Mask before embedding/distance calculations: multiplying NaNs by zero
+        # after attention or decoding cannot remove their gradient contamination.
+        coords = torch.where(mask.bool()[..., None] | torch.isfinite(coords), coords, 0.)
         # The embedding may see the SAME coordinates recentred on the residue's CA.
         # A pure translation, applied per residue, so it is only ever used here --
         # never for anything compared across residues.
@@ -448,7 +456,7 @@ class SideChainModule(nn.Module):
             x0_global = y0
             if ca_coords is not None:
                 x0_global = x0_global + ca_coords[:, :, None, :].to(x0_global.dtype)
-        x0_global = x0_global * atom_mask[..., None].to(x0_global.dtype)
+        x0_global = torch.where(atom_mask.bool()[..., None], x0_global, 0.)
         if bb_feats is None:
             # Legacy arity: existing callers (model.py, feedback, a_direct tests)
             # unpack exactly two values. The 3rd element appears only when the

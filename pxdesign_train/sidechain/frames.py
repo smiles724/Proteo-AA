@@ -36,6 +36,26 @@ def build_frame(n: torch.Tensor, ca: torch.Tensor, c: torch.Tensor):
     return R, ca
 
 
+def valid_ncac(n, ca, c, observed=None):
+    """Coordinate validity, separate from atom inventory and observation labels."""
+    valid = torch.isfinite(torch.stack((n, ca, c), -2)).all(dim=(-1, -2))
+    v, u = torch.nan_to_num(c - ca), torch.nan_to_num(n - ca)
+    valid = valid & (v.norm(dim=-1) > 1e-6) & (u.norm(dim=-1) > 1e-6)
+    valid = valid & (torch.cross(v, u, dim=-1).norm(dim=-1) > 1e-6)
+    if observed is not None:
+        valid = valid & observed.bool().all(-1)
+    return valid
+
+
+def valid_rigid_frame(R, t):
+    """A local target needs a finite orthonormal frame, not merely atom indices."""
+    clean = torch.nan_to_num(R.float())
+    eye = torch.eye(3, device=R.device)
+    return (torch.isfinite(R).all(dim=(-1, -2)) & torch.isfinite(t).all(-1)
+            & ((clean.transpose(-1, -2) @ clean - eye).abs().amax(dim=(-1, -2)) < 1e-4)
+            & ((torch.linalg.det(clean) - 1).abs() < 1e-4))
+
+
 def to_local(x_global: torch.Tensor, R: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """Global -> local. x_global: [..., A, 3], R: [..., 3, 3], t: [..., 3]."""
     return torch.einsum("...ij,...aj->...ai", R.transpose(-1, -2), x_global - t[..., None, :])
@@ -168,9 +188,7 @@ def frames_from_backbone_index(coords: torch.Tensor, bb_idx: torch.Tensor):
     """
     xyz, present = gather_backbone(coords, bb_idx[..., :3])
     n, ca, c = xyz.unbind(-2)
-    valid = present.all(-1) & torch.isfinite(xyz).all(dim=(-1, -2))
-    valid = valid & ((c - ca).norm(dim=-1) > 1e-6)
-    valid = valid & (torch.cross(c - ca, n - ca, dim=-1).norm(dim=-1) > 1e-6)
+    valid = valid_ncac(n, ca, c, present)
     R, t = build_frame(torch.nan_to_num(n), torch.nan_to_num(ca), torch.nan_to_num(c))
     R = torch.where(valid[..., None, None], R, torch.eye(3, device=R.device, dtype=R.dtype))
     t = torch.where(valid[..., None], t, 0.0)

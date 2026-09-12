@@ -5,7 +5,7 @@ from .sidechain.instantiate import ATOM_NAME_TO_ID, STD_AA_3
 
 
 def assemble_atoms(state, feat, batch=0, sample=0):
-    state.validate_final()
+    state.validate_final(packing_enabled=(state.protocol or {}).get("packing_enabled", True))
     a2t = feat["atom_to_token_idx"].long()
     design = state.design_mask[batch,sample]
     assigned = state.assigned_aa[batch,sample]

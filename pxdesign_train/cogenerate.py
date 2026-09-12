@@ -202,10 +202,13 @@ def cogenerate(
     seq_patience: int = 3,
     seq_mode: str = "complete_unmask",
     refinement_steps: int = 3,
-    seed: int = 0,
+    seed: Optional[int] = None,
     aa_readout_mode: str = "final",
     aa_readout_sigma: float = 0.4,
     sampler_mode: str = "minimal_euler",
+    initial_target_policy: str = "joint",
+    packing_enabled: Optional[bool] = None,
+    backbone_refinement_enabled: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Co-generate (backbone coordinates, residue sequence) from noise.
 
@@ -252,13 +255,13 @@ def cogenerate(
              aa_probs, aa_readouts, trajectory}.
     """
     if getattr(model, "aa_backend", "mlp") == "fampnn":
-        if not sidechain_cycle:
-            raise ValueError("FaMPNN co-generation requires sidechain_cycle=True")
         if stop_on_seq_stable:
             raise ValueError("Stage IV currently uses a fixed budget; adaptive stopping is not enabled")
         from pxdesign_train.stage4 import generate
         return generate(model, input_feature_dict, N_step=N_step, temperature=temperature,
-                        refinement_steps=refinement_steps, seed=seed)
+                        refinement_steps=refinement_steps, seed=0 if seed is None else seed, backbone_sampler=sampler_mode,
+                        initial_target_policy=initial_target_policy, packing_enabled=sidechain_cycle if packing_enabled is None else packing_enabled,
+                        backbone_refinement_enabled=backbone_refinement_enabled)
     from protenix.model.protenix import update_input_feature_dict
 
     assert model.aa_input_source == "diffusion_internal", (
@@ -309,7 +312,8 @@ def cogenerate(
             "refinement_steps to control the refinement rollout."
         )
     model.eval()
-    torch.manual_seed(seed)
+    if seed is not None:
+        torch.manual_seed(seed)
 
     feat = dict(input_feature_dict)
     feat = model.diffusion_module.diffusion_conditioning.relpe.generate_relp(feat)

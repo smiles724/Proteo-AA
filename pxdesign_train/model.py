@@ -213,13 +213,16 @@ class ProtenixDesignTrain(ProtenixDesign):
                 if c_in is None:
                     c_in = getattr(getattr(configs, "model", object()), "c_s_inputs", 449)
             self.aa_backend = str(getattr(res_cfg, "backend", "mlp"))
+            if self.aa_backend == "fampnn":
+                self.aa_input_source = "diffusion_internal"
+                c_in = self.diffusion_module.c_token
             if self.aa_backend == "mlp" and self.enable_residue_type_head:
                 self.design_residue_type_head = DesignResidueTypeHead(
                     c_s=c_in, no_bins=vocab_size, use_time=use_time,
                 )
             elif self.aa_backend == "fampnn":
                 from pxdesign_train.aa.fampnn_head import FaMPNNHead
-                self.aa_head = FaMPNNHead(res_cfg.fampnn_checkpoint)
+                self.aa_head = FaMPNNHead(res_cfg.fampnn_checkpoint, identity=getattr(res_cfg, "fampnn_identity", None))
             elif self.aa_backend != "mlp":
                 raise ValueError(f"Unknown AA backend {self.aa_backend!r}")
         # Capture (and, under sidechain.a_direct, REPLACE) the internal per-token
@@ -1061,8 +1064,12 @@ class ProtenixDesignTrain(ProtenixDesign):
             chunk_size=chunk_size,
         )
 
-        if getattr(self, "aa_backend", "mlp") == "fampnn":
-            input_feature_dict = dict(input_feature_dict, stage4_fixed_context=True)
+        policy = getattr(getattr(self.configs, "stage4", None), "initial_target_policy", "joint")
+        if policy not in ("joint", "fixed_context"):
+            raise ValueError(f"Unknown initial target policy {policy}")
+        input_feature_dict = dict(input_feature_dict, stage4_fixed_context=policy == "fixed_context")
+        if getattr(self, "aa_backend", "mlp") == "fampnn" and N_sample != 1:
+            raise ValueError("FAMPNN pack/refine requires one diffusion sample; use gradient accumulation")
 
         # 2. One-step denoising under EDM training noise.
         x_gt_aug, x_denoised, sigma, x_noisy = sample_diffusion_training(

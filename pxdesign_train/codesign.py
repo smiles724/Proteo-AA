@@ -34,6 +34,7 @@ class CoDesignState:
     chain_index: torch.Tensor
     state_version: int = 0
     feedback: dict = None
+    protocol: dict = None
 
     def updated(self, **kwargs):
         return replace(self, state_version=self.state_version + 1, **kwargs)
@@ -80,18 +81,22 @@ class CoDesignState:
             sc_xyz=torch.where(mask[..., None], transported, 0.0), generation_mask=mask,
             sc_visible=self.sc_visible & keep, feedback=None)
 
-    def validate_final(self):
+    def validate_final(self, packing_enabled=True):
         if (self.design_mask & ((self.assigned_aa < 0) | (self.assigned_aa >= 20))).any():
             raise ValueError("Final design contains unknown identities")
         ids, chemistry = instantiate_from_type_indices(self.assigned_aa)
         _, _, frame_ok = frames_from_backbone_index(self.backbone_xyz, self.bb_atom_idx)
         expected = chemistry & (self.design_mask & frame_ok)[..., None]
+        if not packing_enabled:
+            expected = torch.zeros_like(expected)
         if not torch.equal(expected, self.generation_mask):
             raise ValueError("Final atom inventory does not match sequence and frames")
         if (self.design_mask & ~frame_ok).any():
             raise ValueError("Final design contains invalid backbone frames")
         if not torch.equal(self.sc_atom_name_ids, torch.where(expected, ids, 0)):
             raise ValueError("Final atom names do not match the assigned sequence")
+        if not torch.isfinite(self.backbone_xyz).all():
+            raise ValueError("Final backbone is not finite")
         if not torch.isfinite(self.sc_xyz[self.generation_mask]).all():
             raise ValueError("Final generated atoms are not finite")
         if not torch.equal(self.backbone_xyz[self.fixed_atom_mask], self.fixed_atom_xyz[self.fixed_atom_mask]):
@@ -107,10 +112,12 @@ class CycleConfig:
     temperature: float = 0.0
     sc_to_aa: bool = True
     sc_to_bb: bool = True
+    packing_enabled: bool = True
+    backbone_refinement_enabled: bool = True
 
     def __post_init__(self):
-        if self.rounds < 1 or self.decode_blocks < 1:
-            raise ValueError("At least one training round and decoding block are required")
+        if self.rounds < 0 or self.decode_blocks < 1:
+            raise ValueError("Rounds must be nonnegative and decoding blocks positive")
         if not 0 < self.query_fraction <= 1 or not 0 <= self.whole_mask_probability <= 1:
             raise ValueError("Invalid query schedule")
 
@@ -126,7 +133,7 @@ def random_query(design_mask, cfg, generator=None):
     return torch.where(query.any(-1, keepdim=True), query, fallback)
 
 
-def decode(state, head, cfg, generator=None):
+def decode(state, head, cfg, generator=None, sequence_generator=None):
     query = state.query_mask
     state = state.updated(seq_visible=state.seq_visible & ~query, sc_visible=state.sc_visible & ~query)
     draws = torch.rand(query.shape, device=query.device, generator=generator).masked_fill(~query, 2)
@@ -139,21 +146,25 @@ def decode(state, head, cfg, generator=None):
             continue
         logits, _ = head(**state.aa_input(sc_feedback=cfg.sc_to_aa))
         records.append((logits, selected))
-        aa = assign_aa(logits, cfg.temperature, generator)
+        aa = assign_aa(logits, cfg.temperature, sequence_generator if sequence_generator is not None else generator)
+        prior = state.backbone_features.get("aa_logits", torch.zeros_like(logits))
+        state = state.updated(backbone_features=dict(state.backbone_features,
+            aa_logits=torch.where(selected[..., None], logits, prior)))
         state = state.commit(aa, selected)
     return state, records
 
 
 def run_cycle(state, head, pack: Callable, refine: Callable, cfg: CycleConfig,
-              generator=None, queries=None):
+              generator=None, queries=None, sequence_generator=None):
     """Initial full decode/pack, R complete AA/SC/BB updates, final repack.
 
     Supplied query masks and RNG state give training/evaluation forward parity.
     No native target or auxiliary branch is accepted by this function.
     """
     state = state.updated(query_mask=state.design_mask)
-    state, initial = decode(state, head, cfg, generator)
-    state = pack(state)
+    state, initial = decode(state, head, cfg, generator, sequence_generator)
+    if cfg.packing_enabled:
+        state = pack(state)
     revisions, trace = [], []
     covered = torch.zeros_like(state.design_mask)
     for round_index in range(cfg.rounds):
@@ -162,10 +173,12 @@ def run_cycle(state, head, pack: Callable, refine: Callable, cfg: CycleConfig,
             raise ValueError("Revision selected a permanently fixed residue")
         old_aa, old_xyz = state.assigned_aa, state.backbone_xyz
         state = state.updated(query_mask=query)
-        state, records = decode(state, head, cfg, generator)
+        state, records = decode(state, head, cfg, generator, sequence_generator)
         revisions.extend(records)
-        state = pack(state)
-        state = refine(state, cfg.sc_to_bb)
+        if cfg.packing_enabled:
+            state = pack(state)
+        if cfg.backbone_refinement_enabled:
+            state = refine(state, cfg.sc_to_bb and cfg.packing_enabled)
         covered = covered | query
         old_bb, _ = gather_backbone(old_xyz, state.bb_atom_idx)
         new_bb, _ = gather_backbone(state.backbone_xyz, state.bb_atom_idx)
@@ -176,6 +189,7 @@ def run_cycle(state, head, pack: Callable, refine: Callable, cfg: CycleConfig,
             query_count=query.sum(-1).tolist(), coverage_count=covered.sum(-1).tolist(),
             change_count=((old_aa != state.assigned_aa) & query).sum(-1).tolist(),
             binder_ca_displacement=rms_shift.detach().tolist(), state_version=state.state_version))
-    state = pack(state)  # final sequence is fixed before this call
-    state.validate_final()
+    if cfg.packing_enabled:
+        state = pack(state)  # final sequence and final backbone
+    state.validate_final(packing_enabled=cfg.packing_enabled)
     return state, dict(initial=initial, revisions=revisions, trace=trace, stop_reason="fixed_budget")

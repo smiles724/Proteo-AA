@@ -42,6 +42,12 @@ inventories and GT type logits are explicit runtime settings saved in the
 integrated checkpoint. The checkpoint records component hashes, initialization
 origins, optimizer state and effective configuration.
 
+Training job **114920**, code **320b5af**, is the corrected submission. Resolved
+sources: 47,622 training monomers and 308 eligible recent-PDB validation monomers
+(the requested cap is 491). Component preflight confirmed only SC is trainable,
+no SC donor, native frame/inventory flags and disabled feedback/refinement.
+[Submission record](validation/official_sc_scratch/run_114920.json).
+
 ## Subsequent phases
 
 1. `sc_complex_adapt`: warm-start the trained SC weights and introduce PINDER

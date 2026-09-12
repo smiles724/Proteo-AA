@@ -571,11 +571,15 @@ training_configs["curriculum"] = {
 
 # Stage IV is opt-in. Existing stages retain their backend and objectives.
 training_configs["stage4"] = {
-    "phase": "IV-A", "train_rounds": 1, "inference_rounds": 3,
+    "phase": "sc_adapt", "train_rounds": 0, "inference_rounds": 0,
+    "backbone_sampler": "pxdesign_native", "initial_target_policy": "joint",
+    "packing_enabled": True, "backbone_refinement_enabled": False, "feature_sigma": 0.4,
+    "train_sc": False, "feedback_lr": 1e-5,
+    "feedback_trainable_prefixes": ["a_token_fusion", "q_atom_fusion", "hres_injector.", "refinement_pass_embedding"],
     "decode_blocks": 4, "query_fraction": 0.5, "whole_mask_probability": 0.1,
     "temperature": 0.0, "sc_to_aa": True, "sc_to_bb": True,
     "aa_lr": 1e-5, "sc_lr": 1e-5, "bb_lr": 1e-6,
-    "bb_trainable_prefixes": ["diffusion_module.atom_attention_decoder."],
+    "bb_trainable_prefixes": [""],  # parser needs a typed list; empty entries select nothing
     "weight_aa_pre": 1.0, "weight_aa_revision": 1.0,
     "weight_sc_aux": 1.0, "weight_physical": 0.1,
 }

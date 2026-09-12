@@ -127,6 +127,22 @@ class PXDesignTrainer:
         checkpoint_params_only: bool = True,
         overlay_aa_head_path: Optional[str] = None,
     ) -> None:
+        from pxdesign_train.checkpoints import config_from_checkpoint, read_checkpoint
+        warm_path = getattr(configs.training, "warm_start_checkpoint", "")
+        if warm_path:
+            if load_checkpoint_path:
+                raise ValueError("Multiple warm-start checkpoints supplied")
+            load_checkpoint_path, checkpoint_params_only = warm_path, True
+        resume_path = getattr(configs.training, "resume_checkpoint", "")
+        if resume_path:
+            if load_checkpoint_path or getattr(configs.training, "backbone_checkpoint", "") or getattr(configs.training, "sidechain_checkpoint", ""):
+                raise ValueError("Full resume and component donors are separate operations")
+            configs = config_from_checkpoint(read_checkpoint(resume_path))
+            configs.training.backbone_checkpoint = ""
+            configs.training.sidechain_checkpoint = ""
+            configs.training.resume_checkpoint = resume_path
+            configs.training.warm_start_checkpoint = ""
+            load_checkpoint_path, checkpoint_params_only = resume_path, False
         self.configs = configs
         self.components = components
         self.rank = rank
@@ -142,6 +158,7 @@ class PXDesignTrainer:
         self.global_step = 0  # increments every micro-batch; step = global_step // iters_to_accumulate
         self.iters_to_accumulate = int(getattr(configs.training, "iters_to_accumulate", 1))
 
+        self.ema_wrapper = None
         self._init_model()
         self._init_loss()
         self._init_optimizer()
@@ -164,11 +181,32 @@ class PXDesignTrainer:
                 overlay_aa_head_path, self.AA_HEAD_PREFIXES, label="AA head",
             )
 
+        self._init_ema()
+        if load_checkpoint_path and not checkpoint_params_only:
+            saved = torch.load(load_checkpoint_path, map_location=self.device, weights_only=False)
+            if saved.get("ema"):
+                if self.ema_wrapper is None:
+                    raise ValueError("Resume contains EMA but EMA is disabled")
+                self.ema_wrapper.shadow = saved["ema"]["shadow"]
+                self.ema_wrapper.decay = saved["ema"]["decay"]
+
+    def _init_ema(self):
+        ema_decay = float(getattr(self.configs.training, "ema_decay", 0.0))
+        if ema_decay > 0:
+            from runner.ema import EMAWrapper  # protenix's EMAWrapper
+
+            ema_keywords = list(getattr(self.configs, "ema_mutable_param_keywords", [""]))
+            self.ema_wrapper = EMAWrapper(self.model, ema_decay, ema_keywords)
+            self.ema_wrapper.register()
+        else:
+            self.ema_wrapper = None
+
     # Modules that make up the residue-type (AA) head. `backbone_aa_encoder.` is
     # deliberately absent: an older aa_head_warmup lineage saved one, but the
     # current model does not build it, so overlaying it would only produce
     # "unexpected key" noise.
     AA_HEAD_PREFIXES = ("design_residue_type_head.",)
+    AA_DIAGNOSTIC_PREFIXES = ("design_residue_type_head.", "aa_head.")
 
     def overlay_module_from_checkpoint(
         self, path: str, prefixes: tuple[str, ...], label: str = "module",
@@ -192,8 +230,8 @@ class PXDesignTrainer:
         """
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         state = ckpt.get("model", ckpt)
-        if not self.use_ddp and any(k.startswith("module.") for k in state):
-            state = {k.removeprefix("module."): v for k, v in state.items()}
+        from pxdesign_train.checkpoints import normalize_state
+        state = normalize_state(state)
 
         model_state = self.model.state_dict()
         take, absent, mismatched = {}, [], []
@@ -237,6 +275,12 @@ class PXDesignTrainer:
 
     def _init_model(self) -> None:
         self.raw_model = ProtenixDesignTrain(self.configs).to(self.device)
+        backbone = getattr(self.configs.training, "backbone_checkpoint", "")
+        if backbone:
+            from pxdesign_train.checkpoints import compose_components
+            origins = compose_components(self.raw_model, backbone_checkpoint=backbone,
+                sidechain_checkpoint=getattr(self.configs.training, "sidechain_checkpoint", "") or None)
+            self._log("Loaded components: " + ", ".join(f"{name}={record.get('sha256', record.get('checkpoint_sha256', record.get('origin')))}" for name,record in origins.items()))
         self._apply_trainable_filter()
         if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
             from pxdesign_train.stage4 import apply_phase
@@ -245,7 +289,7 @@ class PXDesignTrainer:
             self.model = DDP(
                 self.raw_model,
                 device_ids=[self.rank] if self.device.type == "cuda" else None,
-                find_unused_parameters=False,
+                find_unused_parameters=getattr(self.raw_model, "aa_backend", "mlp") == "fampnn",
                 static_graph=False,
             )
         else:
@@ -255,15 +299,6 @@ class PXDesignTrainer:
         n_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad) / 1e6
         self._log(f"Model has {n_params:.2f}M parameters ({n_trainable:.2f}M trainable)")
 
-        ema_decay = float(getattr(self.configs.training, "ema_decay", 0.0))
-        if ema_decay > 0:
-            from runner.ema import EMAWrapper  # protenix's EMAWrapper
-
-            ema_keywords = list(getattr(self.configs, "ema_mutable_param_keywords", [""]))
-            self.ema_wrapper = EMAWrapper(self.model, ema_decay, ema_keywords)
-            self.ema_wrapper.register()
-        else:
-            self.ema_wrapper = None
 
     def _apply_trainable_filter(self) -> None:
         keywords = list(getattr(self.configs.training, "trainable_param_keywords", []) or [])
@@ -297,6 +332,8 @@ class PXDesignTrainer:
                 "ignore_index",
                 -100,
             ),
+            edm_weighting=bool(getattr(loss_cfg, "edm_weighting", False)),
+            sigma_data=float(getattr(self.configs, "sigma_data", 16.0)),
             aa_time_weighting=bool(getattr(loss_cfg, "aa_time_weighting", False)),
             aa_sigma_weight_mode=str(
                 getattr(loss_cfg, "aa_sigma_weight_mode", "uniform")
@@ -352,12 +389,12 @@ class PXDesignTrainer:
         aa_head_param_ids = {
             id(p)
             for name, p in self.raw_model.named_parameters()
-            if name.startswith(self.AA_HEAD_PREFIXES)
+            if name.startswith(self.AA_DIAGNOSTIC_PREFIXES)
         }
         self.aa_head_params = [
             p
             for name, p in self.raw_model.named_parameters()
-            if p.requires_grad and name.startswith(self.AA_HEAD_PREFIXES)
+            if p.requires_grad and name.startswith(self.AA_DIAGNOSTIC_PREFIXES)
         ]
         self._aa_head_param_ids = {id(p) for p in self.aa_head_params}
 
@@ -456,7 +493,7 @@ class PXDesignTrainer:
                 params = optimizer_groups(self.raw_model)
             if not params:
                 raise ValueError("No trainable parameters")
-            self.optimizer = _make_adam(params, split_aa_head=True)
+            self.optimizer = _make_adam(params, split_aa_head=getattr(self.raw_model, "aa_backend", "mlp") != "fampnn")
             self.lr_scheduler = _make_sched(self.optimizer)
             self._optimizers = [self.optimizer]
             self._schedulers = [self.lr_scheduler]
@@ -617,7 +654,7 @@ class PXDesignTrainer:
             for name, weight in terms.items():
                 value = out["stage4_" + name]
                 loss_out["stage4/" + name] = value.detach()
-                loss_out["loss"] = loss_out["loss"] + float(weight) * value
+                loss_out["loss"] = loss_out["loss"] + float(weight) * value.float()
             for name in ("recovery_pre", "recovery_revision"):
                 loss_out["stage4/" + name] = out["stage4_" + name].detach()
         return loss_out
@@ -981,7 +1018,7 @@ class PXDesignTrainer:
         name = f"step{self.step}{('_' + tag) if tag else ''}.pt"
         path = os.path.join(self.checkpoint_dir, name)
         state = {
-            "model": self.model.state_dict(),
+            "model": self.raw_model.state_dict(),
             "step": self.step,
             "global_step": self.global_step,
             "train_mode": self.train_mode,
@@ -1013,6 +1050,13 @@ class PXDesignTrainer:
         else:
             state["optimizer"] = self.optimizer.state_dict()
             state["scheduler"] = self.lr_scheduler.state_dict()
+        if hasattr(self.raw_model, "component_origins"):
+            from pxdesign_train.checkpoints import integrated_record
+            if self.global_step % self.iters_to_accumulate:
+                raise ValueError("Exact resume requires saving at an optimizer boundary")
+            state["integrated"] = integrated_record(self.raw_model)
+        if self.ema_wrapper is not None:
+            state["ema"] = dict(shadow=self.ema_wrapper.shadow, decay=self.ema_wrapper.decay)
         torch.save(state, path)
         self._log(f"Saved checkpoint -> {path}")
         return path
@@ -1158,7 +1202,7 @@ class PXDesignTrainer:
         for k, v in state.items():
             if not k.endswith("atom_embed.weight") or not torch.is_tensor(v):
                 continue
-            cur = self.model.state_dict().get(k)
+            cur = self.raw_model.state_dict().get(k)
             if cur is None or cur.shape == v.shape:
                 continue
             if cur.dim() != 2 or v.dim() != 2 or cur.shape[1] != v.shape[1]:
@@ -1175,6 +1219,20 @@ class PXDesignTrainer:
 
     def load_checkpoint(self, path: str, params_only: bool = False) -> None:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        if "integrated" in ckpt:
+            from pxdesign_train.checkpoints import restore_model, restore_rng
+            restore_model(self.raw_model, ckpt)
+            if not params_only:
+                if ckpt["integrated"]["trainable_parameters"] != [n for n,p in self.raw_model.named_parameters() if p.requires_grad]:
+                    raise ValueError("Phase transition requires a params-only warm start")
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+                self.lr_scheduler.load_state_dict(ckpt["scheduler"])
+                self.step, self.global_step = int(ckpt["step"]), int(ckpt["global_step"])
+                self.train_sampler.set_step(self.step)
+                if self.ema_wrapper is not None and ckpt.get("ema"):
+                    self.ema_wrapper.shadow = ckpt["ema"]["shadow"]
+                restore_rng(ckpt["integrated"]["rng"])
+            return
         if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
             from pxdesign_train.stage4 import checkpoint_identity
             recorded = ckpt.get("stage4_identity")
@@ -1185,9 +1243,8 @@ class PXDesignTrainer:
                 for key in ("backend", "upstream_revision", "checkpoint_sha256", "model_config", "mapping_version"):
                     if recorded.get(key) != expected.get(key):
                         raise ValueError(f"Stage IV checkpoint {key} mismatch")
-            if params_only and recorded is None:
-                ckpt = dict(ckpt)
-                ckpt["model"] = {k:v for k,v in ckpt["model"].items() if not k.removeprefix("module.").startswith("design_residue_type_head.")}
+            if recorded is None:
+                raise ValueError("Use separate --backbone-checkpoint and --sidechain-checkpoint donors")
             if not params_only and "rng_torch" in ckpt:
                 torch.set_rng_state(ckpt["rng_torch"].cpu())
                 if torch.cuda.is_available() and ckpt.get("rng_cuda"):
@@ -1196,14 +1253,9 @@ class PXDesignTrainer:
         # Strip DDP prefix if loading a DDP checkpoint into a single-GPU model.
         self._check_sidechain_arch(ckpt)
         state = ckpt["model"]
-        if not self.use_ddp and any(k.startswith("module.") for k in state):
-            state = {k.removeprefix("module."): v for k, v in state.items()}
+        from pxdesign_train.checkpoints import normalize_state
+        state = normalize_state(state)
         state = self._migrate_atom_name_vocab(state)
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
-            required = {k: v for k,v in self.model.state_dict().items() if k.removeprefix("module.").startswith(("diffusion_module.", "sidechain_module.", "input_embedder."))}
-            incompatible = [k for k,v in required.items() if k not in state or state[k].shape != v.shape]
-            if incompatible:
-                raise ValueError(f"Stage IV donor is missing compatible backbone/packer weights: {incompatible[:12]}")
         if params_only and not load_strict:
             include_prefixes = getattr(
                 getattr(self.configs, "training", object()),
@@ -1221,7 +1273,7 @@ class PXDesignTrainer:
                     "Filtered params-only checkpoint to prefixes "
                     f"{include_prefixes}: kept {len(state)}/{before} tensors"
                 )
-            model_state = self.model.state_dict()
+            model_state = self.raw_model.state_dict()
             skipped = []
             filtered = {}
             for k, v in state.items():
@@ -1240,7 +1292,7 @@ class PXDesignTrainer:
                     f"params-only warm start ({len(skipped)}): {preview}{more}"
                 )
             state = filtered
-        missing, unexpected = self.model.load_state_dict(state, strict=load_strict)
+        missing, unexpected = self.raw_model.load_state_dict(state, strict=load_strict)
         self._log(f"Loaded {path} (missing={len(missing)}, unexpected={len(unexpected)})")
         if not params_only:
             ckpt_mode = str(ckpt.get("train_mode", "joint"))

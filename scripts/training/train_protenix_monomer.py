@@ -631,6 +631,33 @@ def build_configs(args: argparse.Namespace, device):
     )
 
     configs = parse_configs(training_configs, arg_str="")
+    if getattr(args, "warm_start_checkpoint", ""):
+        if args.resume_checkpoint or args.load_checkpoint or args.backbone_checkpoint or args.sidechain_checkpoint or args.fampnn_checkpoint:
+            raise ValueError("Phase transition uses only --warm-start-checkpoint, without donors or resume")
+        from pxdesign_train.checkpoints import read_checkpoint, transition_config
+        explicit = set(getattr(args, "_explicit_args", []))
+        stage4 = {key.removeprefix("stage4_"):getattr(args,key) for key in explicit if key.startswith("stage4_") and key != "stage4_phase"}
+        for key in ("backbone_sampler", "initial_target_policy", "packing_enabled", "backbone_refinement_enabled", "train_sc", "feedback_lr", "bb_trainable_prefixes"):
+            if key in explicit: stage4[key]=getattr(args,key)
+        training = {key:getattr(args,key) for key in ("max_steps", "lr", "warmup_steps", "iters_to_accumulate", "ema_decay", "num_workers", "eval_interval", "checkpoint_interval") if key in explicit}
+        loss = {key:getattr(args,arg) for key,arg in (("weight_bb_post","weight_refine"),("weight_mse","weight_denoise")) if arg in explicit}
+        configs = transition_config(read_checkpoint(args.warm_start_checkpoint), phase=args.stage4_phase,
+            stage4_overrides=stage4, training_overrides=training, loss_overrides=loss)
+        configs.training.warm_start_checkpoint=args.warm_start_checkpoint
+        return configs
+    if getattr(args, "resume_checkpoint", ""):
+        if args.load_checkpoint or args.backbone_checkpoint or args.sidechain_checkpoint or args.fampnn_checkpoint:
+            raise ValueError("--resume-checkpoint is mutually exclusive with donor and warm-start options")
+        from pxdesign_train.checkpoints import read_checkpoint, config_from_checkpoint
+        configs = config_from_checkpoint(read_checkpoint(args.resume_checkpoint))
+        configs.training.backbone_checkpoint = ""
+        configs.training.sidechain_checkpoint = ""
+        configs.training.resume_checkpoint = args.resume_checkpoint
+        configs.training.warm_start_checkpoint = ""
+        return configs
+    configs.training.backbone_checkpoint = getattr(args, "backbone_checkpoint", "")
+    configs.training.sidechain_checkpoint = getattr(args, "sidechain_checkpoint", "")
+    configs.training.resume_checkpoint = ""
     configs.seed = int(args.seed)
     configs.dtype = args.dtype
     configs.load_strict = False
@@ -983,9 +1010,10 @@ def build_configs(args: argparse.Namespace, device):
         configs.residue_type.backend = "fampnn"
         configs.residue_type.fampnn_checkpoint = str(Path(args.fampnn_checkpoint).resolve())
         configs.training.train_mode = "joint"
-        configs.training.ema_decay = 0.0
         configs.loss.aa_time_weighting = False
         configs.sidechain.detach_feedback = False
+        configs.sidechain.a_direct_zero_init = True
+        configs.sidechain.q_direct_zero_init = True
         configs.sidechain.mismatch_loss = "none"
         configs.sidechain.pack_loss = float(args.stage4_weight_physical)
         configs.sidechain.predicted_frame = True
@@ -996,13 +1024,33 @@ def build_configs(args: argparse.Namespace, device):
         for key in ("train_rounds", "inference_rounds", "decode_blocks", "query_fraction", "whole_mask_probability",
                     "temperature", "sc_to_aa", "sc_to_bb", "aa_lr", "sc_lr", "bb_lr", "weight_physical"):
             setattr(configs.stage4, key, getattr(args, "stage4_" + key))
-        if args.stage4_phase == "IV-A":
+        configs.stage4.backbone_sampler = args.backbone_sampler
+        configs.stage4.initial_target_policy = args.initial_target_policy
+        configs.stage4.packing_enabled = args.packing_enabled
+        configs.stage4.backbone_refinement_enabled = args.backbone_refinement_enabled
+        configs.stage4.train_sc = args.train_sc
+        configs.stage4.feedback_lr = args.feedback_lr
+        configs.stage4.bb_trainable_prefixes = args.bb_trainable_prefixes
+        configs.enable_sidechain = args.packing_enabled
+        configs.loss.edm_weighting = True
+        if args.backbone_checkpoint and args.load_checkpoint:
+            raise ValueError("Component composition cannot also load a complete donor")
+        if args.stage4_phase in ("baseline", "sc_adapt"):
+            configs.stage4.sc_to_aa = configs.stage4.sc_to_bb = False
+            if args.backbone_refinement_enabled:
+                raise ValueError("Initial component validation requires feedback/refinement disabled")
+        if args.stage4_phase in ("IV-A", "baseline", "sc_adapt", "feedback_adapt", "aa_adapt"):
             configs.loss.weight_mse = 0.0
             configs.loss.weight_lddt = 0.0
             configs.loss.weight_disto = 0.0
             configs.loss.weight_bb_post = 0.0
-        if args.stage4_inference_rounds < 2:
-            raise ValueError("Stage IV production inference requires at least two outer rounds")
+        configs.loss.weight_bb_post = float(args.weight_refine)
+        if args.stage4_phase == "joint_adapt":
+            configs.loss.weight_mse = float(args.weight_denoise)
+        if args.stage4_train_rounds < 0 or args.stage4_inference_rounds < 0:
+            raise ValueError("Revision round counts must be nonnegative")
+        if args.diffusion_batch_size != 1:
+            raise ValueError("Integrated pack/refine supports diffusion-batch-size=1; accumulate gradients")
 
     unfreeze_last = int(getattr(args, "unfreeze_last_diffusion_blocks", 0))
     if unfreeze_last < 0:
@@ -1065,7 +1113,7 @@ def adopt_sidechain_arch_from_checkpoint(configs, args: argparse.Namespace) -> d
 
     Returns the keys actually changed, for logging by the caller.
     """
-    ckpt_path = getattr(args, "load_checkpoint", None)
+    ckpt_path = getattr(args, "sidechain_checkpoint", None) or getattr(args, "load_checkpoint", None)
     if not ckpt_path:
         return {}
     try:
@@ -1577,10 +1625,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--protenix-code-dir", default="")
     p.add_argument("--pxdesign-code-dir", default="")
     p.add_argument("--binder-validation-fraction", type=float, default=0.1)
+    p.add_argument("--backbone-sampler", choices=["pxdesign_native", "minimal_euler"], default="pxdesign_native")
+    p.add_argument("--initial-target-policy", choices=["joint", "fixed_context"], default="joint")
+    p.add_argument("--packing-enabled", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--backbone-refinement-enabled", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--train-sc", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--feedback-lr", type=float, default=1e-5)
+    p.add_argument("--bb-trainable-prefixes", nargs="*", default=[])
+    p.add_argument("--weight-refine", type=float, default=0.)
+    p.add_argument("--weight-denoise", type=float, default=4.)
+    p.add_argument("--backbone-checkpoint", default="")
+    p.add_argument("--sidechain-checkpoint", default="")
+    p.add_argument("--resume-checkpoint", default="")
+    p.add_argument("--warm-start-checkpoint", default="", help="New phase using saved architecture and weights, fresh optimizer/counters")
     p.add_argument("--fampnn-checkpoint", default="")
-    p.add_argument("--stage4-phase", choices=["IV-A", "IV-B", "IV-C"], default="IV-A")
-    p.add_argument("--stage4-train-rounds", type=int, default=1)
-    p.add_argument("--stage4-inference-rounds", type=int, default=3)
+    p.add_argument("--stage4-phase", choices=["baseline", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-A", "IV-B", "IV-C"], default="sc_adapt")
+    p.add_argument("--stage4-train-rounds", type=int, default=0)
+    p.add_argument("--stage4-inference-rounds", type=int, default=0)
     p.add_argument("--stage4-decode-blocks", type=int, default=4)
     p.add_argument("--stage4-query-fraction", type=float, default=0.5)
     p.add_argument("--stage4-whole-mask-probability", type=float, default=0.1)
@@ -1591,7 +1652,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage4-sc-lr", type=float, default=1e-5)
     p.add_argument("--stage4-bb-lr", type=float, default=1e-6)
     p.add_argument("--stage4-weight-physical", type=float, default=0.1)
-    return p.parse_args()
+    parsed = p.parse_args()
+    supplied = {token.split("=", 1)[0] for token in sys.argv[1:]}
+    parsed._explicit_args = [action.dest for action in p._actions if supplied.intersection(action.option_strings)]
+    return parsed
 
 
 def fill_missing_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -1754,6 +1818,7 @@ def main() -> None:
             components.named_eval_dataloaders["monomer_retention"] = eval_loader
     configs = build_configs(args, device)
     if args.training_stage == "stage4_fampnn":
+        configs.training.entrypoint_arguments = vars(args).copy()
         import json
         (output_dir / "resolved_config.json").write_text(json.dumps(configs.to_dict(), indent=2, default=str))
         (output_dir / "arguments.json").write_text(json.dumps(vars(args), indent=2, default=str))

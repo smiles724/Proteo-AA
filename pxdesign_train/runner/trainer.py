@@ -298,6 +298,15 @@ class PXDesignTrainer:
                 -100,
             ),
             aa_time_weighting=bool(getattr(loss_cfg, "aa_time_weighting", False)),
+            aa_sigma_weight_mode=str(
+                getattr(loss_cfg, "aa_sigma_weight_mode", "uniform")
+            ),
+            aa_sigma_weight_scale=float(
+                getattr(loss_cfg, "aa_sigma_weight_scale", 0.4)
+            ),
+            aa_sigma_weight_floor=float(
+                getattr(loss_cfg, "aa_sigma_weight_floor", 0.1)
+            ),
             sigma_low_threshold=loss_cfg.sigma_low_threshold,
             no_bins=loss_cfg.no_bins,
             min_bin=loss_cfg.min_bin,
@@ -312,6 +321,13 @@ class PXDesignTrainer:
             weight_sc_pack=float(getattr(loss_cfg, "weight_sc_pack", 0.0)),
             weight_sc_global=float(getattr(loss_cfg, "weight_sc_global", 0.5)),
         )
+        if str(getattr(loss_cfg, "aa_sigma_weight_mode", "uniform")) != "uniform":
+            self._log(
+                "AA sigma loss weighting: "
+                f"mode={loss_cfg.aa_sigma_weight_mode} "
+                f"scale={float(loss_cfg.aa_sigma_weight_scale):g} "
+                f"floor={float(loss_cfg.aa_sigma_weight_floor):g}"
+            )
         # Post-refinement weights are passed per-call in forward_loss.
         self._weight_bb_post = float(getattr(loss_cfg, "weight_bb_post", 1.0))
         self._weight_aa_post = float(getattr(loss_cfg, "weight_aa_post", 1.0))
@@ -324,9 +340,46 @@ class PXDesignTrainer:
                 raise ValueError("FaMPNN Stage IV requires joint backward with AA/SC/BB parameter groups")
         warmup = int(getattr(cfg, "warmup_steps", 0))
 
-        def _make_adam(params):
+        # Stage III uses a much smaller LR for the coordinate/side-chain modules
+        # than the AA-head-only warmup.  Keep an optional, explicit AA-head LR so
+        # the classifier can continue adapting without raising the LR of the
+        # 260M-parameter coordinate model.  ``None`` preserves the historical
+        # single-group optimizer exactly.
+        aa_head_lr = getattr(cfg, "aa_head_lr", None)
+        aa_head_lr = None if aa_head_lr is None else float(aa_head_lr)
+        if aa_head_lr is not None and aa_head_lr <= 0:
+            raise ValueError(f"training.aa_head_lr must be > 0, got {aa_head_lr}")
+        aa_head_param_ids = {
+            id(p)
+            for name, p in self.raw_model.named_parameters()
+            if name.startswith(self.AA_HEAD_PREFIXES)
+        }
+        self.aa_head_params = [
+            p
+            for name, p in self.raw_model.named_parameters()
+            if p.requires_grad and name.startswith(self.AA_HEAD_PREFIXES)
+        ]
+        self._aa_head_param_ids = {id(p) for p in self.aa_head_params}
+
+        def _make_adam(params, *, split_aa_head: bool = False):
+            params = list(params)
+            adam_params: Any = params
+            if split_aa_head and aa_head_lr is not None:
+                head_params = [p for p in params if id(p) in aa_head_param_ids]
+                other_params = [p for p in params if id(p) not in aa_head_param_ids]
+                if not head_params:
+                    raise ValueError(
+                        "training.aa_head_lr was set, but the optimizer contains "
+                        "no design_residue_type_head parameters"
+                    )
+                adam_params = []
+                if other_params:
+                    adam_params.append({"params": other_params, "lr": float(cfg.lr)})
+                adam_params.append(
+                    {"params": head_params, "lr": aa_head_lr, "name": "aa_head"}
+                )
             return torch.optim.Adam(
-                params,
+                adam_params,
                 lr=float(cfg.lr),
                 betas=(0.9, 0.95),
                 weight_decay=float(getattr(cfg, "weight_decay", 0.0)),
@@ -376,7 +429,7 @@ class PXDesignTrainer:
             self.sc_params = sc_params
             self.bb_params = bb_params
             self.sc_optimizer = _make_adam(sc_params)
-            self.bb_optimizer = _make_adam(bb_params)
+            self.bb_optimizer = _make_adam(bb_params, split_aa_head=True)
             self.sc_lr_scheduler = _make_sched(self.sc_optimizer)
             self.bb_lr_scheduler = _make_sched(self.bb_optimizer)
             # Aliases so generic code (checkpoint/log) that reaches for a single
@@ -390,6 +443,12 @@ class PXDesignTrainer:
                 f"{sum(p.numel() for p in sc_params) / 1e6:.2f}M side-chain params, "
                 f"{sum(p.numel() for p in bb_params) / 1e6:.2f}M backbone-group params"
             )
+            if aa_head_lr is not None:
+                self._log(
+                    f"AA-head optimizer group: lr={aa_head_lr:g} "
+                    f"(backbone lr={float(cfg.lr):g}, "
+                    f"{sum(p.numel() for p in bb_params if id(p) in aa_head_param_ids) / 1e6:.2f}M params)"
+                )
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
             if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
@@ -397,10 +456,27 @@ class PXDesignTrainer:
                 params = optimizer_groups(self.raw_model)
             if not params:
                 raise ValueError("No trainable parameters")
-            self.optimizer = _make_adam(params)
+            self.optimizer = _make_adam(params, split_aa_head=True)
             self.lr_scheduler = _make_sched(self.optimizer)
             self._optimizers = [self.optimizer]
             self._schedulers = [self.lr_scheduler]
+            if aa_head_lr is not None:
+                self._log(
+                    f"AA-head optimizer group: lr={aa_head_lr:g} "
+                    f"(base lr={float(cfg.lr):g})"
+                )
+        aa_head_grad_clip = getattr(cfg, "aa_head_grad_clip_norm", None)
+        if aa_head_grad_clip is not None:
+            aa_head_grad_clip = float(aa_head_grad_clip)
+            if aa_head_grad_clip <= 0.0:
+                raise ValueError(
+                    "training.aa_head_grad_clip_norm must be > 0 when set, got "
+                    f"{aa_head_grad_clip}"
+                )
+            self._log(
+                f"AA-head independent gradient clip: {aa_head_grad_clip:g} "
+                f"(non-head global clip={float(getattr(cfg, 'grad_clip_norm', 0.0)):g})"
+            )
 
     def _split_sc_bb_params(self):
         """Partition trainable params into the Side-Chain group and the Backbone
@@ -577,12 +653,54 @@ class PXDesignTrainer:
             # (autograd.grad bypassed DDP's own all-reduce). No-op single-GPU.
             if self.train_mode == "alternating":
                 self._allreduce_alternating_grads()
+            aa_grad_norm = self._tensor_l2_norm(
+                p.grad for p in self.aa_head_params if p.grad is not None
+            )
             grad_clip = float(getattr(self.configs.training, "grad_clip_norm", 0.0))
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+            aa_head_grad_clip = getattr(
+                self.configs.training, "aa_head_grad_clip_norm", None
+            )
+            if aa_head_grad_clip is not None:
+                non_head_params = [
+                    p for p in self.model.parameters()
+                    if p.grad is not None and id(p) not in self._aa_head_param_ids
+                ]
+                global_grad_norm = (
+                    torch.nn.utils.clip_grad_norm_(non_head_params, grad_clip).detach()
+                    if grad_clip > 0 and non_head_params else None
+                )
+                if self.aa_head_params:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.aa_head_params, float(aa_head_grad_clip)
+                    )
+            elif grad_clip > 0:
+                global_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), grad_clip
+                ).detach()
+            else:
+                global_grad_norm = None
+            aa_clipped_grad_norm = self._tensor_l2_norm(
+                p.grad for p in self.aa_head_params if p.grad is not None
+            )
+            aa_before = [p.detach().clone() for p in self.aa_head_params]
             for opt in self._optimizers:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
+            aa_update_norm = self._tensor_l2_norm(
+                p.detach() - before
+                for p, before in zip(self.aa_head_params, aa_before)
+            )
+            aa_param_norm = self._tensor_l2_norm(
+                p.detach() for p in self.aa_head_params
+            )
+            loss_out["aa_head_grad_norm"] = aa_grad_norm
+            loss_out["aa_head_clipped_grad_norm"] = aa_clipped_grad_norm
+            loss_out["aa_head_update_norm"] = aa_update_norm
+            loss_out["aa_head_relative_update"] = aa_update_norm / aa_param_norm.clamp_min(
+                1e-12
+            )
+            if global_grad_norm is not None:
+                loss_out["global_grad_norm"] = global_grad_norm
             for sched in self._schedulers:
                 sched.step()
             if self.ema_wrapper is not None:
@@ -592,6 +710,13 @@ class PXDesignTrainer:
                 self.train_sampler.set_step(self.step)
         self.global_step += 1
         return loss_out
+
+    def _tensor_l2_norm(self, tensors: Iterable[torch.Tensor]) -> torch.Tensor:
+        """Compute an fp32 L2 norm without concatenating large parameter tensors."""
+        total = torch.zeros((), device=self.device, dtype=torch.float32)
+        for tensor in tensors:
+            total = total + tensor.detach().float().square().sum()
+        return total.sqrt()
 
     def _alternating_accumulate(self, loss_out: dict[str, torch.Tensor]) -> None:
         """One forward's worth of gradient for the alternating (Stage III) scheme.
@@ -729,6 +854,18 @@ class PXDesignTrainer:
         log_int = int(cfg.log_interval)
         eval_int = int(cfg.eval_interval)
         ckpt_int = int(cfg.checkpoint_interval)
+        # Metrics are produced per micro-batch, while ``self.step`` counts
+        # optimizer updates.  Keep the current accumulation window here so a
+        # training log represents the same effective batch that produced the
+        # optimizer update, rather than one arbitrary micro-batch from it.
+        train_metric_sums: dict[str, float] = {}
+        train_metric_counts: dict[str, int] = {}
+        # Source-specific AA metrics accumulate across the whole logging interval
+        # rather than one optimizer window.  With three mixed sources and only
+        # eight micro-batches/update, a single window often contains no example
+        # from one source and is too noisy to diagnose binder learning.
+        source_aa_sums: dict[str, dict[str, float]] = {}
+        source_aa_counts: dict[str, int] = {}
 
         while self.step < target_steps:
             for batch in self.train_dl:
@@ -745,11 +882,54 @@ class PXDesignTrainer:
                 loss_out = self.train_step(batch)
                 stepped = self.step != step_before
 
-                if self.step > 0 and self.step % log_int == 0:
-                    self._log(
-                        f"step={self.step} "
-                        + " ".join(f"{k}={v.detach().item():.4g}" if isinstance(v, torch.Tensor) else f"{k}={v:.4g}" for k, v in loss_out.items())
+                for key, value in loss_out.items():
+                    scalar = (
+                        float(value.detach().item())
+                        if isinstance(value, torch.Tensor)
+                        else float(value)
                     )
+                    train_metric_sums[key] = train_metric_sums.get(key, 0.0) + scalar
+                    train_metric_counts[key] = train_metric_counts.get(key, 0) + 1
+
+                source = str(batch.get("source_name", "unknown"))
+                source_sums = source_aa_sums.setdefault(source, {})
+                for key in ("aa_ce", "aa_acc"):
+                    if key in loss_out:
+                        value = loss_out[key]
+                        scalar = (
+                            float(value.detach().item())
+                            if isinstance(value, torch.Tensor)
+                            else float(value)
+                        )
+                        source_sums[key] = source_sums.get(key, 0.0) + scalar
+                source_aa_counts[source] = source_aa_counts.get(source, 0) + 1
+
+                if stepped:
+                    train_metrics = {
+                        key: value / max(1, train_metric_counts[key])
+                        for key, value in train_metric_sums.items()
+                    }
+                    if self.step > 0 and self.step % log_int == 0:
+                        source_metrics = {
+                            f"{source}_{key}": value
+                            / max(1, source_aa_counts[source])
+                            for source, metrics in source_aa_sums.items()
+                            for key, value in metrics.items()
+                        }
+                        self._log(
+                            f"step={self.step} "
+                            + " ".join(
+                                f"{key}={value:.4g}"
+                                for key, value in {
+                                    **train_metrics,
+                                    **source_metrics,
+                                }.items()
+                            )
+                        )
+                        source_aa_sums.clear()
+                        source_aa_counts.clear()
+                    train_metric_sums.clear()
+                    train_metric_counts.clear()
                 if stepped and eval_int > 0 and self.step > 0 and self.step % eval_int == 0:
                     metrics = self.evaluate()
                     # Per-protein first, then the set-wide mean, so the mean reads
@@ -1080,6 +1260,15 @@ class PXDesignTrainer:
                 self.lr_scheduler.load_state_dict(ckpt["scheduler"])
             self.step = int(ckpt.get("step", 0))
             self.global_step = int(ckpt.get("global_step", self.step))
+            # The sampler is constructed before the checkpoint is loaded.  A
+            # full resume must therefore advance it explicitly; otherwise the
+            # first resumed optimizer window is drawn from curriculum step 0
+            # before train_step() corrects it to checkpoint_step + 1.
+            if isinstance(
+                self.train_sampler,
+                (CurriculumSampler, CurriculumDistributedSampler),
+            ):
+                self.train_sampler.set_step(self.step)
             # A full resume restores the scheduler, and LambdaLR recomputes lr from
             # the base_lrs it stored -- so passing a new --lr has no effect unless we
             # rewrite those too. Decaying the rate is the normal way to collect the

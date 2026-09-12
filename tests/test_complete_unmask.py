@@ -10,11 +10,14 @@ feed back (the P3 fix — otherwise the commit loop is open-loop).
 
 Driven with the same stub model as test_cogenerate_init (no DiffusionModule/CUDA).
 """
+import types
+
+import pytest
 import torch
 
 from pxdesign_train.cogenerate import cogenerate
 from pxdesign_train.sampler import build_aa20_to_restype36
-from test_cogenerate_init import _FakeModel, _feat, PRED
+from test_cogenerate_init import N_ATOM, _FakeModel, _feat, PRED
 
 
 def test_complete_unmask_stays_fully_masked_and_reads_out_last_step(monkeypatch):
@@ -58,6 +61,79 @@ def test_complete_unmask_encodes_trunk_once(monkeypatch):
     _, xpb = build_aa20_to_restype36()
     assert seen[0][0].argmax().item() == xpb
     assert seen[0][1].argmax().item() == xpb
+
+
+def test_complete_unmask_exposes_all_one_trajectory_readouts(monkeypatch):
+    import protenix.model.protenix as pxm
+    monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
+
+    out = cogenerate(
+        _FakeModel(), _feat(), N_step=3,
+        aa_readout_mode="target_sigma", aa_readout_sigma=0.4,
+    )
+    assert set(out["aa_readouts"]) == {
+        "final", "target_sigma", "confidence_best"
+    }
+    assert out["aa_readout_mode"] == "target_sigma"
+    assert abs(float(out["aa_readouts"]["target_sigma"]["sigma"]) - 0.4) < 1e-5
+    assert torch.equal(
+        out["sequence"], out["aa_readouts"]["target_sigma"]["sequence"]
+    )
+
+
+def test_pxdesign_native_delegates_sampling_and_records_actual_sigmas(monkeypatch):
+    import protenix.model.protenix as pxm
+    monkeypatch.setattr(pxm, "update_input_feature_dict", lambda f: f, raising=False)
+
+    model = _FakeModel()
+    calls = {"native": 0}
+    original_diffusion_forward = model.diffusion_module.forward
+    optional_conditioning_seen = []
+
+    def strict_diffusion_forward(*, x_noisy, pair_z, p_lm, c_l, **kwargs):
+        optional_conditioning_seen.append((pair_z, p_lm, c_l))
+        return original_diffusion_forward(x_noisy=x_noisy, **kwargs)
+
+    model.diffusion_module.forward = strict_diffusion_forward
+
+    def native_sample(
+        self, *, denoise_net, input_feature_dict, s_inputs, s_trunk,
+        z_trunk, noise_schedule, N_sample, **_kw
+    ):
+        calls["native"] += 1
+        assert N_sample == 1
+        n_atom = input_feature_dict["atom_to_token_idx"].numel()
+        x = torch.zeros(1, n_atom, 3)
+        # Stand in for PXDesign's sampler and, importantly, call the supplied
+        # observer wrapper at the actual denoiser sigma each step.
+        for sigma in noise_schedule[:-1]:
+            x = denoise_net(
+                x_noisy=x,
+                t_hat_noise_level=sigma.reshape(1),
+                input_feature_dict=input_feature_dict,
+                s_inputs=s_inputs,
+                s_trunk=s_trunk,
+                z_trunk=z_trunk,
+            )
+        return x
+
+    model.sample_diffusion = types.MethodType(native_sample, model)
+    out = cogenerate(
+        model,
+        _feat(),
+        N_step=2,
+        sampler_mode="pxdesign_native",
+        aa_readout_mode="target_sigma",
+        aa_readout_sigma=0.4,
+    )
+
+    assert calls["native"] == 1
+    assert optional_conditioning_seen
+    assert all(values == (None, None, None) for values in optional_conditioning_seen)
+    assert out["sampler_mode"] == "pxdesign_native"
+    assert [row["sigma"] for row in out["trajectory"]] == pytest.approx([1.0, 0.4])
+    assert out["aa_readouts"]["target_sigma"]["sigma"] == pytest.approx(0.4)
+    assert out["coordinate"].shape == (N_ATOM, 3)
 
 
 def test_sequential_commits_progressively_and_reencodes_trunk(monkeypatch):

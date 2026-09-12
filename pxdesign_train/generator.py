@@ -34,6 +34,7 @@ def sample_diffusion_training(
     diffusion_chunk_size: Optional[int] = None,
     inplace_safe: bool = False,
     attn_chunk_size: Optional[int] = None,
+    clean_coordinate_input: bool = False,
     precomputed_input: Optional[
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     ] = None,
@@ -58,6 +59,11 @@ def sample_diffusion_training(
         s_inputs / s_trunk / z_trunk: from `DesignConditionEmbedder`.
         N_sample: how many independent (rotation, noise) draws per macro-batch
             item. The PXDesign report's "diffusion batch size 8" maps to N_sample=8.
+        clean_coordinate_input: diagnostic mode for AA prediction. Still samples
+            and passes a strictly positive sigma to the diffusion network, but
+            does not perturb the augmented native coordinates with Gaussian
+            noise. This tests whether residue identity is learnable when the
+            backbone itself is exact, without ever evaluating EDM at sigma=0.
         precomputed_input: `(x_gt_aug, sigma, x_input)` supplied by the caller.
             Skips steps 1-3 and denoises `x_input` directly. Stage III uses this
             to feed the first backbone pass's prediction into the refinement pass
@@ -94,9 +100,15 @@ def sample_diffusion_training(
         # 2. Sample σ per (batch, sample) from EDM log-normal.
         sigma = noise_sampler(size=(*batch_shape, N_sample), device=device).to(dtype)
 
-        # 3. Add Gaussian noise of scale σ.
-        noise = torch.randn_like(x_gt_aug, dtype=dtype) * sigma[..., None, None]
-        x_input = x_gt_aug + noise
+        # 3. Add Gaussian noise of scale σ, except for the explicit clean-
+        # coordinate AA diagnostic. Sigma deliberately remains non-zero in that
+        # mode: it is still consumed by EDM preconditioning/time embeddings,
+        # where a literal zero can make log(sigma) numerically invalid.
+        if clean_coordinate_input:
+            x_input = x_gt_aug
+        else:
+            noise = torch.randn_like(x_gt_aug, dtype=dtype) * sigma[..., None, None]
+            x_input = x_gt_aug + noise
 
     if input_feature_dict.get("stage4_fixed_context", False):
         design = input_feature_dict["design_token_mask"].bool()

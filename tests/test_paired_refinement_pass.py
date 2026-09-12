@@ -33,6 +33,14 @@ class _Recorder:
         return x_noisy * 0.5
 
 
+class _FixedSampler:
+    def __init__(self, value=0.04):
+        self.value = value
+
+    def __call__(self, size, device):
+        return torch.full(size, self.value, device=device)
+
+
 def _args(n_atom=7):
     from pxdesign_train.generator import TrainingNoiseSampler
 
@@ -65,6 +73,26 @@ def test_ordinary_calls_draw_independently_without_precomputed_input():
     )
     assert not torch.allclose(sigma_a, sigma_b), "sigma happened to repeat; reseed"
     assert not torch.allclose(aug_a, aug_b), "augmentation happened to repeat"
+
+
+def test_clean_coordinate_input_keeps_positive_sigma_without_coordinate_noise():
+    """Clean-AA diagnostic changes coordinates, not EDM time conditioning."""
+    from pxdesign_train.generator import sample_diffusion_training
+
+    net = _Recorder()
+    kw = _args()
+    kw["noise_sampler"] = _FixedSampler(0.04)
+    target, _, sigma, coordinate_input = sample_diffusion_training(
+        denoise_net=net,
+        s_trunk=torch.zeros(7, 1),
+        clean_coordinate_input=True,
+        **kw,
+    )
+
+    assert torch.equal(coordinate_input, target)
+    assert torch.equal(net.calls[0][0], target)
+    assert torch.all(sigma == 0.04)
+    assert torch.all(net.calls[0][1] == 0.04)
 
 
 def test_precomputed_input_refines_the_first_pass_prediction():

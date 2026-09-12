@@ -1,0 +1,41 @@
+# TNFa -- AlphaProteo binder-design target
+#
+# Source: AlphaProteo (Zambaldi et al., arXiv:2409.08022) Table S1, p38 --
+# "Binder design problem specifications for in silico benchmarking and
+# experimental testing". PDB ID, chain/residue ranges and hotspots are
+# transcribed from there; PXDesign's technical report Table 3 reproduces the
+# same values for the six targets it lists, so the two agree except where
+# noted.
+#
+# PXDesign's technical report Table 3 lists A31, A32, A113, C73, C87 for this
+# target -- three hotspots more than AlphaProteo's A113, C73. A-CODE says it
+# follows PXDesign's protocol, so PXDesign's set is what reproduces its row.
+# This file now carries PXDesign's wider set, because the benchmark run it feeds
+# is being compared against PXDesign's row. AlphaProteo Table S1 as published is
+# the narrow set A113, C73; switch back to it only for a run that is not being
+# compared to PXDesign, and never mix the two in one table.
+#
+# AlphaProteo's own benchmark binder length for this target: 50-120.
+# A-CODE (arXiv:2605.03360 S4.2) instead samples 80-130 uniformly across all
+# ten targets, 328-728 designs each. `binder_length` below follows A-CODE,
+# because reproducing its Table 4 is the point; AlphaProteo's per-target range
+# is recorded above so the other convention stays available.
+#
+# MSA is left unset. PXDesign calls it optional but recommended, and its
+# published numbers were produced with one, so a run without MSA is not
+# comparable to the Table 4 baselines.
+
+target:
+  file: "./benchmarks/alphaproteo10/structures/1tnf.cif"
+  chains:
+    A:
+      crop: ["12-157"]
+      hotspots: [31, 32, 113]
+    B:
+      crop: ["12-157"]
+      # no hotspot on this chain; the epitope sits on the chain(s) above
+    C:
+      crop: ["12-157"]
+      hotspots: [73, 87]
+
+binder_length: 105   # midpoint of A-CODE's 80-130; sweep the range for a full run

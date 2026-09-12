@@ -102,6 +102,30 @@ def test_max_crop_retries_is_capped_by_provider_length():
     assert provider.calls[0] == 0
 
 
+def test_retry_skips_wrapped_cif_parse_failure():
+    """A malformed PINDER CIF must not terminate a multi-million-row run."""
+    class _Provider:
+        def __init__(self):
+            self.calls = []
+
+        def __len__(self):
+            return 32
+
+        def __getitem__(self, idx):
+            self.calls.append(idx)
+            if len(self.calls) == 1:
+                raise RuntimeError("Failed to parse CIF: bad.cif")
+            return ("atoms", "tokens", {}, {}, lambda _aa: "A")
+
+    provider = _Provider()
+    ds = DesignSourceDataset(provider=provider, source_name="stub", max_crop_retries=4)
+    ds._get_one = lambda i: (provider[i], {"sample_id": f"p{i}"})[1]
+
+    item = ds[3]
+    assert item["sample_id"] != "p3"
+    assert provider.calls[0] == 3
+
+
 class _StubAtomArray:
     """Only what `_assert_binder_centres_are_wellformed` touches."""
 

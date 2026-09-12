@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import logging
+import math
 import os
 import sys
 from copy import deepcopy
@@ -395,6 +396,9 @@ def build_pinder_source_components(args: argparse.Namespace, manifest: Path):
         manifest_path=manifest,
         pinder_root=Path(args.pinder_root),
         cif_cache_dir=Path(args.pinder_cif_cache),
+        pdb_cache_dir=(
+            Path(args.pinder_pdb_cache) if args.pinder_pdb_cache else None
+        ),
         archive_path=Path(args.pinder_archive),
         split="val" if getattr(args, "_dataset_role", "train") == "validation" else "train",
         limit=int(args.complex_limit_index),
@@ -645,7 +649,11 @@ def build_configs(args: argparse.Namespace, device):
     configs.training.num_workers = int(args.num_workers)
     configs.training.iters_to_accumulate = int(args.iters_to_accumulate)
     configs.training.grad_clip_norm = float(args.grad_clip_norm)
-    configs.training.resume_lr = args.resume_lr
+    configs.training.aa_head_grad_clip_norm = getattr(
+        args, "aa_head_grad_clip_norm", None
+    )
+    configs.training.resume_lr = getattr(args, "resume_lr", None)
+    configs.training.aa_head_lr = getattr(args, "aa_head_lr", None)
     configs.training.trainable_param_keywords = []
 
     configs.residue_type.mask_mode = args.aa_mask_mode
@@ -654,6 +662,53 @@ def build_configs(args: argparse.Namespace, device):
     configs.residue_type.mask_max_prob = float(args.aa_mask_max_prob)
     configs.residue_type.input_source = args.aa_input_source
     configs.residue_type.trunk_grad_scale = float(args.trunk_grad_scale)
+    forced_sigmas_text = str(getattr(args, "aa_forced_sigmas", "") or "")
+    forced_sigmas = [
+        float(value) for value in forced_sigmas_text.split(",") if value.strip()
+    ]
+    if any((not math.isfinite(value)) or value <= 0.0 for value in forced_sigmas):
+        raise ValueError(
+            "--aa-forced-sigmas must contain finite positive values, got "
+            f"{forced_sigmas_text!r}"
+        )
+    if len(forced_sigmas) > int(configs.training.diffusion_batch_size):
+        raise ValueError(
+            "--aa-forced-sigmas contains more values than diffusion_batch_size: "
+            f"{len(forced_sigmas)} > {int(configs.training.diffusion_batch_size)}"
+        )
+    # Keep this field a string: Protenix's ConfigManager cannot infer the type
+    # of an empty-list default, while ml_collections refuses changing the parsed
+    # field from str to list. ProtenixDesignTrain parses the CSV at construction.
+    configs.residue_type.forced_sigmas = ",".join(
+        f"{value:g}" for value in forced_sigmas
+    )
+    clean_coordinate_input = bool(
+        getattr(args, "aa_clean_coordinate_input", False)
+    )
+    if clean_coordinate_input:
+        if args.training_stage not in ("aa_head_warmup", "aa_head_on_stage2"):
+            raise ValueError(
+                "--aa-clean-coordinate-input is a diagnostic supported only "
+                "when training_stage is aa_head_warmup or aa_head_on_stage2"
+            )
+        if len(forced_sigmas) != int(configs.training.diffusion_batch_size):
+            raise ValueError(
+                "--aa-clean-coordinate-input requires one positive "
+                "--aa-forced-sigmas value per diffusion sample so the clean "
+                "backbone test has an explicit, fixed conditioning level: "
+                f"got {len(forced_sigmas)}, expected "
+                f"{int(configs.training.diffusion_batch_size)}"
+            )
+    configs.residue_type.clean_coordinate_input = clean_coordinate_input
+    configs.loss.aa_sigma_weight_mode = str(
+        getattr(args, "aa_sigma_weight_mode", "uniform")
+    )
+    configs.loss.aa_sigma_weight_scale = float(
+        getattr(args, "aa_sigma_weight_scale", 0.4)
+    )
+    configs.loss.aa_sigma_weight_floor = float(
+        getattr(args, "aa_sigma_weight_floor", 0.1)
+    )
 
     configs.loss.align_before_mse = bool(device.type == "cuda")
     if args.disable_aa_loss:
@@ -671,6 +726,9 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.template_provider = args.template_provider
         configs.sidechain.template_init = not args.disable_template_init
         configs.sidechain.trunk_grad_scale = float(args.sc_trunk_grad_scale)
+        configs.sidechain.detach_type_logits_for_sidechain = bool(
+            getattr(args, "detach_aa_logits_for_sidechain", False)
+        )
         if args.sc_frame_aware_head is not None:
             configs.sidechain.frame_aware_head = bool(args.sc_frame_aware_head)
         if args.sc_centre_coord_input is not None:
@@ -945,6 +1003,30 @@ def build_configs(args: argparse.Namespace, device):
             configs.loss.weight_bb_post = 0.0
         if args.stage4_inference_rounds < 2:
             raise ValueError("Stage IV production inference requires at least two outer rounds")
+
+    unfreeze_last = int(getattr(args, "unfreeze_last_diffusion_blocks", 0))
+    if unfreeze_last < 0:
+        raise ValueError("--unfreeze-last-diffusion-blocks must be >= 0")
+    if unfreeze_last:
+        if args.training_stage != "aa_head_on_stage2":
+            raise ValueError(
+                "--unfreeze-last-diffusion-blocks is currently supported only "
+                "for the aa_head_on_stage2 training stage"
+            )
+        n_blocks = int(configs.model.diffusion_module.transformer.n_blocks)
+        if unfreeze_last > n_blocks:
+            raise ValueError(
+                "--unfreeze-last-diffusion-blocks exceeds the configured trunk "
+                f"depth: {unfreeze_last} > {n_blocks}"
+            )
+        first = n_blocks - unfreeze_last
+        configs.training.trainable_param_keywords.extend(
+            f"diffusion_module.diffusion_transformer.blocks.{idx}."
+            for idx in range(first, n_blocks)
+        )
+        # aa_head_on_stage2 normally pins this to zero. Restore the explicit CLI
+        # scale so AA loss can adapt only the selected final blocks.
+        configs.residue_type.trunk_grad_scale = float(args.trunk_grad_scale)
     return configs
 
 
@@ -1139,7 +1221,8 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         # is teacher-forced from GT backbone frames.
         args.predicted_frame = False
         args.per_sigma = True
-        args.trunk_grad_scale = 0.0
+        if int(getattr(args, "unfreeze_last_diffusion_blocks", 0)) == 0:
+            args.trunk_grad_scale = 0.0
     elif args.training_stage in ("coevolution", "predicted_mask", "stage4_fampnn"):
         args.disable_sidechain = False
         args.disable_aa_loss = False
@@ -1176,6 +1259,7 @@ DEFAULT_PINDER_ROOT = os.environ.get(
 DEFAULT_PINDER_CIF_CACHE = os.environ.get(
     "PINDER_CIF_CACHE", os.path.join(DEFAULT_PINDER_ROOT, "cif_cache")
 )
+DEFAULT_PINDER_PDB_CACHE = os.environ.get("PINDER_PDB_CACHE", "")
 DEFAULT_PINDER_ARCHIVE = os.environ.get(
     "PINDER_ARCHIVE", os.path.join(DEFAULT_PINDER_ROOT, "raw", "pdbs.zip")
 )
@@ -1254,6 +1338,12 @@ def parse_args() -> argparse.Namespace:
         help="Persistent cache for lazy PINDER PDB-to-mmCIF conversion.",
     )
     p.add_argument(
+        "--pinder-pdb-cache",
+        default=DEFAULT_PINDER_PDB_CACHE,
+        help="Writable cache for PDBs lazily extracted from --pinder-archive. "
+             "Defaults to <pinder-root>/pdbs for backward compatibility.",
+    )
+    p.add_argument(
         "--pinder-archive",
         default=DEFAULT_PINDER_ARCHIVE,
         help="Official structure archive used when a selected PDB has not been extracted.",
@@ -1280,6 +1370,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=1000)
     p.add_argument("--train-samples-per-epoch", type=int, default=1000)
     p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument(
+        "--aa-head-lr",
+        type=float,
+        default=None,
+        help="Optional separate learning rate for design_residue_type_head. "
+             "The remaining backbone/side-chain parameters continue to use --lr.",
+    )
     p.add_argument("--warmup-steps", type=int, default=200)
     p.add_argument("--checkpoint-interval", type=int, default=200)
     p.add_argument("--log-interval", type=int, default=10)
@@ -1303,6 +1400,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ema-decay", type=float, default=0.999)
     p.add_argument("--iters-to-accumulate", type=int, default=1)
     p.add_argument("--grad-clip-norm", type=float, default=0.0)
+    p.add_argument(
+        "--aa-head-grad-clip-norm",
+        type=float,
+        default=None,
+        help="Optional independent AA-head gradient clip. When set, the global "
+             "clip excludes design_residue_type_head so unrelated structure "
+             "gradients no longer rescale its gradient.",
+    )
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--dtype", default="bf16", choices=["fp32", "bf16", "fp16"])
     p.add_argument("--device", default="cuda")
@@ -1329,6 +1434,36 @@ def parse_args() -> argparse.Namespace:
         choices=["s_inputs", "diffusion_internal"],
     )
     p.add_argument("--trunk-grad-scale", type=float, default=1.0)
+    p.add_argument(
+        "--unfreeze-last-diffusion-blocks",
+        type=int,
+        default=0,
+        help="With aa_head_on_stage2, also train this many final main diffusion "
+             "transformer blocks. Their optimizer LR is --lr; the AA head keeps "
+             "--aa-head-lr, and --trunk-grad-scale controls AA gradient into them.",
+    )
+    p.add_argument(
+        "--aa-forced-sigmas",
+        default="",
+        help="Comma-separated sigma values that replace the first training "
+             "diffusion samples, e.g. 0.04,0.4. Empty preserves EDM sampling.",
+    )
+    p.add_argument(
+        "--aa-clean-coordinate-input",
+        action="store_true",
+        help="AA diagnostic: do not add coordinate noise to the augmented native "
+             "backbone, while retaining the positive conditioning values from "
+             "--aa-forced-sigmas. Requires aa_head_on_stage2 and exactly one "
+             "forced sigma per diffusion sample.",
+    )
+    p.add_argument(
+        "--aa-sigma-weight-mode",
+        choices=["uniform", "inverse_quadratic"],
+        default="uniform",
+        help="Coordinate-sigma weighting used by the AA CE objective.",
+    )
+    p.add_argument("--aa-sigma-weight-scale", type=float, default=0.4)
+    p.add_argument("--aa-sigma-weight-floor", type=float, default=0.1)
     p.add_argument(
         "--disable-aa-loss",
         action="store_true",
@@ -1366,6 +1501,13 @@ def parse_args() -> argparse.Namespace:
              "silently ignored.",
     )
     p.add_argument("--sc-trunk-grad-scale", type=float, default=1.0)
+    p.add_argument(
+        "--detach-aa-logits-for-sidechain",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Feed the same AA probabilities to S_phi but stop S_phi/B_post losses "
+             "from backpropagating into the AA head. The primary AA CE is unchanged.",
+    )
     p.add_argument(
         "--sc-edm", action=argparse.BooleanOptionalAction, default=None,
         help="EDM side-chain diffusion: sample sigma, precondition, and feed "

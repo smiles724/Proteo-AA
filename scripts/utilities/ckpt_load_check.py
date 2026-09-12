@@ -38,6 +38,15 @@ def main():
         state = obj
     print(f"checkpoint tensors: {len(state)}")
 
+    # Official PXDesign checkpoints were saved from DDP and therefore prefix
+    # every model key with ``module.``.  The training/evaluation loader removes
+    # this prefix when loading on one process; mirror that behaviour here so
+    # the compatibility report does not incorrectly mark every tensor as both
+    # missing and unexpected.
+    if any(k.startswith("module.") for k in state):
+        state = {k.removeprefix("module."): v for k, v in state.items()}
+        print("stripped DDP 'module.' prefix")
+
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"\nMISSING keys (in model, not in ckpt): {len(missing)}")
     for k in missing[:12]:

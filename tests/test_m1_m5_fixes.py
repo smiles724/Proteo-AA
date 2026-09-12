@@ -168,6 +168,21 @@ def test_post_aa_absent_gives_zero_and_no_leak_term():
 
 # ---------------- Per-sample (per-sigma) AA loss ----------------
 
+def test_forced_sigma_sampler_replaces_only_requested_slots():
+    from pxdesign_train.model import ForcedSigmaNoiseSampler
+
+    class Base:
+        marker = "preserved"
+
+        def __call__(self, size, device=torch.device("cpu")):
+            return torch.arange(size[-1], device=device).float().expand(*size).clone()
+
+    sampler = ForcedSigmaNoiseSampler(Base(), [0.04, 0.4])
+    sigma = sampler(torch.Size([2, 4]))
+    assert torch.allclose(sigma[:, :2], torch.tensor([[0.04, 0.4], [0.04, 0.4]]))
+    assert torch.equal(sigma[:, 2:], torch.tensor([[2.0, 3.0], [2.0, 3.0]]))
+    assert sampler.marker == "preserved"
+
 def test_aa_loss_per_sample_equals_mean_of_per_sample_ce():
     """AA loss over [B, N_sample, L, 20] == mean of per-sample cross-entropy."""
     import torch.nn.functional as F
@@ -211,6 +226,51 @@ def test_aa_loss_per_sample_batch_two_matches_reference():
     assert torch.allclose(ce, ref, atol=1e-5)
     ce.backward()
     assert torch.isfinite(logits.grad).all()
+
+
+def test_aa_inverse_quadratic_sigma_weighting_prefers_low_noise():
+    """A deliberately good low-sigma prediction must dominate a bad high one."""
+    import torch.nn.functional as F
+    from pxdesign_train.loss import PXDesignLoss
+
+    clean = torch.tensor([[3]])
+    mask = torch.ones(1, 1)
+    logits = torch.zeros(1, 2, 1, 20, requires_grad=True)
+    with torch.no_grad():
+        logits[0, 0, 0, 3] = 5.0   # sigma=0.04: correct and confident
+        logits[0, 1, 0, 7] = 5.0   # sigma=4.0: wrong and confident
+    sigma = torch.tensor([[0.04, 4.0]])
+
+    uniform = PXDesignLoss(align_before_mse=False)
+    weighted = PXDesignLoss(
+        align_before_mse=False,
+        aa_sigma_weight_mode="inverse_quadratic",
+        aa_sigma_weight_scale=0.4,
+        aa_sigma_weight_floor=0.1,
+    )
+    ce_uniform = uniform._aa_term(logits, clean, mask, sigma=sigma)[0]
+    ce_weighted = weighted._aa_term(logits, clean, mask, sigma=sigma)[0]
+    ref_low = F.cross_entropy(logits[0, 0], clean[0])
+    assert ce_weighted < ce_uniform
+    assert torch.abs(ce_weighted - ref_low) < torch.abs(ce_uniform - ref_low)
+    ce_weighted.backward()
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_aa_sigma_diagnostics_report_only_populated_buckets():
+    from pxdesign_train.loss import PXDesignLoss
+
+    logits = torch.randn(1, 4, 3, 20)
+    clean = torch.randint(0, 20, (1, 3))
+    mask = torch.ones(1, 3)
+    sigma = torch.tensor([[0.04, 0.4, 2.0, 8.0]])
+    metrics = PXDesignLoss(align_before_mse=False)._aa_sigma_diagnostics(
+        logits, clean, mask, sigma
+    )
+    for bucket in ("lt_0p1", "0p1_1", "1_4", "ge_4"):
+        assert f"aa_ce_sigma_{bucket}" in metrics
+        assert f"aa_acc_sigma_{bucket}" in metrics
+        assert metrics[f"aa_n_sigma_{bucket}"].item() == 3
 
 
 def test_aa_head_broadcasts_over_sample_axis():

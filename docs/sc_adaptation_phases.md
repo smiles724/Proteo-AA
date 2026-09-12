@@ -32,8 +32,19 @@ disabled in these recipes and validation explicitly reports raw weights.
 
 ## Launch and resume
 
-From this checkout, create `logs/training` before `sbatch`. No launcher selects a
-checkpoint from a running job or submits the next phase automatically.
+From this checkout, create `logs/training` before `sbatch`. The ordinary phase
+launchers require an explicitly selected checkpoint and do not inspect running
+jobs.
+
+For an explicitly approved warm-up handoff, submit the selector as an `afterok`
+dependency. It reads the completed warm-up log, chooses the checkpoint with the
+lowest aggregate `val_loss`, verifies that checkpoint, and records its path and
+hash in the destination checkpoint provenance:
+
+```bash
+WARMUP_JOB_ID=114967 sbatch --dependency=afterok:114967 \
+  scripts/training/slurm_sc_complex_adapt_after_warmup_hai.sh
+```
 
 ```bash
 export PROTEOAA_REPO=/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases

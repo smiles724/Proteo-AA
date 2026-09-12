@@ -84,6 +84,7 @@ def build_sidechain_context(
     radius: float = 10.0,
     max_atoms: int = 4096,
     exclude_atom_mask: Optional[torch.Tensor] = None,  # [B, N_atom] bool — atoms to DROP
+    atom_present: Optional[torch.Tensor] = None,  # native observations; absent for generated coordinates
 ):
     """Assemble everything S_phi needs to see the receptor / motif / ligand.
 
@@ -114,21 +115,27 @@ def build_sidechain_context(
     is_binder = (bb_atom_idx[..., :3] >= 0).all(dim=-1)                 # [B, L]
     center_xyz = xyz.gather(1, center_idx.clamp_min(0)[..., None].expand(-1, -1, 3))
     ctx_tok = (center_idx >= 0) & ~is_binder
+    present = torch.isfinite(xyz).all(-1)
+    if atom_present is not None:
+        present = present & atom_present.bool()
+    center_present = present.gather(1, center_idx.clamp_min(0)) & (center_idx >= 0)
+    ctx_tok = ctx_tok & center_present
+    center_xyz = torch.where(center_present[..., None], center_xyz, 0.)
 
     if ca is None:
         ca_out = center_xyz.detach()
     else:
         ca_out = torch.where(is_binder[..., None], ca, center_xyz.detach())
 
-    atom_valid = (atom_to_token >= 0) & (atom_to_token < L)
+    atom_valid = (atom_to_token >= 0) & (atom_to_token < L) & present
     if exclude_atom_mask is not None:
         atom_valid = atom_valid & ~exclude_atom_mask.to(
             device=atom_valid.device, dtype=torch.bool
         )
     ctx_atoms = select_context_atoms(
         ref_xyz=center_xyz,
-        ref_mask=is_binder,
-        atom_xyz=xyz,
+        ref_mask=is_binder & center_present,
+        atom_xyz=torch.where(present[..., None], xyz, 0.),
         atom_mask=atom_valid,
         atom_group=atom_to_token,
         radius=radius,

@@ -16,6 +16,7 @@ def main():
     p.add_argument('--fampnn-checkpoint',required=True)
     p.add_argument('--data-root',required=True)
     p.add_argument('--crop-size',type=int,default=384)
+    p.add_argument('--native-sc-augmentation',action='store_true')
     a=p.parse_args()
     root=Path(__file__).resolve().parents[2];sys.path.insert(0,str(root))
     spec=importlib.util.spec_from_file_location('training_driver',root/'scripts/training/train_protenix_monomer.py')
@@ -33,6 +34,8 @@ def main():
         '--dtype','bf16','--num-workers','0','--eval-num-workers','0','--eval-samples','2',
         '--eval-interval','1','--warmup-steps','0','--stage4-sc-lr','5e-5','--ema-decay','0',
         '--output-dir',str(output),'--train-samples-per-epoch','2']
+    if a.native_sc_augmentation:
+        sys.argv.append('--stage4-native-sc-augmentation')
     args=driver.parse_args();driver.apply_training_stage_args(args)
     torch.manual_seed(17);torch.set_num_threads(4);torch.set_num_interop_threads(1)
     config=driver.build_configs(args,torch.device('cuda'))
@@ -69,13 +72,44 @@ def main():
     with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16):
         out=model(input_feature_dict=feat,label_dict=labels,mode='train')
     assert out['supervised_sc']
-    assert torch.equal(out['sc_input_backbone'][0],labels['coordinate'])
-    assert torch.equal(out['feature_xyz'][0,0],labels['coordinate'])
+    expected_feat, expected_labels = feat, labels
+    if a.native_sc_augmentation:
+        from pxdesign_train.sc_augmentation import transform_native_sc_inputs
+        transform = out['native_rigid_transform']
+        expected_feat, expected_labels = transform_native_sc_inputs(feat, labels, **transform)
+        assert out['sc_rotation_augmented'] == 1
+    assert torch.equal(out['sc_input_backbone'][0],expected_labels['coordinate'])
+    assert torch.equal(out['feature_xyz'][0,0],expected_labels['coordinate'])
     assert torch.equal(out['sc_input_types'],feat['aa_clean'])
-    torch.testing.assert_close(out['sc_frame_R'].reshape_as(feat['sc_frame_R']),feat['sc_frame_R'])
-    torch.testing.assert_close(out['sc_frame_t'].reshape_as(feat['sc_frame_t']),feat['sc_frame_t'])
+    torch.testing.assert_close(out['sc_frame_R'].reshape_as(feat['sc_frame_R']),expected_feat['sc_frame_R'])
+    torch.testing.assert_close(out['sc_frame_t'].reshape_as(feat['sc_frame_t']),expected_feat['sc_frame_t'])
     assert torch.equal(restype,feat['restype'])
     protocol=out['protocol'];del out
+    # Whole-model incomplete-backbone test, including q-feedback cache indices.
+    # Keep N/CA/C valid and O's atom index present: the observation mask must
+    # exclude O even though a coordinate row exists in the structure.
+    missing_o = dict(feat)
+    missing_o['sc_bb_observed_mask'] = feat['sc_bb_observed_mask'].clone()
+    missing_o['sc_bb_coords'] = feat['sc_bb_coords'].clone()
+    residue=int((feat['sc_frame_valid'] & (feat['sc_bb_atom_idx'][:,3]>=0)).nonzero()[0])
+    missing_o['sc_bb_observed_mask'][residue,3]=False
+    model.eval()
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        torch.manual_seed(99)
+        with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16):
+            base=model(input_feature_dict=missing_o,label_dict=labels,mode='train')
+        missing_o['sc_bb_coords'][residue,3]=float('nan')
+        torch.manual_seed(99)
+        with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16):
+            hidden=model(input_feature_dict=missing_o,label_dict=labels,mode='train')
+        torch.testing.assert_close(base['sc_pred_global'],hidden['sc_pred_global'])
+        bbmask=hidden['sc_bb_context_mask'].reshape(-1,4)
+        assert bbmask[residue,:3].all() and not bbmask[residue,3]
+        if model._q_bb_idx_cache is not None:
+            assert model._q_bb_idx_cache.reshape(-1,4)[residue,3] == -1
+        assert hidden['sc_rotation_augmented'] == 0
+    del base,hidden
+    model.train();apply_phase(model)
     # Real-model regression: observation changes cannot affect the packer's
     # attention/output. An invalid native frame must gate every SC output/loss.
     bad_feat=dict(feat)
@@ -112,6 +146,32 @@ def main():
         losses.append({k:float(v) for k,v in loss.items()})
     assert not torch.equal(before,parameter)
     assert frozen==digest()
+    # Measured equivariance error, not an assumption that augmentation makes
+    # this architecture equivariant. Matched random draws, one real monomer,
+    # three independently sampled rotations around its observed-atom center.
+    from pxdesign_train.sc_augmentation import random_rigid_transform, transform_native_sc_inputs
+    model.eval()
+    rotation_rmsds=[]
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        torch.manual_seed(191)
+        with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16):
+            reference=model(input_feature_dict=feat,label_dict=labels,mode='train')
+        xyz=labels['coordinate'].float();obs=labels['coordinate_mask'].bool()
+        center=xyz[obs].mean(0)
+        for seed in (201,202,203):
+            torch.manual_seed(seed)
+            R,_=random_rigid_transform(xyz,obs,translation_scale=0.)
+            t=center-R@center
+            rotated_feat,rotated_labels=transform_native_sc_inputs(feat,labels,R,t)
+            torch.manual_seed(191)
+            with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16):
+                rotated=model(input_feature_dict=rotated_feat,label_dict=rotated_labels,mode='train')
+            back=(rotated['sc_pred_global'].float()-t)@R
+            mask=reference['sc_model_mask'].bool()
+            error=(back-reference['sc_pred_global'].float()).square().sum(-1)
+            rotation_rmsds.append(float((error[mask].mean()).sqrt()))
+        assert all(torch.isfinite(torch.tensor(rotation_rmsds)))
+    del reference,rotated
     # Exercise the real held-out monomer loader, not the training smoke batch.
     eval_loader,n_eval,eval_index=driver.build_eval_dataloader(args,output)
     trainer.eval_dl=eval_loader
@@ -131,6 +191,10 @@ def main():
         strict_backbone_restype_unchanged=True,save_resume_and_reconstruction=True,
         observation_independent_forward=True,invalid_native_frame_gated=True,
         masked_nan_forward_and_backward_finite=True,
+        missing_oxygen_full_model_gated=True,
+        rotation_consistency=dict(rmsd_angstrom=rotation_rmsds,mean_rmsd_angstrom=sum(rotation_rmsds)/3,
+            scope='scratch SC after two updates, one real monomer, matched RNG; not a quality improvement test'),
+        augmentation_train_only_verified=True,
         component_origins=model.component_origins)
     (output/'smoke_result.json').write_text(json.dumps(result,indent=2,default=str)+'\n')
     print('GT_SC_WARMUP_SMOKE_PASSED',json.dumps(result,default=str),flush=True)

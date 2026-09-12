@@ -97,7 +97,7 @@ class ProteoAACycle:
         feat.update(sc_atom_name_ids=ids, sc_slot_mask=chemistry,
                     sc_atom_mask=torch.zeros_like(chemistry))
         for key in ("aa_clean", "sc_gt_local", "sc_frame_R", "sc_frame_t", "sc_bb_coords",
-                    "sc_frame_valid", "sc_bb_observed_mask", "sc_observed_mask", "sc_loss_mask", "sc_chemical_mask"):
+                    "sc_frame_valid", "sc_bb_observed_mask", "sc_observed_mask", "sc_loss_mask", "sc_chemical_mask", "sc_context_atom_mask"):
             feat.pop(key, None)
         h = state.backbone_features["h"]
         logits = state.backbone_features.get("aa_logits")
@@ -190,7 +190,8 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
         aa_logits=logits,aa_logits_reduced=logits.mean(-3),sigma=features["sigma"],
         x_denoised=xyz[None],assigned_aa=native[None],backbone_source="native")
     model._q_skip_cache=features.get("q")
-    pack_feat=dict(feat,design_token_mask=sc_design)
+    pack_feat=dict(feat,design_token_mask=sc_design,
+                   sc_context_atom_mask=labels.get("coordinate_mask", torch.isfinite(labels["coordinate"]).all(-1)))
     model.pack_backbone_state(pack_feat,pack)
     mask=feat["sc_atom_mask"].bool() & feat["sc_frame_valid"].bool()[..., None] & pack["sc_generation_mask"]
     mse=sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(),feat["sc_gt_local"].float(),
@@ -198,13 +199,16 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
     return dict(supervised_sc=True,sc_gt_mse=mse,sc_observed_atoms=mask.sum(),
         sc_skipped_noncanonical=(design&~canonical).sum(),
         sc_invalid_native_frames=(design&~feat["sc_frame_valid"].bool()).sum(),
+        sc_rotation_augmented=xyz.new_tensor(float('_native_rigid_transform' in feat)),
+        native_rigid_transform=feat.get('_native_rigid_transform'),sc_bb_context_mask=pack.get('sc_bb_context_mask'),
         sc_chemical_mask=pack["sc_chemical_mask"],sc_model_mask=pack["sc_model_mask"],sc_loss_mask=mask,
         sc_pred_global=pack["sc_pred_global"],sc_atom_mask=mask,
         sc_frame_R=pack["sc_frame_R"],sc_frame_t=pack["sc_frame_t"],
         sc_input_backbone=xyz,sc_input_types=native,feature_xyz=features["feature_xyz"],
         protocol=dict(phase=str(cfg.phase),backbone_source="native",sequence_source="native",
             coordinate_targets="native_sidechains",feedback=False,feature_convention=features["convention"],
-            mask_contract="chemical_model_observed_v1"))
+            mask_contract="chemical_model_observed_v1",
+            augmentation="random_rigid_native_v1" if '_native_rigid_transform' in feat else "none"))
 
 def training_forward(model, feat, out, s_inputs, s_trunk, z_trunk):
     if getattr(model.configs.stage4, "initial_target_policy", "joint") == "fixed_context":
@@ -375,7 +379,7 @@ def generate(model, input_feature_dict, N_step=400, temperature=0.0,
     backbone_rng, pack_rng, feature_rng = RandomStream(seed), RandomStream(seed+3), RandomStream(seed+4)
     feat = dict(input_feature_dict)
     for key in ("aa_clean", "sc_gt_local", "aa_loss_mask", "aa_corruption_mask", "sc_atom_mask", "sc_slot_mask", "sc_atom_name_ids", "sc_frame_R", "sc_frame_t", "sc_bb_coords",
-                "sc_frame_valid", "sc_bb_observed_mask", "sc_observed_mask", "sc_loss_mask", "sc_chemical_mask"):
+                "sc_frame_valid", "sc_bb_observed_mask", "sc_observed_mask", "sc_loss_mask", "sc_chemical_mask", "sc_context_atom_mask"):
         feat.pop(key, None)
     design = feat["design_token_mask"].bool()
     from .sampler import build_aa20_to_restype36

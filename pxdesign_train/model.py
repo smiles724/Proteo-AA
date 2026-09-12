@@ -1053,6 +1053,12 @@ class ProtenixDesignTrain(ProtenixDesign):
         self._q_bb_idx_cache = None
         self._q_direct_active = False
 
+        if (getattr(self, "aa_backend", "mlp") == "fampnn"
+                and self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt")
+                and self.training and getattr(self.configs.stage4, "native_sc_augmentation", False)):
+            from .sc_augmentation import augment_native_sc_inputs
+            input_feature_dict, label_dict = augment_native_sc_inputs(input_feature_dict, label_dict)
+
         # Compute relp, d_lm, v_lm, pad_info needed by DiffusionModule / AtomAttentionEncoder.
         input_feature_dict = self.diffusion_module.diffusion_conditioning.relpe.generate_relp(
             input_feature_dict
@@ -1730,6 +1736,10 @@ class ProtenixDesignTrain(ProtenixDesign):
                         if input_feature_dict.get("design_sidechain_atom_mask") is not None
                         else None
                     ),
+                    atom_present=(
+                        _tile_per_sigma(input_feature_dict["sc_context_atom_mask"].to(h_res.device).bool(), trailing_ndim=1)
+                        if "sc_context_atom_mask" in input_feature_dict else None
+                    ),
                 )
 
             # Frame-aware head (sidechain.frame_aware_head): hand S_phi the SAME stop-grad
@@ -1824,15 +1834,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                     # already tiled to THIS round's flattened batch B (same tiling
                     # `_fuse_q_backbone_atoms` does per-sigma via its own broadcast),
                     # so no separate re-tiling from `q_bb_idx` is needed.
-                    if getattr(self, "sc_q_bs", False) and self._q_skip_cache is not None:
+                    if getattr(self, "sc_q_bs", False) and self._q_skip_cache is not None and bb_model_mask is not None:
                         q_skip_c = self._q_skip_cache
                         n_atom_q, c_q_ = q_skip_c.shape[-2], q_skip_c.shape[-1]
                         q_flat = q_skip_c.reshape(-1, n_atom_q, c_q_).to(h_res.device)
                         if q_flat.shape[0] == B:
                             idxq = idx4.reshape(B, L4 * 4)
-                            validq = idxq >= 0
+                            validq = (idxq >= 0) & bb_model_mask.reshape(B, L4 * 4)
                             gather_idx = idxq.clamp_min(0).unsqueeze(-1).expand(-1, -1, c_q_)
-                            bb_q = q_flat.gather(1, gather_idx) * validq.unsqueeze(-1).to(q_flat.dtype)
+                            bb_q = torch.where(validq.unsqueeze(-1), q_flat.gather(1, gather_idx), 0.)
                             bb_q = bb_q.reshape(B, L4, 4, c_q_).to(h_res.dtype)
                         elif not getattr(self, "_warned_q_bs_shape", False):
                             logging.getLogger(__name__).warning(
@@ -1944,6 +1954,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             # decoder pre-hook against that pass's LIVE q_skip, so it is idempotent.
             if getattr(self, "sc_q_direct", False) and bb_feats is not None:
                 q_sc = bb_feats.detach() if self.sc_detach_feedback else bb_feats
+                if bb_model_mask is not None:
+                    q_sc = torch.where(bb_model_mask[..., None], q_sc, 0.)
+                    valid_idx = bb_model_mask.reshape(*sample_shape, n_sample, *bb_model_mask.shape[-2:]).all(dim=len(sample_shape)) if use_per_sigma else bb_model_mask
+                    valid_idx = valid_idx.reshape_as(q_bb_idx)
+                    q_bb_idx = torch.where(valid_idx, q_bb_idx, -1)
                 if use_per_sigma:
                     q_sc = q_sc.reshape(
                         *sample_shape, n_sample, *q_sc.shape[-3:]
@@ -1963,6 +1978,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     ft = ft.squeeze(0)
                     bb = bb.squeeze(0) if bb is not None else None
             out["sc_pred_global"] = y0_global
+            out["sc_bb_context_mask"] = bb_model_mask
             if fR is not None and ft is not None:
                 out["sc_frame_R"] = fR
                 out["sc_frame_t"] = ft

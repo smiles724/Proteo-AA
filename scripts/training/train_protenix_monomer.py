@@ -1032,6 +1032,7 @@ def build_configs(args: argparse.Namespace, device):
         configs.sidechain.per_sigma = True
         configs.loss.weight_sc_pack = float(args.stage4_weight_physical)
         configs.stage4.phase = args.stage4_phase
+        configs.stage4.native_sc_augmentation = getattr(args, "stage4_native_sc_augmentation", False)
         for key in ("train_rounds", "inference_rounds", "decode_blocks", "query_fraction", "whole_mask_probability",
                     "temperature", "sc_to_aa", "sc_to_bb", "aa_lr", "sc_lr", "bb_lr", "weight_physical"):
             setattr(configs.stage4, key, getattr(args, "stage4_" + key))
@@ -1668,6 +1669,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fampnn-checkpoint", default="")
     p.add_argument("--stage4-phase", choices=["baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-A", "IV-B", "IV-C"], default="sc_adapt")
     p.add_argument("--stage4-train-rounds", type=int, default=0)
+    p.add_argument("--stage4-native-sc-augmentation", action=argparse.BooleanOptionalAction, default=False,
+                   help="Apply one random rigid transform to all native SC training inputs and frames")
     p.add_argument("--stage4-inference-rounds", type=int, default=0)
     p.add_argument("--stage4-decode-blocks", type=int, default=4)
     p.add_argument("--stage4-query-fraction", type=float, default=0.5)

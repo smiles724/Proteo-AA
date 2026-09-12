@@ -289,7 +289,7 @@ def test_scratch_cli_uses_explicit_layout_without_donor(tmp_path,monkeypatch):
 def test_native_sc_warmup_uses_native_frames_and_masks_without_sequence_decoding(monkeypatch):
     import pxdesign_train.stage4 as runtime
     length,slots=2,2
-    feat=dict(aa_clean=torch.tensor([1,2]),design_token_mask=torch.tensor([True,False]),
+    feat=dict(aa_clean=torch.tensor([1,-100]),design_token_mask=torch.tensor([True,True]),
         sc_gt_local=torch.zeros(length,slots,3),sc_frame_R=torch.eye(3).repeat(length,1,1),
         sc_frame_t=torch.tensor([[10.,0.,0.],[30.,0.,0.]]),sc_bb_coords=torch.zeros(length,3,3),
         sc_atom_mask=torch.tensor([[True,False],[True,True]]),restype=torch.full((length,32),-1.))
@@ -303,7 +303,8 @@ def test_native_sc_warmup_uses_native_frames_and_masks_without_sequence_decoding
         return dict(h=torch.zeros(1,1,length,4),sigma=torch.ones(1,1),q=None,
             feature_xyz=xyz[None],convention='test')
     def pack(f,out):
-        assert torch.equal(out['aa_logits'].argmax(-1)[0,0],feat['aa_clean'])
+        assert out['aa_logits'].argmax(-1)[0,0,0]==feat['aa_clean'][0]
+        assert torch.equal(f['design_token_mask'],torch.tensor([True,False]))
         out.update(sc_generation_mask=f['design_token_mask'][None,:,None].expand(1,length,slots),
             sc_frame_R=f['sc_frame_R'][None],sc_frame_t=f['sc_frame_t'][None],
             sc_pred_global=f['sc_frame_t'][None,:,None,:]+offset[None,None,None,:])
@@ -312,6 +313,7 @@ def test_native_sc_warmup_uses_native_frames_and_masks_without_sequence_decoding
     monkeypatch.setattr(runtime,'capture_packing_features',capture)
     out=runtime.supervised_sc_forward(model,feat,labels,None,None,None)
     assert out['sc_observed_atoms']==1
+    assert out['sc_skipped_noncanonical']==1
     assert out['sc_gt_mse'].item()==pytest.approx(3.,abs=1e-5)
     out['sc_gt_mse'].backward();torch.testing.assert_close(offset.grad,torch.full((3,),2.),atol=3e-6,rtol=1e-5)
     # Unobserved labels cannot change the packing inputs or masked loss.

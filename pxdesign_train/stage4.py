@@ -173,8 +173,11 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
         if key not in feat: raise ValueError(f"Supervised SC requires native {key}")
     native=feat["aa_clean"].long()
     design=feat["design_token_mask"].bool()
-    if ((native[design]<0)|(native[design]>=20)).any():
-        raise ValueError("Native SC design residues require canonical types")
+    canonical=(native>=0)&(native<20)
+    # Real monomer data can contain UNK or modified residues. They have no
+    # unambiguous canonical atom inventory or type target, so retain them as
+    # structural context while excluding them from SC ownership/supervision.
+    sc_design=design&canonical
     xyz=labels["coordinate"].detach()[None]
     # The official feature pass sees XPB-masked backbone inputs. Native types
     # enter only the separate SC call below, never the backbone or FAMPNN.
@@ -185,11 +188,13 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
         aa_logits=logits,aa_logits_reduced=logits.mean(-3),sigma=features["sigma"],
         x_denoised=xyz[None],assigned_aa=native[None],backbone_source="native")
     model._q_skip_cache=features.get("q")
-    model.pack_backbone_state(dict(feat),pack)
+    pack_feat=dict(feat,design_token_mask=sc_design)
+    model.pack_backbone_state(pack_feat,pack)
     mask=feat["sc_atom_mask"].bool() & pack["sc_generation_mask"]
     mse=sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(),feat["sc_gt_local"].float(),
         pack["sc_frame_R"].float(),pack["sc_frame_t"].float(),mask)
     return dict(supervised_sc=True,sc_gt_mse=mse,sc_observed_atoms=mask.sum(),
+        sc_skipped_noncanonical=(design&~canonical).sum(),
         sc_pred_global=pack["sc_pred_global"],sc_atom_mask=mask,
         sc_frame_R=pack["sc_frame_R"],sc_frame_t=pack["sc_frame_t"],
         sc_input_backbone=xyz,sc_input_types=native,feature_xyz=features["feature_xyz"],

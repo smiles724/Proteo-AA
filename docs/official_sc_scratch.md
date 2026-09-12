@@ -42,7 +42,11 @@ inventories and GT type logits are explicit runtime settings saved in the
 integrated checkpoint. The checkpoint records component hashes, initialization
 origins, optimizer state and effective configuration.
 
-Training job **114920**, code **320b5af**, is the corrected submission. Resolved
+Training job **114920**, code **320b5af**, used the corrected curriculum but
+stopped at step 286 when it encountered an unknown/noncanonical residue. The
+input contract now retains such residues as structural context and excludes
+them from SC ownership and coordinate supervision, because they have no
+canonical type or atom inventory. Resolved
 sources: 47,622 training monomers and 308 eligible recent-PDB validation monomers
 (the requested cap is 491). Component preflight confirmed only SC is trainable,
 no SC donor, native frame/inventory flags and disabled feedback/refinement.

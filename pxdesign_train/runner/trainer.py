@@ -616,7 +616,8 @@ class PXDesignTrainer:
             # GT backbone is an input here, not a prediction to score as perfect.
             return dict(loss=float(self.configs.stage4.weight_sc_aux)*mse,
                 sc_gt_mse=mse.detach(),sc_gt_rmsd=mse.detach().sqrt(),
-                sc_observed_atoms=out["sc_observed_atoms"].detach().float())
+                sc_observed_atoms=out["sc_observed_atoms"].detach().float(),
+                sc_skipped_noncanonical=out["sc_skipped_noncanonical"].detach().float())
         rep_atom_mask = batch["input_feature_dict"]["distogram_rep_atom_mask"]
         loss_out = self.loss_fn(
             pred_coordinate=out["x_denoised"],

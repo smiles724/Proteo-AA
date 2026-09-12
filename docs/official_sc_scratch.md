@@ -1,44 +1,74 @@
-# Scratch SC training with frozen pretrained networks
+# Scratch SC curriculum with frozen pretrained networks
 
-`--sidechain-init scratch` explicitly initializes the one-step SC network through
-its module constructors. It does not open an SC donor or import any donor SC
-weights. It is mutually exclusive with SC-donor, warm-start and resume options.
-Omitting an SC donor without explicitly selecting scratch still fails.
+The initial scratch experiment now uses **monomer-only native-frame SC warm-up**.
+The previous 25% monomer / 75% PINDER recipe was carried over from donor adaptation;
+it was not established for a randomly initialized packer. Runs **114897** (SC donor)
+and **114910** (scratch SC) were canceled on 2026-09-12 after this correction.
 
-The scratch preset uses the same SC architecture as the validated donor:
-`edm=false`, `centre_coord_input=true`, `frame_aware_head=false`,
-`template_residual=false`, `a_bs_concat=true`, `q_bs=false`, `bb_context=true`,
-`type_logits_input=true`. Existing rotamer input initialization is retained;
-that is an input prior rather than loaded network weights. Provenance records
-`sidechain.origin=scratch`, constructor initialization, seed and architecture.
-
-Official PXDesign v0.1.0 supplies the full backbone and condition encoder;
-pretrained FAMPNN supplies its sequence network. Their tensors and optimizer
-exclusion are checked by the same component and phase machinery as the
-SC-donor experiment.
-
-Submit the initial phase on HAI:
+## Initial warm-up
 
 ```bash
-sbatch scripts/training/slurm_official_sc_scratch_hai.sh
+sbatch --parsable scripts/training/slurm_official_sc_scratch_hai.sh
 ```
 
-This submits a separate experiment with the matched donor-run settings:
+- Phase `sc_warmup`; only `sidechain_module.*` trains (116.56M parameters).
+- SC weights initialize from module constructors; no SC donor or prior run is loaded.
+- Official PXDesign v0.1.0 backbone **and condition encoder**, plus pretrained
+  FAMPNN, are frozen and remain in evaluation mode.
+- Existing Protenix monomer dataset: pre-2021-09-30 weighted-PDB chain index,
+  filtered to whole monomers of at most 384 tokens. No PINDER training items.
+- Native residue types, native backbone frames, observed native SC coordinate
+  targets. Backbone identity inputs remain XPB masked; native types enter SC only.
+- The frozen PXDesign feature pass observes the native backbone with conditioning
+  sigma 0.4 and discards its coordinate output. It adds no backbone corruption and
+  does not call the training denoising sampler. FAMPNN decoding is not called.
+- One-step SC packing uses the existing shared packer. Chemical slot masks and
+  observed-atom supervision masks remain separate. The objective is native SC
+  coordinate MSE, calculated in FP32; logs report SC error, not a GT-as-prediction
+  backbone score.
+- Zero revisions, no refinement, no SC-to-AA/BB feedback; no AA, physical or
+  backbone denoising objective during this initial phase.
+- Crop 384, BF16, accumulation 8, LR 5e-5, warmup 2,000, gradient clip 1,
+  maximum 50,000 optimizer steps. One H200, seed 0, 23h50 allocation.
+- Save every 500 updates; evaluate every 2,000 on up to 491 recent-PDB monomers
+  that pass the same token filter. These are starting settings, not a validated
+  optimum or a promise that all 50,000 steps fit in one allocation.
 
-- Phase `sc_adapt`: only `sidechain_module.*` trains (116.56M parameters).
-- No revisions, no backbone refinement, no SC-to-AA or SC-to-BB feedback.
-- 25% PDB monomer / 75% PINDER complex sampling, native SC supervision.
-- Crop 384, gradient accumulation 8, SC learning rate 1e-5, warmup 500.
-- Up to 30,000 optimizer steps; seed 0, BF16 training, one H200.
-- Checkpoints every 500 steps, validation every 2,000 steps.
+Architecture remains `edm=false`, `centre_coord_input=true`,
+`frame_aware_head=false`, `template_residual=false`, `a_bs_concat=true`,
+`q_bs=false`, `bb_context=true`, `type_logits_input=true`. Dunbrack template
+initialization is an input prior; network weights are random. Native frames,
+inventories and GT type logits are explicit runtime settings saved in the
+integrated checkpoint. The checkpoint records component hashes, initialization
+origins, optimizer state and effective configuration.
 
-SC training comes first. The launcher does not schedule an automatic feedback
-transition. A subsequent feedback phase warm-starts from an integrated SC
-checkpoint, retaining trained SC weights and leaving PXDesign/FAMPNN frozen;
-do not pass `--sidechain-init scratch` when transitioning or resuming.
+## Subsequent phases
 
-Validation: scratch-only GPU smoke **114908** passed. It checked an SC optimizer
-update, exact official donor tensors, bitwise frozen pretrained tensor hashes,
-native-sampler parity, validation, checkpoint resume, self-contained evaluation
-reconstruction and mmCIF export, with feedback disabled throughout.
-[Machine-readable evidence](validation/official_sc_scratch/smoke_114908.json).
+1. `sc_complex_adapt`: warm-start the trained SC weights and introduce PINDER
+   with a monomer-heavy mixture. Continue native-type/native-frame supervision;
+   receptor/interface context uses the same native coordinate frame.
+2. `sc_adapt`: generated-input adaptation with predicted frames and FAMPNN
+   assignments, retaining isolated native SC auxiliary targets. Consider 25/75
+   only if held-out validation supports the shift.
+3. `feedback_adapt`: enable feedback routes progressively after SC validation.
+   Updates to either pretrained network require a later explicit phase choice.
+
+Later phases are not submitted automatically or started from scratch alongside
+warm-up. Use `--warm-start-checkpoint` for phase transitions; use
+`--resume-checkpoint` for exact continuation. Do not pass `--sidechain-init scratch`
+with either operation. The scratch launcher intentionally starts only fresh runs.
+
+## Engineering validation
+
+Regression job **114919**: **639 passed**, including native-frame masking, empty
+supervision, frozen phase groups and native-to-generated phase transitions.
+
+GPU job **114916** passed at crop 384: native input/frame equality, no FAMPNN call,
+no backbone training sampler, finite SC updates, exact official donor coverage,
+bitwise frozen pretrained tensor hashes, held-out monomer evaluation, save/resume,
+and reconstruction from saved configuration. The two-update smoke does not
+establish packing quality. Evidence: [smoke_114916.json](validation/official_sc_scratch/smoke_114916.json).
+
+Earlier smoke **114908** checked component loading and generated-input integration;
+it did not validate this new curriculum. Its evidence remains available as
+[smoke_114908.json](validation/official_sc_scratch/smoke_114908.json).

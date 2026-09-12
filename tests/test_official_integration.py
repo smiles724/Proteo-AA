@@ -79,7 +79,7 @@ def test_incomplete_official_donor_fails_before_any_write(tmp_path, damage):
     assert all(torch.equal(v,before[k]) for k,v in model.state_dict().items())
 
 
-@pytest.mark.parametrize('phase,groups', [('baseline',set()), ('sc_adapt',{'sc'}),
+@pytest.mark.parametrize('phase,groups', [('baseline',set()), ('sc_adapt',{'sc'}), ('sc_warmup',{'sc'}), ('sc_complex_adapt',{'sc'}),
     ('feedback_adapt',{'feedback'}), ('aa_adapt',{'aa'}), ('joint_adapt',{'aa','sc','feedback'})])
 def test_phase_freezes_pretrained_components(phase, groups):
     model = Components();model.configs.stage4.phase = phase
@@ -87,7 +87,7 @@ def test_phase_freezes_pretrained_components(phase, groups):
     assert {g['name'] for g in optimizer_groups(model)} == groups
     assert not model.diffusion_module.training and not model.design_condition_embedder.training
     assert all(not p.requires_grad for p in model.diffusion_module.parameters())
-    if phase in ('sc_adapt','feedback_adapt','baseline'):
+    if phase in ('sc_warmup','sc_complex_adapt','sc_adapt','feedback_adapt','baseline'):
         assert not model.aa_head.training
         x = torch.randn(1,2,requires_grad=True)
         model.aa_head.sequence_network(x).square().sum().backward()
@@ -266,13 +266,82 @@ def test_scratch_cli_uses_explicit_layout_without_donor(tmp_path,monkeypatch):
     fampnn=tmp_path/'fampnn.pt';fampnn.touch()
     monkeypatch.setattr(sys,'argv',['train','--training-stage','stage4_fampnn',
         '--sidechain-init','scratch','--backbone-checkpoint','official.pt',
-        '--fampnn-checkpoint',str(fampnn),'--diffusion-batch-size','1'])
+        '--fampnn-checkpoint',str(fampnn),'--diffusion-batch-size','1',
+        '--stage4-phase','sc_warmup','--data-mode','monomer'])
     args=driver.parse_args();driver.apply_training_stage_args(args)
     config=driver.build_configs(args,torch.device('cpu'))
     assert not config.training.sidechain_checkpoint
     assert config.training.sidechain_init=='scratch'
     assert {k:getattr(config.sidechain,k) for k in SCRATCH_SC_LAYOUT}==SCRATCH_SC_LAYOUT
-    assert config.stage4.phase=='sc_adapt' and not config.stage4.sc_to_bb
+    assert config.stage4.phase=='sc_warmup' and not config.stage4.sc_to_bb
+    assert not config.sidechain.predicted_frame and not config.sidechain.predicted_mask
+    assert config.sidechain.force_gt_type_logits
+    assert config.stage4.weight_physical == config.stage4.weight_aa_pre == 0
+    args.data_mode='mixed_monomer_complex'
+    with pytest.raises(ValueError,match='monomer'):
+        driver.build_configs(args,torch.device('cpu'))
+    args.data_mode='monomer'
     args.sidechain_checkpoint='donor.pt'
     with pytest.raises(ValueError,match='cannot be combined'):
         driver.build_configs(args,torch.device('cpu'))
+
+
+def test_native_sc_warmup_uses_native_frames_and_masks_without_sequence_decoding(monkeypatch):
+    import pxdesign_train.stage4 as runtime
+    length,slots=2,2
+    feat=dict(aa_clean=torch.tensor([1,2]),design_token_mask=torch.tensor([True,False]),
+        sc_gt_local=torch.zeros(length,slots,3),sc_frame_R=torch.eye(3).repeat(length,1,1),
+        sc_frame_t=torch.tensor([[10.,0.,0.],[30.,0.,0.]]),sc_bb_coords=torch.zeros(length,3,3),
+        sc_atom_mask=torch.tensor([[True,False],[True,True]]),restype=torch.full((length,32),-1.))
+    labels={'coordinate':torch.randn(8,3)}
+    offset=nn.Parameter(torch.ones(3))
+    seen=[]
+    def capture(model,f,xyz,*args):
+        assert not torch.is_grad_enabled()
+        assert torch.equal(xyz[0],labels['coordinate'])
+        seen.append(f['restype'].clone())
+        return dict(h=torch.zeros(1,1,length,4),sigma=torch.ones(1,1),q=None,
+            feature_xyz=xyz[None],convention='test')
+    def pack(f,out):
+        assert torch.equal(out['aa_logits'].argmax(-1)[0,0],feat['aa_clean'])
+        out.update(sc_generation_mask=f['design_token_mask'][None,:,None].expand(1,length,slots),
+            sc_frame_R=f['sc_frame_R'][None],sc_frame_t=f['sc_frame_t'][None],
+            sc_pred_global=f['sc_frame_t'][None,:,None,:]+offset[None,None,None,:])
+    cfg=SimpleNamespace(phase='sc_warmup',train_rounds=0,sc_to_aa=False,sc_to_bb=False,backbone_refinement_enabled=False)
+    model=SimpleNamespace(sc_predicted_frame=False,sc_predicted_mask=False,configs=SimpleNamespace(stage4=cfg),pack_backbone_state=pack)
+    monkeypatch.setattr(runtime,'capture_packing_features',capture)
+    out=runtime.supervised_sc_forward(model,feat,labels,None,None,None)
+    assert out['sc_observed_atoms']==1
+    assert out['sc_gt_mse'].item()==pytest.approx(3.,abs=1e-5)
+    out['sc_gt_mse'].backward();torch.testing.assert_close(offset.grad,torch.full((3,),2.),atol=3e-6,rtol=1e-5)
+    # Unobserved labels cannot change the packing inputs or masked loss.
+    feat['sc_gt_local'][~feat['sc_atom_mask']]=float('nan')
+    again=runtime.supervised_sc_forward(model,feat,labels,None,None,None)
+    torch.testing.assert_close(out['sc_gt_mse'],again['sc_gt_mse'])
+    assert all(torch.equal(v,feat['restype']) for v in seen)
+    feat['sc_atom_mask'].zero_()
+    empty=runtime.supervised_sc_forward(model,feat,labels,None,None,None)
+    assert empty['sc_gt_mse']==0 and torch.isfinite(empty['sc_gt_mse'])
+    cfg.sc_to_bb=True
+    with pytest.raises(ValueError,match='feedback'):
+        runtime.supervised_sc_forward(model,feat,labels,None,None,None)
+
+
+def test_gt_to_generated_transition_restores_input_routing_and_objectives():
+    from pxdesign_train.checkpoints import transition_config
+    model=Components();model.component_origins={}
+    model.configs.stage4=SimpleNamespace(phase='sc_warmup',train_rounds=0,inference_rounds=0,
+        sc_to_aa=False,sc_to_bb=False,backbone_refinement_enabled=False,
+        weight_aa_pre=0.,weight_aa_revision=0.,weight_physical=0.)
+    model.configs.sidechain.predicted_frame=False
+    model.configs.sidechain.predicted_mask=False
+    model.configs.sidechain.force_gt_type_logits=True
+    model.configs.loss=SimpleNamespace(weight_bb_post=0.)
+    ckpt={'integrated':integrated_record(model)}
+    native=transition_config(ckpt,phase='sc_complex_adapt')
+    assert not native.sidechain.predicted_frame and native.stage4.weight_aa_pre==0
+    generated=transition_config(ckpt,phase='sc_adapt',stage4_overrides={'weight_physical':0.02})
+    assert generated.sidechain.predicted_frame and generated.sidechain.predicted_mask
+    assert not generated.sidechain.force_gt_type_logits
+    assert generated.stage4.weight_aa_pre==generated.stage4.weight_aa_revision==1
+    assert generated.stage4.weight_physical==0.02

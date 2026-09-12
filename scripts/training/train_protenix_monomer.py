@@ -1046,11 +1046,11 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.edm_weighting = True
         if args.backbone_checkpoint and args.load_checkpoint:
             raise ValueError("Component composition cannot also load a complete donor")
-        if args.stage4_phase in ("baseline", "sc_adapt"):
+        if args.stage4_phase in ("baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt"):
             configs.stage4.sc_to_aa = configs.stage4.sc_to_bb = False
             if args.backbone_refinement_enabled:
                 raise ValueError("Initial component validation requires feedback/refinement disabled")
-        if args.stage4_phase in ("IV-A", "baseline", "sc_adapt", "feedback_adapt", "aa_adapt"):
+        if args.stage4_phase in ("IV-A", "baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt"):
             configs.loss.weight_mse = 0.0
             configs.loss.weight_lddt = 0.0
             configs.loss.weight_disto = 0.0
@@ -1062,6 +1062,18 @@ def build_configs(args: argparse.Namespace, device):
             raise ValueError("Revision round counts must be nonnegative")
         if args.diffusion_batch_size != 1:
             raise ValueError("Integrated pack/refine supports diffusion-batch-size=1; accumulate gradients")
+        if args.stage4_phase in ("sc_warmup", "sc_complex_adapt"):
+            if args.stage4_phase == "sc_warmup" and args.data_mode != "monomer":
+                raise ValueError("Scratch SC warm-up requires monomer-only data")
+            if args.stage4_train_rounds or args.stage4_inference_rounds:
+                raise ValueError("Supervised SC phases require zero revision rounds")
+            configs.sidechain.predicted_frame=False
+            configs.sidechain.predicted_mask=False
+            configs.sidechain.force_gt_type_logits=True
+            configs.stage4.weight_aa_pre=configs.stage4.weight_aa_revision=0.
+            configs.stage4.weight_physical=0.
+            configs.loss.weight_bb_post=0.
+
 
     unfreeze_last = int(getattr(args, "unfreeze_last_diffusion_blocks", 0))
     if unfreeze_last < 0:
@@ -1291,6 +1303,8 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         # that input to the predicted frame; learned B_pre features remain live in
         # both stages.
         args.predicted_frame = args.training_stage in ("predicted_mask", "stage4_fampnn")
+        if args.training_stage == "stage4_fampnn" and args.stage4_phase in ("sc_warmup", "sc_complex_adapt"):
+            args.predicted_frame = False
         args.per_sigma = True
 
 
@@ -1652,7 +1666,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume-checkpoint", default="")
     p.add_argument("--warm-start-checkpoint", default="", help="New phase using saved architecture and weights, fresh optimizer/counters")
     p.add_argument("--fampnn-checkpoint", default="")
-    p.add_argument("--stage4-phase", choices=["baseline", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-A", "IV-B", "IV-C"], default="sc_adapt")
+    p.add_argument("--stage4-phase", choices=["baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-A", "IV-B", "IV-C"], default="sc_adapt")
     p.add_argument("--stage4-train-rounds", type=int, default=0)
     p.add_argument("--stage4-inference-rounds", type=int, default=0)
     p.add_argument("--stage4-decode-blocks", type=int, default=4)
@@ -1825,7 +1839,7 @@ def main() -> None:
         components, n_items = build_components(args, filtered_index)
     eval_loader, n_eval, eval_filtered_index = build_eval_dataloader(args, output_dir)
     components.eval_dataloader = eval_loader
-    if args.training_stage == "stage4_fampnn":
+    if args.training_stage == "stage4_fampnn" and args.data_mode == "mixed_monomer_complex":
         components.named_eval_dataloaders = build_stage4_binder_validation(args,protenix_complex_index,pinder_manifest)
         if eval_loader is not None:
             components.named_eval_dataloaders["monomer_retention"] = eval_loader
@@ -1903,6 +1917,10 @@ def main() -> None:
             int(configs.training.iters_to_accumulate),
             float(configs.training.grad_clip_norm),
         )
+    if args.training_stage == "stage4_fampnn":
+        logging.info("Integrated phase=%s, sources=%s, SC init=%s, predicted_frame=%s, predicted_mask=%s, GT SC types=%s",
+            configs.stage4.phase, components.schedule.weights_at(0), configs.training.sidechain_init,
+            configs.sidechain.predicted_frame, configs.sidechain.predicted_mask, configs.sidechain.force_gt_type_logits)
     logging.info("Output dir: %s", output_dir)
     train_from_components(
         configs=configs,

@@ -161,6 +161,41 @@ def masked_aa_objective(records, native_aa):
     return numerator / denominator.clamp_min(1), correct / denominator.clamp_min(1)
 
 
+
+def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
+    """Native-type packing in native frames; no sequence decoding or BB denoising target."""
+    if model.sc_predicted_frame or model.sc_predicted_mask:
+        raise ValueError("Supervised SC phases require GT frames and GT atom inventories")
+    cfg=model.configs.stage4
+    if cfg.train_rounds or cfg.sc_to_aa or cfg.sc_to_bb or cfg.backbone_refinement_enabled:
+        raise ValueError("Supervised SC phases do not enable revisions or feedback")
+    for key in ("aa_clean", "sc_gt_local", "sc_frame_R", "sc_frame_t", "sc_bb_coords", "sc_atom_mask"):
+        if key not in feat: raise ValueError(f"Supervised SC requires native {key}")
+    native=feat["aa_clean"].long()
+    design=feat["design_token_mask"].bool()
+    if ((native[design]<0)|(native[design]>=20)).any():
+        raise ValueError("Native SC design residues require canonical types")
+    xyz=labels["coordinate"].detach()[None]
+    # The official feature pass sees XPB-masked backbone inputs. Native types
+    # enter only the separate SC call below, never the backbone or FAMPNN.
+    with torch.no_grad():
+        features=capture_packing_features(model,feat,xyz,s_inputs,s_trunk,z_trunk)
+    logits=(F.one_hot(native.clamp(0,19),20).float()*40.-20.)[None,None]
+    pack=dict(h_res_sigma=features["h"],h_res_candidate=features["h"].mean(-3),
+        aa_logits=logits,aa_logits_reduced=logits.mean(-3),sigma=features["sigma"],
+        x_denoised=xyz[None],assigned_aa=native[None],backbone_source="native")
+    model._q_skip_cache=features.get("q")
+    model.pack_backbone_state(dict(feat),pack)
+    mask=feat["sc_atom_mask"].bool() & pack["sc_generation_mask"]
+    mse=sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(),feat["sc_gt_local"].float(),
+        pack["sc_frame_R"].float(),pack["sc_frame_t"].float(),mask)
+    return dict(supervised_sc=True,sc_gt_mse=mse,sc_observed_atoms=mask.sum(),
+        sc_pred_global=pack["sc_pred_global"],sc_atom_mask=mask,
+        sc_frame_R=pack["sc_frame_R"],sc_frame_t=pack["sc_frame_t"],
+        sc_input_backbone=xyz,sc_input_types=native,feature_xyz=features["feature_xyz"],
+        protocol=dict(phase=str(cfg.phase),backbone_source="native",sequence_source="native",
+            coordinate_targets="native_sidechains",feedback=False,feature_convention=features["convention"]))
+
 def training_forward(model, feat, out, s_inputs, s_trunk, z_trunk):
     if getattr(model.configs.stage4, "initial_target_policy", "joint") == "fixed_context":
         atom_design = feat["design_token_mask"].bool()[feat["atom_to_token_idx"].long()]
@@ -214,7 +249,7 @@ def apply_phase(model):
     from .checkpoints import FEEDBACK_PREFIXES, BACKBONE_PREFIXES
     cfg = model.configs.stage4
     phase = str(cfg.phase)
-    phases = ("baseline", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-0", "IV-A", "IV-B", "IV-C")
+    phases = ("baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-0", "IV-A", "IV-B", "IV-C")
     if phase not in phases:
         raise ValueError(f"Unknown phase {phase}")
     bb = tuple(p for p in (cfg.bb_trainable_prefixes or ()) if p)
@@ -229,7 +264,7 @@ def apply_phase(model):
         feedback = bool(selected_feedback and name.startswith(selected_feedback))
         if phase in ("baseline", "IV-0"):
             enabled = False
-        elif phase == "sc_adapt":
+        elif phase in ("sc_warmup", "sc_complex_adapt", "sc_adapt"):
             enabled = sc
         elif phase == "feedback_adapt":
             enabled = feedback or (sc and bool(getattr(cfg, "train_sc", False)))

@@ -1071,6 +1071,10 @@ class ProtenixDesignTrain(ProtenixDesign):
         if getattr(self, "aa_backend", "mlp") == "fampnn" and N_sample != 1:
             raise ValueError("FAMPNN pack/refine requires one diffusion sample; use gradient accumulation")
 
+        if getattr(self, "aa_backend", "mlp") == "fampnn" and self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt"):
+            from pxdesign_train.stage4 import supervised_sc_forward
+            return supervised_sc_forward(self,input_feature_dict,label_dict,s_inputs,s,z)
+
         # 2. One-step denoising under EDM training noise.
         x_gt_aug, x_denoised, sigma, x_noisy = sample_diffusion_training(
             noise_sampler=self.training_noise_sampler,

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=official-sc-scratch
+#SBATCH --job-name=official-sc-warmup
 #SBATCH --partition=yejin
 #SBATCH --account=yejin
 #SBATCH --gres=gpu:h200:1
@@ -11,9 +11,18 @@
 set -euo pipefail
 export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn}
 export SC_INIT=scratch
-export STAGE4_PHASE=sc_adapt TRAIN_ROUNDS=0 INFERENCE_ROUNDS=0
+export STAGE4_PHASE=sc_warmup TRAIN_ROUNDS=0 INFERENCE_ROUNDS=0
 export RESUME_CHECKPOINT= WARM_START_CHECKPOINT=
-export OUTPUT_DIR=${OUTPUT_DIR:-/hai/scratch/yfsun/proteo_aa_runs/official_sc_scratch/${SLURM_JOB_ID:-dry-run}}
-# Match the donor-initialized comparison: 25% PDB monomers, 75% PINDER,
-# crop 384, accumulation 8, SC lr 1e-5, warmup 500, maximum 30000 updates.
-exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_binder_hai.sh" "$@"
+export OUTPUT_DIR=${OUTPUT_DIR:-/hai/scratch/yfsun/proteo_aa_runs/official_sc_warmup/${SLURM_JOB_ID:-dry-run}}
+# Fresh SC curriculum: native types/frames, monomers only, frozen BB and AA.
+# Later complex/generated-input/feedback phases require validation and a warm start.
+export CROP_SIZE=${CROP_SIZE:-384} MAX_STEPS=${MAX_STEPS:-50000}
+export WARMUP_STEPS=${WARMUP_STEPS:-2000} EVAL_SAMPLES=${EVAL_SAMPLES:-491}
+RUN_OPTIONS=()
+if [[ ${1:-} == --dry-run ]]; then
+  shift
+  RUN_OPTIONS=(--dry-run)
+fi
+exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_binder_hai.sh" "${RUN_OPTIONS[@]}" \
+  --data-mode monomer --stage2-start-monomer-frac 1 --stage2-end-monomer-frac 1 \
+  --stage4-sc-lr "${SC_LR:-5e-5}" --no-ref-pos-augment "$@"

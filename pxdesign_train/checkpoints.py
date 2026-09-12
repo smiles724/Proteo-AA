@@ -215,12 +215,28 @@ def transition_config(checkpoint, *, phase, stage4_overrides=None, training_over
     config.training.sidechain_checkpoint = ''
     config.training.resume_checkpoint = ''
     config.training.warm_start_checkpoint = ''
+    previous_phase = config.stage4.phase
     config.stage4.phase = phase
     for section, values in ((config.stage4, stage4_overrides), (config.training, training_overrides), (config.loss, loss_overrides)):
         for key,value in (values or {}).items():
             if key not in section:
                 raise ValueError(f'Unknown phase-transition setting {key}')
             setattr(section,key,value)
+    if phase in ("sc_warmup", "sc_complex_adapt"):
+        if config.stage4.train_rounds or config.stage4.sc_to_aa or config.stage4.sc_to_bb or config.stage4.backbone_refinement_enabled:
+            raise ValueError("Supervised SC phases require zero revisions and disabled feedback")
+        config.sidechain.predicted_frame=False
+        config.sidechain.predicted_mask=False
+        config.sidechain.force_gt_type_logits=True
+        config.stage4.weight_aa_pre=config.stage4.weight_aa_revision=config.stage4.weight_physical=0.
+        config.loss.weight_bb_post=0.
+    elif previous_phase in ("sc_warmup", "sc_complex_adapt") and phase in ("sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt"):
+        config.sidechain.predicted_frame=True
+        config.sidechain.predicted_mask=True
+        config.sidechain.force_gt_type_logits=False
+        # Restore generated-path objectives explicitly after pure packing.
+        for key,default in (("weight_aa_pre",1.),("weight_aa_revision",1.),("weight_physical",0.1)):
+            setattr(config.stage4,key,(stage4_overrides or {}).get(key,default))
     if phase == 'feedback_adapt' and (config.stage4.train_rounds < 1 or not config.stage4.backbone_refinement_enabled or not config.stage4.sc_to_bb):
         raise ValueError('Feedback adaptation requires explicit revision rounds, backbone refinement, and SC-to-BB')
     return config

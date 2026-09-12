@@ -70,9 +70,26 @@ This is an estimate from sampled crops, not a full-dataset or cluster-weighted
 census. No O-only defect appeared in the valid-frame subset; synthetic tests
 still cover that condition. Raw record: `runs/sc_input_audit/114965.json`.
 
-GPU smoke job 114964 exercises rigid augmentation, a full-model incomplete-O
+GPU smoke job 114964 **passed**, exercising rigid augmentation, a full-model incomplete-O
 case, hidden-label and invalid-frame isolation, finite backward, frozen
 pretrained tensor hashes, validation, save/resume and exact reconstruction.
 It also measures rotation consistency on one real monomer and three rotations
 with matched RNG, after two SC updates. These measurements are a diagnostic
 of orientation sensitivity, not evidence of improved packing quality.
+The measured RMSDs after inverse rotation were 1.8478, 1.8685 and 2.1684
+angstrom (mean 1.9616). Both pretrained component hashes remained unchanged.
+Held-out validation reported `sc_rotation_augmented=0`, and training reported
+1. Raw record: `runs/sc_warmup_smoke/114964/smoke_result.json`.
+
+The exact production launcher dry run passed in job 114966: 47,622 train
+rows, 308 validation rows, monomer fraction 1 throughout, only
+`sidechain_module.*` trainable, and `native_sc_augmentation=true`.
+
+## New run
+
+Job **114967**, `sc-rigid-warmup`, was submitted on HAI with one H200 from
+code commit **a4b10f1**, branch `feat/sc-rigid-augmentation` (pushed to origin).
+Output: `/hai/scratch/yfsun/proteo_aa_runs/official_sc_rigid_warmup/114967`.
+Logs: `logs/training/official_pxdesign/sc-rigid-warmup-114967.{out,err}`.
+The prior job **114932** remains running in its original worktree and had
+reached step 2,000 when the new job started. No prior run was canceled.

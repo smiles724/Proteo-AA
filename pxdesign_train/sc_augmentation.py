@@ -2,7 +2,7 @@
 import torch
 
 
-def random_rigid_transform(xyz, observed, translation_scale=1.):
+def random_rigid_transform(xyz, observed, translation_scale=1., generator=None):
     """Uniform SO(3), observed-atom centering and isotropic translation.
 
     Uses torch's checkpointed RNG. Return affine x' = R x + t, with column
@@ -11,12 +11,12 @@ def random_rigid_transform(xyz, observed, translation_scale=1.):
     xyz = xyz.detach().float()
     observed = observed.bool() & torch.isfinite(xyz).all(-1)
     center = torch.where(observed[..., None], xyz, 0.).sum(-2) / observed.sum().clamp_min(1)
-    q = torch.randn(4, device=xyz.device)
+    q = torch.randn(4, device=xyz.device, generator=generator)
     w, x, y, z = (q / q.norm().clamp_min(1e-12)).unbind()
     R = torch.stack((1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w),
                      2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w),
                      2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y))).reshape(3,3)
-    t = translation_scale * torch.randn(3, device=xyz.device) - R @ center
+    t = translation_scale * torch.randn(3, device=xyz.device, generator=generator) - R @ center
     return R, t
 
 
@@ -47,7 +47,7 @@ def transform_native_sc_inputs(feat, labels, rotation, translation):
     return out, target
 
 
-def augment_native_sc_inputs(feat, labels):
+def augment_native_sc_inputs(feat, labels, generator=None):
     with torch.autocast(device_type=labels['coordinate'].device.type, enabled=False):
-        R, t = random_rigid_transform(labels['coordinate'], labels['coordinate_mask'])
+        R, t = random_rigid_transform(labels['coordinate'], labels['coordinate_mask'], generator=generator)
         return transform_native_sc_inputs(feat, labels, R, t)

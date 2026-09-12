@@ -1072,7 +1072,13 @@ def build_configs(args: argparse.Namespace, device):
             configs.sidechain.predicted_mask=False
             configs.sidechain.force_gt_type_logits=True
             configs.stage4.weight_aa_pre=configs.stage4.weight_aa_revision=0.
-            configs.stage4.weight_physical=0.
+            if args.stage4_phase == "sc_warmup":
+                if "stage4_weight_physical" in set(getattr(args, "_explicit_args", [])) and args.stage4_weight_physical:
+                    raise ValueError("sc_warmup forbids physical loss")
+                configs.stage4.weight_physical=0.
+            elif "stage4_weight_physical" not in set(getattr(args, "_explicit_args", [])):
+                configs.stage4.weight_physical=0.
+            configs.sidechain.pack_loss=float(configs.stage4.weight_physical)
             configs.loss.weight_bb_post=0.
 
 

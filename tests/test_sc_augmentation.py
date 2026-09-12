@@ -60,6 +60,14 @@ def test_unobserved_nan_coordinates_stay_inactive_under_augmentation():
     assert target['coordinate'][~labels['coordinate_mask']].count_nonzero() == 0
 
 
+def test_explicit_rigid_stream_is_independent_of_global_rng_consumption():
+    feat, labels = example()
+    _, first = augment_native_sc_inputs(feat, labels, generator=torch.Generator().manual_seed(19))
+    torch.randn(500)
+    _, second = augment_native_sc_inputs(feat, labels, generator=torch.Generator().manual_seed(19))
+    torch.testing.assert_close(first['coordinate'], second['coordinate'], atol=0, rtol=0)
+
+
 def test_physical_context_excludes_unobserved_backbone_atoms_and_centers():
     xyz = torch.randn(1, 8, 3)
     centers = torch.tensor([[1, 5]])

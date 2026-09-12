@@ -99,6 +99,9 @@ class ProteoAACycle:
         for key in ("aa_clean", "sc_gt_local", "sc_frame_R", "sc_frame_t", "sc_bb_coords",
                     "sc_frame_valid", "sc_bb_observed_mask", "sc_observed_mask", "sc_loss_mask", "sc_chemical_mask", "sc_context_atom_mask"):
             feat.pop(key, None)
+        # Native replay carries structural observations independently of SC labels.
+        if "packing_context_atom_mask" in feat:
+            feat["sc_context_atom_mask"] = feat["packing_context_atom_mask"]
         h = state.backbone_features["h"]
         logits = state.backbone_features.get("aa_logits")
         if logits is None:
@@ -181,6 +184,8 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
     # structural context while excluding them from SC ownership/supervision.
     sc_design=design&canonical
     xyz=labels["coordinate"].detach()[None]
+    observed = labels.get("coordinate_mask", torch.isfinite(xyz[0]).all(-1)).bool() & torch.isfinite(xyz[0]).all(-1)
+    xyz = torch.where(observed[None,:,None], xyz, 0.)
     # The official feature pass sees XPB-masked backbone inputs. Native types
     # enter only the separate SC call below, never the backbone or FAMPNN.
     with torch.no_grad():
@@ -196,7 +201,16 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
     mask=feat["sc_atom_mask"].bool() & feat["sc_frame_valid"].bool()[..., None] & pack["sc_generation_mask"]
     mse=sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(),feat["sc_gt_local"].float(),
         pack["sc_frame_R"].float(),pack["sc_frame_t"].float(),mask)
+    physical = pack.get("sc_pack_val", pack["sc_pred_global"].float().sum()*0.)
+    if float(getattr(cfg, "weight_physical", 0.)) > 0 and "sc_pack_val" not in pack:
+        raise RuntimeError("Native physical objective requested but packer did not compute it")
+    metrics = {}
+    if not getattr(model, "training", True) and getattr(cfg, "adaptation_protocol", "legacy") == "sc_only_v1":
+        from .sidechain.metrics import diagnose_packing
+        metrics = diagnose_packing(feat, pack, native, xyz, observed=mask)
     return dict(supervised_sc=True,sc_gt_mse=mse,sc_observed_atoms=mask.sum(),
+        packing_metrics=metrics,
+        sc_physical=physical, sc_clash=pack.get("sc_pack_clash", physical.detach()),
         sc_skipped_noncanonical=(design&~canonical).sum(),
         sc_invalid_native_frames=(design&~feat["sc_frame_valid"].bool()).sum(),
         sc_rotation_augmented=xyz.new_tensor(float('_native_rigid_transform' in feat)),

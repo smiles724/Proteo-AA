@@ -124,6 +124,8 @@ class ProtenixDesignTrain(ProtenixDesign):
     """
 
     def __init__(self, configs) -> None:
+        from .sc_adaptation import configure_runtime
+        configure_runtime(configs)
         super().__init__(configs)
         ns_cfg = getattr(configs, "training_noise_sampler", None) or {
             "p_mean": -1.2,
@@ -1053,11 +1055,30 @@ class ProtenixDesignTrain(ProtenixDesign):
         self._q_bb_idx_cache = None
         self._q_direct_active = False
 
+        sc_adaptation = (getattr(self, "aa_backend", "mlp") == "fampnn"
+            and getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1"
+            and self.configs.stage4.phase == "sc_adapt")
+        if sc_adaptation:
+            from .sc_adaptation import check_source
+            source = check_source(input_feature_dict, label_dict)
+            input_feature_dict = dict(input_feature_dict)
+            if source == "native":
+                # Mask structural placeholders by atom observations, not native SC labels.
+                observed = label_dict["coordinate_mask"].bool() & torch.isfinite(label_dict["coordinate"]).all(-1)
+                for key in ("aa_bb_atom_idx", "sc_bb_atom_idx", "aa_fixed_atom37_idx"):
+                    idx = input_feature_dict[key]
+                    valid = (idx >= 0) & observed[idx.clamp_min(0)]
+                    input_feature_dict[key] = torch.where(valid, idx, -1)
+                input_feature_dict["packing_context_atom_mask"] = observed
         if (getattr(self, "aa_backend", "mlp") == "fampnn"
-                and self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt")
+                and (self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt")
+                     or (sc_adaptation and source != "full_sample"))
                 and self.training and getattr(self.configs.stage4, "native_sc_augmentation", False)):
             from .sc_augmentation import augment_native_sc_inputs
-            input_feature_dict, label_dict = augment_native_sc_inputs(input_feature_dict, label_dict)
+            augmentation_generator = None
+            if "input_seed" in input_feature_dict and getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1":
+                augmentation_generator = torch.Generator(device=label_dict["coordinate"].device).manual_seed(int(input_feature_dict["input_seed"])+73)
+            input_feature_dict, label_dict = augment_native_sc_inputs(input_feature_dict, label_dict, generator=augmentation_generator)
 
         # Compute relp, d_lm, v_lm, pad_info needed by DiffusionModule / AtomAttentionEncoder.
         input_feature_dict = self.diffusion_module.diffusion_conditioning.relpe.generate_relp(
@@ -1080,6 +1101,10 @@ class ProtenixDesignTrain(ProtenixDesign):
         if getattr(self, "aa_backend", "mlp") == "fampnn" and self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt"):
             from pxdesign_train.stage4 import supervised_sc_forward
             return supervised_sc_forward(self,input_feature_dict,label_dict,s_inputs,s,z)
+
+        if sc_adaptation:
+            from .sc_adaptation import adaptation_forward
+            return adaptation_forward(self, input_feature_dict, label_dict, s_inputs, s, z)
 
         # 2. One-step denoising under EDM training noise.
         x_gt_aug, x_denoised, sigma, x_noisy = sample_diffusion_training(
@@ -1424,6 +1449,10 @@ class ProtenixDesignTrain(ProtenixDesign):
             # sc_mask are tiled to the SAME flattened [B*N_sample, ...] layout above,
             # so row r of the type table is row r of the atom mask (per item, not
             # item 0 broadcast), and each sigma row still draws its own eps.
+            sc_init_generator = None
+            if "input_seed" in input_feature_dict and getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1":
+                sc_seed = int(input_feature_dict.get("sc_init_seed", int(input_feature_dict["input_seed"])+401))
+                sc_init_generator = torch.Generator().manual_seed(sc_seed)
             use_template_init = getattr(self, "sc_template_init", False) and sc_type_idx is not None
             if use_template_init:
                 mask_cpu = sc_slot.detach().cpu()
@@ -1478,7 +1507,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     # template arrives clean; sigma_T's fixed 0.3 A would otherwise
                     # sit underneath it as an unaccounted noise floor.
                     sigma_T=(0.0 if getattr(self, "sc_edm", False) else self.sc_init_sigma_T),
-                    phi=phi, psi=psi,
+                    phi=phi, psi=psi, generator=sc_init_generator,
                 )
             else:
                 if getattr(self, "sc_template_init", False) and not getattr(self, "_warned_no_type_src", False):
@@ -1488,7 +1517,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     )
                     self._warned_no_type_src = True
                 noisy_init = gaussian_init_local(
-                    sc_slot.detach().cpu(), sigma=self.sc_init_sigma
+                    sc_slot.detach().cpu(), sigma=self.sc_init_sigma, generator=sc_init_generator
                 )
             noisy_init = noisy_init.to(h_res.device).to(h_res.dtype)
             sc_sigma = None
@@ -2135,7 +2164,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             # but it is the only channel through which packing can be optimised.
             if (
                 fR is not None and ft is not None and ctx_atoms is not None
-                and float(getattr(self, "sc_pack_weight", 0.0)) > 0.0
+                and (float(getattr(self, "sc_pack_weight", 0.0)) > 0.0
+                     or getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1")
             ):
                 B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
                 ctx_xyz, ctx_m, ctx_g = ctx_atoms

@@ -87,5 +87,5 @@ def test_retry_loop_absorbs_the_cif_provider_prefix(monkeypatch):
 
     monkeypatch.setattr(ds, "_get_one", _fail_once_then_work)
 
-    assert ds[0] == {"ok": True}
+    assert ds[0] == {"ok": True, "requested_provider_index": 0, "retry_substitutions": [0]}
     assert calls["n"] == 2, "the rejection should have been retried, not raised"

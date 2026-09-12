@@ -102,6 +102,16 @@ class PinderPdbProvider:
     def __len__(self) -> int:
         return len(self._pinder_ids)
 
+    def sample_id(self, idx: int) -> str:
+        return self._pinder_ids[idx]
+
+    def sample_metadata(self, idx: int) -> dict:
+        return dict(source="PINDER", release=str(self.pinder_root),
+            manifest=str(self.manifest_path), sample_id=self._pinder_ids[idx],
+            pdb_id=self._pinder_ids[idx][:4].lower(),
+            converted_binder_chain=self._binder_chains[idx],
+            cluster_id=self.cluster_ids[idx] if self.cluster_ids is not None else None)
+
     def _cached_cif_path(self, idx: int) -> Path:
         pinder_id = self._pinder_ids[idx]
         # Shard by the source PDB ID to avoid a million-entry flat directory.
@@ -191,7 +201,13 @@ class PinderPdbProvider:
         return cif_path
 
     def __getitem__(self, idx: int):
-        cif_path = self._ensure_cif(idx)
+        import hashlib
+        from .sc_stream import item_rng
+        preparation_seed = int.from_bytes(hashlib.sha256(self._pinder_ids[idx].encode()).digest()[:4], "little")
+        # A cold PDB→CIF conversion can consume randomness. Its cache state must
+        # not change the subsequent featurization stream for the same sample.
+        with item_rng(preparation_seed):
+            cif_path = self._ensure_cif(idx)
         provider = CifFileProvider(
             [cif_path],
             binder_chain_ids=[self._binder_chains[idx]],

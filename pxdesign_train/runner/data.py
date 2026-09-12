@@ -151,7 +151,10 @@ class DesignSourceDataset(Dataset):
             local_idx = self._probe_index(idx, attempt, n)
             tried.append(local_idx)
             try:
-                return self._get_one(local_idx)
+                result = self._get_one(local_idx)
+                result["requested_provider_index"] = int(idx)
+                result["retry_substitutions"] = tried[:-1]
+                return result
             except (ValueError, RuntimeError) as exc:
                 if not str(exc).startswith(
                     ("DesignCropper:", "InferenceSafeBinder:", "CifProvider:", "Failed to parse CIF:")
@@ -198,6 +201,24 @@ class DesignSourceDataset(Dataset):
             crop = self._cropper.crop(atom_array, token_array, binder_chain_id=sel)
         else:
             crop = self._cropper.crop(atom_array, token_array, binder_atom_mask=sel)
+
+        # Record interface coverage before truncating the receptor. The binder is
+        # complete; representative-atom contacts use the native 8 A convention.
+        from scipy.spatial.distance import cdist
+        centers = np.asarray([int(token.centre_atom_index) for token in token_array])
+        coordinates = np.asarray(atom_array.coord)[centers]
+        observed = np.asarray(label["coordinate_mask"].cpu() if torch.is_tensor(label["coordinate_mask"]) else label["coordinate_mask"]).astype(bool)[centers]
+        observed &= np.isfinite(coordinates).all(-1)
+        binder_full = np.zeros(len(token_array), dtype=bool)
+        binder_full[crop.original_token_indices[crop.binder_token_mask]] = True
+        interface_full = np.zeros(len(token_array), dtype=bool)
+        bind_idx, target_idx = np.flatnonzero(binder_full & observed), np.flatnonzero(~binder_full & observed)
+        if len(bind_idx) and len(target_idx):
+            contacts = cdist(coordinates[bind_idx], coordinates[target_idx]) < self.hotspot_radius
+            interface_full[bind_idx] = contacts.any(1)
+            interface_full[target_idx] = contacts.any(0)
+        target_interface_before = int((interface_full & ~binder_full).sum())
+        target_interface_after = int((interface_full[crop.original_token_indices] & ~crop.binder_token_mask).sum())
 
         # Slice base feature_dict and label_dict to the kept tokens / atoms.
         feat = _slice_feature_dict(feat, atom_array, token_array, crop)
@@ -284,6 +305,8 @@ class DesignSourceDataset(Dataset):
             native_sc["sc_token_center_idx"] = strict_centres
             new_feat.update(native_sc)
 
+        new_feat["sc_interface_mask"] = torch.from_numpy(interface_full[crop.original_token_indices] & crop.binder_token_mask)
+
         return {
             "input_feature_dict": new_feat,
             "label_dict": new_label,
@@ -296,7 +319,20 @@ class DesignSourceDataset(Dataset):
             # index file afterwards would therefore mislabel those rows.
             "sample_id": self._sample_id(idx),
             "provider_index": int(idx),
-            "cluster_id": str(self.provider.cluster_ids[idx]) if hasattr(self.provider, "cluster_ids") else "",
+            "cluster_id": str(self.provider.cluster_ids[idx]) if getattr(self.provider, "cluster_ids", None) is not None else "",
+            "source_provenance": self.provider.sample_metadata(idx) if hasattr(self.provider, "sample_metadata") else {},
+            "crop_metadata": dict(crop_size=self.crop_size,
+                binder_tokens=int(crop.binder_token_mask.sum()),
+                target_tokens=int((~crop.binder_token_mask).sum()),
+                interface_radius=self.hotspot_radius,
+                target_interface_before=target_interface_before,
+                target_interface_after=target_interface_after,
+                target_interface_coverage=target_interface_after/target_interface_before if target_interface_before else None,
+                retained_token_indices=crop.original_token_indices.tolist(),
+                retained_atom_indices=crop.original_atom_indices.tolist(),
+                chain_ids=np.asarray(crop.atom_array.chain_id).astype(str).tolist(),
+                residue_indices=np.asarray(crop.atom_array.res_id).tolist(),
+                atom_names=np.asarray(crop.atom_array.atom_name).astype(str).tolist()),
         }
 
     def _sample_id(self, idx: int) -> str:

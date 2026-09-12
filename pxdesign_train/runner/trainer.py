@@ -47,6 +47,7 @@ from pxdesign_train.data.curriculum import (
 )
 from pxdesign_train.loss import PXDesignLoss
 from pxdesign_train.model import ProtenixDesignTrain
+from pxdesign_train.runner.sc_stream import MicrostepSampler, SCStream, isolated_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -537,7 +538,11 @@ class PXDesignTrainer:
 
     def _init_dataloader(self) -> None:
         c = self.components
-        if self.use_ddp:
+        if isinstance(c.train_dataset, SCStream):
+            if self.use_ddp:
+                raise ValueError("SC microstep stream currently supports one GPU; use accumulation")
+            sampler = MicrostepSampler(c.train_dataset, self.iters_to_accumulate)
+        elif self.use_ddp:
             sampler: torch.utils.data.Sampler = CurriculumDistributedSampler(
                 dataset=c.train_dataset,
                 schedule=c.schedule,
@@ -559,6 +564,7 @@ class PXDesignTrainer:
             sampler=sampler,
             num_workers=int(getattr(self.configs.training, "num_workers", 0)),
             collate_fn=_identity_collate,
+            generator=torch.Generator().manual_seed(int(getattr(self.configs, "seed", 0))+701),
         )
         self.eval_dl = c.eval_dataloader
         # Per-protein breakdown from the most recent `evaluate()`. Defined here so
@@ -611,15 +617,27 @@ class PXDesignTrainer:
             label_dict=batch["label_dict"],
             mode="train",
         )
+        self.last_forward_protocol = out.get("protocol", {})
         if out.get("supervised_sc", False):
             mse=out["sc_gt_mse"].float()
+            physical=out.get("sc_physical", mse*0.).float()
             # GT backbone is an input here, not a prediction to score as perfect.
-            return dict(loss=float(self.configs.stage4.weight_sc_aux)*mse,
+            return dict(loss=float(self.configs.stage4.weight_sc_aux)*mse + float(self.configs.stage4.weight_physical)*physical,
+                sc_physical=physical.detach(),
                 sc_gt_mse=mse.detach(),sc_gt_rmsd=mse.detach().sqrt(),
                 sc_observed_atoms=out["sc_observed_atoms"].detach().float(),
                 sc_rotation_augmented=out.get("sc_rotation_augmented", mse.new_zeros(())).detach().float(),
                 sc_skipped_noncanonical=out["sc_skipped_noncanonical"].detach().float(),
-                sc_invalid_native_frames=out["sc_invalid_native_frames"].detach().float())
+                sc_invalid_native_frames=out["sc_invalid_native_frames"].detach().float(),
+                **out.get("packing_metrics", {}))
+        if out.get("sc_adaptation", False):
+            aux, physical = out["sc_aux"].float(), out["sc_physical"].float()
+            return dict(loss=float(self.configs.stage4.weight_sc_aux)*aux + float(self.configs.stage4.weight_physical)*physical,
+                sc_aux=aux.detach(), sc_physical=physical.detach(),
+                sc_observed_atoms=out["sc_observed_atoms"].detach().float(),
+                sc_excluded_residues=out["sc_excluded_residues"].detach().float(),
+                reconstruction_ca_error=out["reconstruction_ca_error"].detach().float(),
+                **out.get("packing_metrics", {}))
         rep_atom_mask = batch["input_feature_dict"]["distogram_rep_atom_mask"]
         loss_out = self.loss_fn(
             pred_coordinate=out["x_denoised"],
@@ -684,6 +702,8 @@ class PXDesignTrainer:
             loss_out = self.forward_loss(batch)
             loss = loss_out["loss"]
         if not torch.isfinite(loss):
+            if getattr(getattr(self.configs, "stage4", None), "adaptation_protocol", "legacy") == "sc_only_v1":
+                raise FloatingPointError(f"Nonfinite SC loss at microstep {self.global_step}")
             self._log(f"Skip step {self.step}: non-finite loss {loss.item()}")
             return {k: torch.zeros_like(v) for k, v in loss_out.items()}
 
@@ -696,6 +716,10 @@ class PXDesignTrainer:
         # --- Optimizer step on the accumulation boundary (shared) ---
         is_update = (self.global_step + 1) % self.iters_to_accumulate == 0
         if is_update:
+            if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in self.model.parameters()):
+                for opt in self._optimizers:
+                    opt.zero_grad(set_to_none=True)
+                raise FloatingPointError(f"Nonfinite gradient before optimizer update {self.step}")
             # Sync the alternating phases' grads across ranks before clipping/step
             # (autograd.grad bypassed DDP's own all-reduce). No-op single-GPU.
             if self.train_mode == "alternating":
@@ -753,7 +777,7 @@ class PXDesignTrainer:
             if self.ema_wrapper is not None:
                 self.ema_wrapper.update()
             self.step += 1
-            if isinstance(self.train_sampler, (CurriculumSampler, CurriculumDistributedSampler)):
+            if isinstance(self.train_sampler, (CurriculumSampler, CurriculumDistributedSampler, MicrostepSampler)):
                 self.train_sampler.set_step(self.step)
         self.global_step += 1
         return loss_out
@@ -836,6 +860,7 @@ class PXDesignTrainer:
             dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
             p.grad /= world
 
+    @isolated_evaluation
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:
         """Score the whole validation set.
@@ -866,6 +891,12 @@ class PXDesignTrainer:
                 self.eval_dl = original
                 self.components.named_eval_dataloaders = named
             self.last_eval_per_protein = rows
+            if (self.rank == 0 and self.checkpoint_dir and
+                    getattr(getattr(self.configs, "stage4", None), "adaptation_protocol", "legacy") == "sc_only_v1"):
+                from pathlib import Path
+                from pxdesign_train.runner.sc_stream import atomic_json
+                atomic_json(Path(self.checkpoint_dir).parent/f"validation-step{self.step}.json",
+                    dict(step=self.step, weights="raw", metrics=results, proteins=rows))
             return results
         if self.eval_dl is None:
             self.last_eval_per_protein = []
@@ -875,7 +906,11 @@ class PXDesignTrainer:
         count = 0
         per_protein: list[dict[str, Any]] = []
         for i, batch in enumerate(self.eval_dl):
-            loss_out = self.forward_loss(batch)
+            precision_context = (torch.autocast("cuda", dtype=self._train_precision(), cache_enabled=False)
+                if self.device.type == "cuda" and getattr(getattr(self.configs, "stage4", None), "adaptation_protocol", "legacy") == "sc_only_v1"
+                else nullcontext())
+            with precision_context:
+                loss_out = self.forward_loss(batch)
             row = {k: float(v.detach()) for k, v in loss_out.items()}
             for k, v in row.items():
                 sums[k] = sums.get(k, 0.0) + v
@@ -886,8 +921,28 @@ class PXDesignTrainer:
             per_protein.append(
                 {"index": i, "sample_id": str(batch.get("sample_id", f"idx{i}")), **row}
             )
+            if getattr(getattr(self.configs, "stage4", None), "adaptation_protocol", "legacy") == "sc_only_v1":
+                per_protein[-1]["protocol"] = dict(getattr(self, "last_forward_protocol", {}))
+                per_protein[-1]["data_metadata"] = {key:batch.get(key) for key in
+                    ("source_name", "cluster_id", "source_provenance", "crop_metadata", "retry_substitutions")}
         self.last_eval_per_protein = per_protein
-        return {k: v / max(1, count) for k, v in sums.items()}
+        means = {k: v / max(1, count) for k, v in sums.items()}
+        # Keep per-protein means and add pooled, atom/count-weighted estimates.
+        from pxdesign_train.sidechain.metrics import summarize_metrics
+        prefixes = [key.removesuffix("chemical_atoms") for key in sums if key.endswith("/chemical_atoms")]
+        for prefix in prefixes:
+            pooled = {key.removeprefix(prefix):torch.tensor(value) for key,value in sums.items() if key.startswith(prefix)}
+            for key, value in summarize_metrics(pooled).items():
+                if key in ("symmetry_rmsd", "completeness", "bond_mae", "bad_bond_fraction", "chi_recovery", "rotamer_recovery"):
+                    means[prefix+key+"_pooled"] = float(value)
+            for metric, denominator in (("symmetry_rmsd", "observed_atoms"), ("completeness", "chemical_atoms"),
+                    ("bond_mae", "bond_count"), ("bad_bond_fraction", "bond_count"),
+                    ("chi_recovery", "chi_count"), ("rotamer_recovery", "rotamer_count")):
+                if prefix+metric in sums:
+                    values = [row[prefix+metric] for row in per_protein if row.get(prefix+denominator, 0) > 0]
+                    means[prefix+metric] = sum(values)/len(values) if values else 0.
+                    means[prefix+metric+"_valid_proteins"] = float(len(values))
+        return means
 
     # ----- run loop -----
 
@@ -939,8 +994,10 @@ class PXDesignTrainer:
                     train_metric_counts[key] = train_metric_counts.get(key, 0) + 1
 
                 source = str(batch.get("source_name", "unknown"))
+                if getattr(getattr(self.configs, "stage4", None), "adaptation_protocol", "legacy") == "sc_only_v1":
+                    source += "/" + str(batch["input_feature_dict"].get("backbone_source", "native"))
                 source_sums = source_aa_sums.setdefault(source, {})
-                for key in ("aa_ce", "aa_acc"):
+                for key in ("aa_ce", "aa_acc", "sc_gt_mse", "sc_aux", "sc_physical", "sc_observed_atoms", "sc_excluded_residues"):
                     if key in loss_out:
                         value = loss_out[key]
                         scalar = (
@@ -1004,7 +1061,7 @@ class PXDesignTrainer:
                             + " ".join(
                                 f"val_{_log_key(k)}={v:.4g}"
                                 for k, v in row.items()
-                                if k not in ("index", "sample_id", "source")
+                                if k not in ("index", "sample_id", "source", "protocol", "data_metadata")
                             )
                         )
                     if metrics:
@@ -1067,7 +1124,15 @@ class PXDesignTrainer:
             state["integrated"] = integrated_record(self.raw_model)
         if self.ema_wrapper is not None:
             state["ema"] = dict(shadow=self.ema_wrapper.shadow, decay=self.ema_wrapper.decay)
-        torch.save(state, path)
+        import tempfile
+        fd, temporary = tempfile.mkstemp(prefix=".checkpoint-", suffix=".pt", dir=self.checkpoint_dir)
+        os.close(fd)
+        try:
+            torch.save(state, temporary)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         self._log(f"Saved checkpoint -> {path}")
         return path
 

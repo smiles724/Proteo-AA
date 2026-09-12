@@ -583,4 +583,8 @@ training_configs["stage4"] = {
     "bb_trainable_prefixes": [""],  # parser needs a typed list; empty entries select nothing
     "weight_aa_pre": 1.0, "weight_aa_revision": 1.0,
     "weight_sc_aux": 1.0, "weight_physical": 0.1,
+    "adaptation_protocol": "legacy",  # explicit opt-in for the two SC-only recipes
+    "native_fraction": 0.5, "paired_fraction": 0.5, "full_sample_fraction": 0.0,
+    "reconstruction_sigmas": "0.4,1,2,4",
+    "reconstruction_max_ca_error": 3.0, "reconstruction_max_bond_error": 0.3,
 }

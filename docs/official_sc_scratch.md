@@ -85,6 +85,14 @@ Full regression job **114931** passed **653 tests**. GPU smoke **114930** passed
 observation-independent forward outputs, invalid-frame gating, finite backward,
 frozen pretrained tensors, native packing, validation and save/resume.
 
+Replacement warm-up **114932** uses code **6d84def** and starts SC from scratch,
+with the same monomer-only dataset and frozen pretrained components.
+It passed step 500 and saved `checkpoints/step500.pt` (readable archive, 2.9 GiB);
+Slurm still reported RUNNING after that save. SC losses and logged gradient norms
+were finite through that point. This establishes startup and persistence, not
+held-out packing quality.
+[Run configuration](validation/official_sc_scratch/run_114932.json).
+
 ## Subsequent phases
 
 1. `sc_complex_adapt`: warm-start the trained SC weights and introduce PINDER

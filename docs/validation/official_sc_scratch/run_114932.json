@@ -1,0 +1,45 @@
+{
+  "job_id": 114932,
+  "implementation_commit": "6d84def69af085286b02dd8f4779f7f4373a2dca",
+  "phase": "sc_warmup",
+  "sc_mask_contract": "chemical_model_observed_v1",
+  "sidechain_initialization": "scratch",
+  "only_sidechain_trainable": true,
+  "backbone_checkpoint_sha256": "b075867bae942dc0c6487173736922b0e2913308c1ba542d227418b6e176478d",
+  "fampnn_checkpoint_sha256": "8969b3f1f3c941178076c7800952595a18b56fd3828d15bb993d3ef537938a05",
+  "data": {
+    "source": "protenix_monomer",
+    "sampling_fraction": 1.0,
+    "train_rows": 47622,
+    "validation_rows": 308,
+    "crop_size": 384,
+    "backbone_frames": "native",
+    "sidechain_types": "native",
+    "sidechain_targets": "observed_native_coordinates_with_valid_native_frames"
+  },
+  "training": {
+    "sc_lr": 0.00005,
+    "warmup_steps": 2000,
+    "accumulation": 8,
+    "max_steps": 50000,
+    "checkpoint_interval": 500,
+    "eval_interval": 2000,
+    "revision_rounds": 0,
+    "sc_to_aa": false,
+    "sc_to_bb": false,
+    "backbone_refinement": false
+  },
+  "validation": {
+    "regression_job": 114931,
+    "tests_passed": 653,
+    "gpu_smoke_job": 114930,
+    "smoke_passed": true
+  },
+  "output_dir": "/hai/scratch/yfsun/proteo_aa_runs/official_sc_warmup/114932",
+  "verified_training_step": 500,
+  "verified_checkpoint": "/hai/scratch/yfsun/proteo_aa_runs/official_sc_warmup/114932/checkpoints/step500.pt",
+  "checkpoint_archive_readable": true,
+  "state_at_step500_check": "RUNNING",
+  "supersedes_failed_job": 114920,
+  "supersedes_canceled_job": 114928
+}

@@ -39,6 +39,7 @@ def main():
     from pxdesign_train.model import ProtenixDesignTrain
     from pxdesign_train.stage4 import generate, checkpoint_identity, masked_aa_objective
     from pxdesign_train.structure import write_mmcif
+    from pxdesign_train.backbone_metrics import backbone_geometry
     from pxdesign_train.sidechain.frames import gather_backbone
     from pxdesign_train.sidechain.physical import clash_loss
     from pxdesign_train.aa.atom_mapping import AA_ORDER
@@ -122,6 +123,9 @@ def main():
                         row[f"recovery_{label}"]=float((assigned[valid] == native[valid]).float().mean()) if valid.any() else None
                         row[f"recovery_count_{label}"]=int(valid.sum())
                 row["composition"]=" ".join(map(str,torch.bincount(assigned[design],minlength=20).tolist()))
+                row.update(backbone_geometry(state.backbone_xyz[0,0].cpu().numpy(),
+                    state.bb_atom_idx[0,0].cpu().numpy(),design.cpu().numpy(),
+                    state.chain_index[0,0].cpu().numpy(),state.residue_index[0,0].cpu().numpy()))
                 row["clash_penalty"]=float(clash_loss(state.sc_xyz.reshape(1,-1,3),valid_mask=state.generation_mask.reshape(1,-1),
                     group_id=torch.arange(design.numel(),device=ca.device).repeat_interleave(10)[None],
                     context_coords=state.backbone_xyz.reshape(1,-1,3),context_mask=(design[feat["atom_to_token_idx"].long()] | feat["fixed_atom_mask"].bool())[None],

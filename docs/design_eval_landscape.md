@@ -12,10 +12,13 @@
 
 | 标记 | 含义 |
 |---|---|
-| `EXPLICIT_SOURCE` | 论文正文、附录或 SI 里明确写出的。引用时可以直接说"论文规定" |
-| `CODE_VERIFIED` | 从放出的源码或数据里直接读到/算出来的。强度高于论文正文——代码和论文不一致时以代码为准，并把不一致本身记下来 |
+| `EXPLICIT_SOURCE` | 论文正文、附录或 SI 里明确写出的 **published protocol**。引用时可以说"论文规定" |
+| `CODE_VERIFIED` | 从放出的 **released implementation**（源码或数据）里直接读到/算出来的 |
+| `SOURCE_CODE_CONFLICT` | 论文写的和放出的代码不一致。**两边都记下来，不自动以哪边为准**——放出的实现可能是重写版或有版本漂移，论文描述的也可能是当时真跑的那版 |
 | `INFERRED` | 由现有证据推出，但没有任何一处明确这么写。**不能当 protocol 引用** |
 | `UNRESOLVED` | 查过但没查到，或两处来源冲突未能裁决。明确标出来，不要填一个看着合理的数 |
+
+> `EXPLICIT_SOURCE` 和 `CODE_VERIFIED` 是**两类不同的事实**，不是强弱两档：前者是作者声明的协议，后者是这份放出的代码实际做的事。要复现论文数字时以前者为准并注明版本；要跑这份代码时以后者为准。
 
 对 Proteo-AA 的适用性另用一组标记：
 
@@ -529,13 +532,32 @@ README 原文：*"We have found that filtering at **pae_interaction < 10** is a 
 | **case selection** | 出自 AlphaProteo 附录 Table S1（p38），表题 "Binder design problem specifications for in silico benchmarking **and** experimental testing"。正文的"八个靶点"是**湿实验子集**（7 成功 + TNFα 失败） | `EXPLICIT_SOURCE` |
 | **input conditioning** | 靶点结构**作为已知条件给定**（裁剪范围 + hotspot 残基列表），不重建靶点 | `EXPLICIT_SOURCE` |
 | **expected output** | binder 序列 + 复合物坐标 | `EXPLICIT_SOURCE` |
-| **sample count / length** | **ProtDBench**：范围内**每个整数长度** × **4 条骨架** × **8 条序列**；逐靶点 1,312–2,912 条，十靶点合计 22,720。长度范围逐靶点不同：BHRF1/SC2RBD 80–120、IL-7RA/PD-L1/TrkA/TNFα 50–120、IR/H1 40–120、IL-17A/VEGF-A 50–140<br>**A-CODE**：十靶点**统一** 80–130，每靶点 328–728 条 | ProtDBench `CODE_VERIFIED`（设计名 `BHRF1_len100_sample_2` 100% 可解析，长度×骨架×序列 = 实际条数精确吻合）<br>A-CODE `EXPLICIT_SOURCE` |
-| **sequence design route** | 每条骨架 8 条序列（`seq_idx` 0–7） | `CODE_VERIFIED` |
+| **sample count / length（ProtDBench）** | 范围内**每个整数长度** × **4 条骨架** × **8 条序列**；逐靶点 1,312–2,912 条，十靶点合计 22,720。长度范围逐靶点不同：BHRF1/SC2RBD 80–120、IL-7RA/PD-L1/TrkA/TNFα 50–120、IR/H1 40–120、IL-17A/VEGF-A 50–140 | `CODE_VERIFIED`（设计名 `BHRF1_len100_sample_2` 100% 可解析，长度数×4×8 = 实际条数对十个靶点逐个精确吻合） |
+| **sample count / length（A-CODE）** | 原文只明确：**每靶点 328–728 条 binder，长度在 80–130 区间内**，同一靶点不同长度的成功数最后**汇总**（Appendix C.2）。<br>**没有**给出逐靶点长度排布、是否均匀采样、每个长度分配多少条 | 区间与汇总方式 `EXPLICIT_SOURCE`；**逐靶点长度排布与样本分配 `UNRESOLVED`** |
+| **sequence design route（ProtDBench）** | 每条骨架 8 条序列（`seq_idx` 0–7） | `CODE_VERIFIED` |
+| **sequence design route（A-CODE）** | 分两个 variant 各自报数：**模型共设计出的序列**，和 **ProteinMPNN 重设计的单条序列** | `EXPLICIT_SOURCE` |
+
+> **不要因为三者共用十个靶点就把采样/序列协议合并。** ProtDBench 的"每长度 4 骨架 × 8 序列"是它自己复跑的协议，不是 A-CODE 的；A-CODE 的两个 variant 也不对应 ProtDBench 的 8 条序列。
+
+#### 关于 A-CODE 的 328–728：一个算术对应，但只是 inference
+
+`INFERRED`。AlphaProteo 逐靶点长度范围内的整数个数只有四个取值 {41, 71, 81, 91}，乘 8 得 **{328, 568, 648, 728}**——恰好覆盖 A-CODE 所述区间的端点：
+
+| 长度个数 | 靶点 | ×8 |
+|---:|---|---:|
+| 41 | BHRF1, SC2RBD | **328** |
+| 71 | IL7RA, PDL1, TNFa, TrkA | 568 |
+| 81 | H1, IR | 648 |
+| 91 | IL17A, VEGFA | **728** |
+
+这**暗示** A-CODE 也走了逐靶点整数长度 × 8 条序列。但有反证：A-CODE 写的长度是 **80–130**，AlphaProteo 的逐靶点范围是 40–140，两者对不上。
+**两种可能未能裁决**：(a) A-CODE 沿用了 AlphaProteo 的逐靶点范围，正文 80–130 是笼统描述；(b) 算术吻合是巧合。
+**只作为 inference 记录，不能当 protocol 用。** `UNRESOLVED`
 | **evaluator** | AF2，**单链非 multimer**，`model_ids: [0]`（只用 model 1），`use_initial_guess: True`，`use_binder_template: True`；**af2 块没有 `use_msa` 键** | `CODE_VERIFIED`（`protd_configs/eval.py`） |
 | **metric / units** | `pLDDT` 0–1；`i_pTM` 0–1；`i_pAE` 归一化（原始/31）；`unscaled_i_pAE` 原始 Å；`bound_unbound_RMSD` = binder 单独预测 vs 复合物预测里的 binder 链；`af2_binder_pred_design_rmsd` = binder 单独预测 vs **原始设计** | `CODE_VERIFIED`（`tools/af2/main_af2_monomer.py:164,176`） |
 | **threshold** | **`af2_easy`（= A-CODE Table 4 用的档）**：`pLDDT>0.8`、`i_pTM>0.5`、`i_pAE<0.35`（≈10.85 Å）、`bound_unbound_RMSD<3.5`<br>**`af2_opt`**：`pLDDT>0.9`、`unscaled_i_pAE<7.0`、`af2_binder_pred_design_rmsd<1.5`<br>**`ptx`/`ptx_mini`**：`iptm_binder>0.85`、`ptm_binder>0.88`、`RMSD<2.5`；**`ptx_basic`** 放宽到 0.8/0.8 | `CODE_VERIFIED` |
 | **aggregation** | designability = 通过率（条数占比）；同一靶点不同 binder 长度的成功数汇总 | `EXPLICIT_SOURCE` |
-| **diversity / novelty** | ProtDBench 另有簇级成功率（Foldseek 聚类后计数）和 24 小时 GPU 预算下的吞吐量 | `EXPLICIT_SOURCE`；聚类参数 `UNRESOLVED` |
+| **diversity / novelty** | 簇级成功率：**用 TMalign 聚类（不是 Foldseek）**，只对**通过该过滤档**的设计聚类，TM 阈值 **[0.6, 0.8, 1.0]** 三档各算一次，`簇中心数 / total_backbones × 100`（**分母是骨架数不是设计数**），默认对 `af2_easy` 档做。另有 24 小时 GPU 预算下的吞吐量 | `CODE_VERIFIED`（`post_processing/config.py:33` 的 `CLUSTER_TM_THRESHOLDS = [0.6, 0.8, 1.0]`；`post_processing/binder.py:237-256, 520-570`） |
 | **wet-lab labels** | 这十个靶点本身无逐设计标签。ProtDBench 另带 Cao 湿实验打分表：**236,246 条设计 × 8 打分器，1,485 条阳性**（`data/filter_benchmark/cao_verifier_scores.csv.gz`） | `CODE_VERIFIED` |
 | **code / data** | `github.com/congliuUvA/ProtDBench`，`data/` 164 MB 随仓库发布（七个方法的逐条设计分数 + Cao 打分表）。构建于 `github.com/bytedance/PXDesignBench`（python 包多一个 `post_processing/` 模块，配置命名空间 `pxd_configs`→`protd_configs`） | `CODE_VERIFIED` |
 | **compute** | 打分需 AF2 + ESMFold + ProteinMPNN 权重（`download_tool_weights.sh`）。生成 22,720 条设计是主要成本 | `EXPLICIT_SOURCE` |
@@ -659,9 +681,9 @@ README 原文：*"We have found that filtering at **pae_interaction < 10** is a 
 | **sample count** | 每位点 1.5 万–10 万条设计，binder 长度 50–65 残基 | `EXPLICIT_SOURCE`（二手） |
 | **evaluator** | 无深度学习验证器——**RIFDock + Rosetta**；筛选靠**酵母表面展示 + 多轮 FACS** | `EXPLICIT_SOURCE`（二手） |
 | **metric** | 实验指标 **SC₅₀**（50% 表达细胞被收集时的靶点浓度）；设计阶段排序用 Rosetta ddG 和 contact molecular surface | `EXPLICIT_SOURCE`（二手） |
-| **threshold** | 设计阶段的 ddG/CMS 数值阈值只在放出的 `cao_2021_protocol/` 脚本里，论文正文没有 | `UNRESOLVED` |
+| **threshold** | **硬门槛**（`cao_2021_protocol/final_filtering.ipynb`，全部须通过）：`ddg ≤ −30`、`contact_molecular_surface ≥ 450`、`score_per_res ≤ −2.4`、`mismatch_probability ≤ 0.1`、`sap_score ≤ 35`、`binder_delta_sap ≥ 12`（`ss_sc ≥ 0.77` 在脚本里被注释掉，标为 optional）。<br>过完硬门槛再做**多指标百分位排序**（`top_x_by_multiple`：二分搜索一个百分位，使各项 top-X 的交集恰好等于要订的条数），排序项 `ddg`（越低越好）、`contact_patch`、`target_delta_sap`、`contact_molec_sq5_apap_target`（越高越好）。<br>更早的 motif 选择阶段另有 `motif_extraction.py -ddg_threshold` 默认 **−20** | `CODE_VERIFIED`（2026-09-12 下载 `scripts_and_main_pdbs.tar.gz` 核对） |
 | **wet-lab labels** | 这是**领域里最大的公开 binder 标签集**。ProtDBench 的 Cao 打分表含 **236,246 条设计 × 8 打分器，1,485 条阳性**（12 个靶点） | `CODE_VERIFIED` |
-| **code / data** | 六个 tar.gz：`files.ipd.uw.edu/pub/robust_de_novo_design_minibinders_2021/supplemental_files/` | `EXPLICIT_SOURCE`（二手，未下载核对） |
+| **code / data** | 六个 tar.gz：`files.ipd.uw.edu/pub/robust_de_novo_design_minibinders_2021/supplemental_files/`。`scripts_and_main_pdbs.tar.gz` 62 MB，含 `cao_2021_protocol/`（RosettaScripts XML、motif 抽取脚本、`final_filtering.ipynb`）。**XML 里的 `Ddg` 和 `ContactMolecularSurface` 都带 `confidence="0"`，在 RosettaScripts 里意为只报告不过滤**——真正的筛选在 notebook 里 | `CODE_VERIFIED` |
 | **Proteo-AA** | `OUT_OF_SCOPE` 作为生成基准（设计已存在），但作为**打分器校准数据**是 `DIRECT_NOW`——§6.5.2 那组 AUC 就是拿它算的，不需要任何湿实验能力 | — |
 
 > 为什么它重要：BoltzGen 在它上面标定排名权重、Latent-X 在它上面网格搜索三个验证器的阈值、ODesign 从它取基准靶点、Adaptyv 拿它当序列排除库。
@@ -708,19 +730,30 @@ README 原文：*"We have found that filtering at **pae_interaction < 10** is a 
 
 ---
 
-## 9.11 binder 线仍未解决的
+## 9.11 binder 线未解决项（本线已暂停）
 
-| 项 | 状态 |
+**binder / ProtDBench / A-CODE 的核实到此告一段落**（2026-09-12）。下面是明确留着的口子，都不影响现有结论的可用性。
+
+### 本轮解决掉的
+
+| 项 | 结论 |
 |---|---|
-| ODesign 到底 10 还是 11 个靶点，以及未点名的那九个 | `UNRESOLVED`——论文正文与图注冲突 |
-| ODesign 的代码地址 | `UNRESOLVED` |
-| BoltzDesign1 论文的靶点清单 | `UNRESOLVED`——bioRxiv 限流 |
-| Cao 2022 设计阶段的 ddG / CMS 数值阈值 | `UNRESOLVED`——只在放出的脚本里，未下载核对 |
-| BindCraft 的 PD-1 / PD-L1 / CLDN1 / CrSAS-6 / Bet v1 五个 PDB 编号 | `UNRESOLVED` |
-| BoltzGen 除前两场之外的 26 靶点完整名单 | `UNRESOLVED` |
-| ProtDBench 簇级成功率的 Foldseek 聚类参数 | `UNRESOLVED` |
-| RFdiffusion 论文 Extended Data Fig. 8F 的阈值 | 二手，未核原文（Nature 付费墙） |
-| BindCraft 的 12 靶点实验命中数逐个对应 | 二手，未核原文 |
+| ProtDBench 簇级成功率的聚类参数 | **TMalign**（不是 Foldseek），TM 阈值 `[0.6, 0.8, 1.0]`，只聚通过档的设计，分母是 backbone 数 `CODE_VERIFIED` |
+| `ptx` / `ptx_mini` 是否同一次运行 | **不是**，两次独立 `protenix_predict()`；全量 Protenix 默认 `False`。五档需要三次模型运行 `CODE_VERIFIED` |
+| Cao 2022 的 ddG / CMS 阈值 | 已下载核对，见 §9.7 的 threshold 行 `CODE_VERIFIED` |
+
+### 仍未解决（优先级从高到低）
+
+| 项 | 状态 | 为什么先放着 |
+|---|---|---|
+| A-CODE 逐靶点长度排布与样本分配 | `UNRESOLVED` | 原文只给区间和汇总方式。328–728 与逐靶点长度数×8 的算术吻合是 `INFERRED`，且与"80–130"这一表述相冲突 |
+| ODesign 10 还是 11 个靶点、未点名的那九个 | `UNRESOLVED` | 论文正文与图注自相矛盾，无法从外部裁决 |
+| ODesign 的代码地址 | `UNRESOLVED` | 正文只给网页服务 |
+| BoltzDesign1 的靶点清单 | `UNRESOLVED` | bioRxiv 反复限流；仓库只有单例 |
+| BindCraft 五个靶点的 PDB 编号（PD-1、PD-L1、CLDN1、CrSAS-6、Bet v1） | `UNRESOLVED` | Nature Data Availability 未列全 |
+| RFdiffusion 论文 Extended Data Fig. 8F 的阈值 | 二手 | Nature 付费墙。README 的 `pae_interaction < 10` 已 `CODE_VERIFIED`，够用 |
+| BoltzGen 除前两场外的 26 靶点完整名单 | `UNRESOLVED` | 论文未以单一清单给出；非当前 P0 |
+| RFpeptides 的 iPAE 除数是否为 31 | `INFERRED` | 按 ColabDesign 族推定，该文未自陈 |
 
 # 十、配方明细：抗体 / 纳米抗体
 
@@ -1316,7 +1349,18 @@ AME 发表的定义是**两原子 < 1.5 Å**；同一仓库代码里的 `criteri
 | `ptx_mini` | Protenix-Mini | 同上 | Protenix-Mini |
 | `ptx_basic` | Protenix 放宽 | iptm_binder>0.8、ptm_binder>0.8、RMSD<2.5 | Protenix |
 
-**跑一次 AF2 + 一次 Protenix，就拿到五个数。** 而且这五档覆盖了领域里两套主要惯例（BindCraft 系和 AF2-IG 系）。
+**但不是"跑一次 AF2 + 一次 Protenix 就拿到五个数"** —— 要跑**三次模型**：`CODE_VERIFIED`
+
+| 模型运行 | 产出哪几档 | 说明 |
+|---|---|---|
+| AF2（复合物 + 单体两次预测） | `af2_easy`、`af2_opt` | 两档共用同一批 AF2 输出，只是阈值和 RMSD 定义不同 |
+| Protenix-**Mini** | `ptx_mini` | 用 `ptx_mini_*` 列 |
+| Protenix **全量** | `ptx`、`ptx_basic` | 共用 `ptx_*` 列，`ptx_basic` 是放宽档。**`eval_protenix` 默认 `False`** |
+
+依据：`protd_configs/eval.py` 里 `eval_protenix_mini: True` / `eval_protenix: False` 是两个独立开关，`tasks/binder.py:145,148` 是两个独立分支，各自调一次 `protenix_predict()`。
+旁证：放出的 PXDesign 数据里 `ptx_success` 和 `ptx_basic_success` **整列为空**，与全量 Protenix 默认不跑一致。`CODE_VERIFIED`
+
+这五档覆盖了领域里两套主要惯例（BindCraft 系和 AF2-IG 系）。
 
 **对我们有个额外优势**：`Protenix` 本来就在 `PXDesign-train/Protenix/` 里，是我们的依赖。所以 `ptx*` 那三档对我们是**边际成本最低**的。
 
@@ -1332,7 +1376,8 @@ AME 发表的定义是**两原子 < 1.5 Å**；同一仓库代码里的 `criteri
 | 工具 | 谁要用 | 代价 |
 |---|---|---|
 | **AF2**（权重约 5.3 GB） | AF2-IG 惯例、BindCraft、RFdiffusion、ProtDBench 的 af2 两档、Adaptyv（经 ColabFold） | 中 |
-| **Protenix** | ProtDBench 的 ptx 三档 | **我们已有** |
+| **Protenix-Mini** | `ptx_mini` 档 | **我们已有**（`PXDesign-train/Protenix/`） |
+| **Protenix 全量** | `ptx` + `ptx_basic` 两档，**默认不跑** | 我们已有，但要显式打开 |
 | **ESMFold** | MotifBench、La-Proteina、PocketGen、EnzyControl、无条件生成的约定俗成协议 | 中 |
 | **Chai-1** | AME、DISCO、Latent-X、RFdiffusion3 | 中（"并非所有 GPU 架构都能跑"） |
 | **AF3** | ODesign、Germinal、BoltzDesign1 | 高（需自行申请安装 + 数据库 + HMMER） |
@@ -1395,7 +1440,7 @@ AME 发表的定义是**两原子 < 1.5 Å**；同一仓库代码里的 `criteri
 
 不是推荐"用哪个"，是按"投入产出"排的：
 
-1. **ProtDBench 五档**——我们有 Protenix，靶点已复现，它的数据还现成。加 AF2 权重就能同时拿五个数
+1. **ProtDBench 的档位**——靶点已复现，数据现成，Protenix 我们本来就有。注意要拿满五档需要三次模型运行（AF2、Protenix-Mini、Protenix 全量），全量那次默认是关的；只加 AF2 权重先拿到 `af2_easy` + `af2_opt` 两档已经够对标 A-CODE Table 4
 2. **在同一批设计上加 Chai-1 或 AF3 的判定**——看结论跨验证器族是否还成立（这是最能暴露过拟合的一步）
 3. **MotifBench 30 题**——独立维护、有排行榜、约 1 GPU-天，是单体/scaffolding 那条线最省事的入口
 4. **AME 41 个**——酶那条线唯一会被审稿人认的数字，但要先算清 32,800 次 Chai 折叠的账，可能得先跑子集

@@ -540,6 +540,11 @@ def build_model(checkpoint: str | None, device: str):
     from pxdesign_train.configs.configs_train import training_configs
     from pxdesign_train.model import ProtenixDesignTrain
 
+    if checkpoint:
+        record = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
+        if "integrated" in record:
+            from pxdesign_train.checkpoints import evaluation_model
+            return evaluation_model(checkpoint, device=device)
     configs = parse_configs(training_configs, arg_str="")
     configs.enable_sidechain = True
     configs.enable_coevolution = True

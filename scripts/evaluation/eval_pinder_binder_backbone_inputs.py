@@ -267,7 +267,7 @@ def _forward_metrics(trainer, batch: dict[str, Any], ca_lddt_score) -> dict[str,
 
 
 def _summarize_aa_confusion(
-    confusion: np.ndarray, condition: str, sigma: float | None
+    confusion: np.ndarray, condition: str, sigma: float | None = None
 ) -> tuple[dict[str, float | int], list[dict[str, Any]]]:
     """Return collapse-sensitive aggregate and per-class sequence metrics."""
     confusion = np.asarray(confusion, dtype=np.int64)

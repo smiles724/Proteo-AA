@@ -18,35 +18,25 @@
 #   bash scripts/training/slurm_stage4_fampnn_binder_hai.sh --dry-run   # login node
 #   sbatch scripts/training/slurm_stage4_fampnn_binder_hai.sh
 #
-# STAGE4_PHASE=IV-A trains only the FaMPNN sequence network, on contexts the
-# frozen backbone and packer generate. With the backbone, packer and feedback
-# modules all frozen, no autograd graph is retained through them, which is why
-# a 384 crop is affordable here even though Stage III needed 512 to be a 2x
-# Stage II memory bet. IV-B/IV-C open the packer and the atom-attention decoder
-# and have NOT been memory-proven at this crop -- re-prove it before switching.
-#
-# Every knob below is an override, e.g. STAGE4_PHASE=IV-B CROP_SIZE=256 sbatch ...
+# The migration starts with SC adaptation and both pretrained networks frozen.
+# Phase transitions require WARM_START_CHECKPOINT and explicit revision/feedback
+# controls; RESUME_CHECKPOINT restores the recorded phase and optimizer state.
+# Memory at production crop sizes remains to be measured for each phase.
 set -euo pipefail
 
-export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-stage4-fampnn}
+export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn}
 export PROTEOAA_DATA_ROOT=${PROTEOAA_DATA_ROOT:-/hai/scratch/yfsun}
 export PROTEOAA_CODE_ROOT=${PROTEOAA_CODE_ROOT:-/hai/users/y/f/yfsun/Protein Project}
 export PYTHON_BIN=${PYTHON_BIN:-/hai/users/y/f/yfsun/miniconda3/envs/ml/bin/python}
 
-# The intended complete Stage III co-evolution donor. Job 111408 (crop 448,
-# mixed monomer/PINDER, warm-started from Stage II step52500 + AA head step9000)
-# timed out at step 6650 of 30000, so step6000 is its last checkpoint -- it is
-# the most-trained co-evolution binder state that exists, not a finished Stage
-# III. It carries what Stage IV needs from a donor: the backbone, the one-step
-# global-coordinate packer (edm=false), and the feedback modules. Its AA head is
-# irrelevant here; Stage IV drops it for FaMPNN. See
-# ../Proteo-AA-sjm-binder/docs/stage3_binder_run_111408_report.md.
-export STAGE3_CHECKPOINT=${STAGE3_CHECKPOINT:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt}
+# Stage III supplies sidechain_module only. Backbone and feedback have separate origins.
+export BACKBONE_CHECKPOINT=${BACKBONE_CHECKPOINT:-$PROTEOAA_REPO/runs/component_donors/pxdesign_v0.1.0.pt}
+export SC_CHECKPOINT=${SC_CHECKPOINT:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt}
 export OUTPUT_DIR=${OUTPUT_DIR:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage4_fampnn_binder/${SLURM_JOB_ID:-dry-run}}
 
-export STAGE4_PHASE=${STAGE4_PHASE:-IV-A}
-export TRAIN_ROUNDS=${TRAIN_ROUNDS:-1}
-export INFERENCE_ROUNDS=${INFERENCE_ROUNDS:-3}
+export STAGE4_PHASE=${STAGE4_PHASE:-sc_adapt}
+export TRAIN_ROUNDS=${TRAIN_ROUNDS:-0}
+export INFERENCE_ROUNDS=${INFERENCE_ROUNDS:-0}
 export CROP_SIZE=${CROP_SIZE:-384}
 export COMPLEX_MAX_N_TOKEN=${COMPLEX_MAX_N_TOKEN:-640}
 export MAX_STEPS=${MAX_STEPS:-30000}

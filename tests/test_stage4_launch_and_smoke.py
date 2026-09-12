@@ -30,7 +30,7 @@ def test_hai_launcher_argument_precedence(tmp_path, dry_run, override):
     env.update(PROTEOAA_REPO=str(ROOT), PROTEOAA_DATA_ROOT=str(tmp_path / "data"),
                PROTEOAA_CODE_ROOT=str(tmp_path / "Code With Spaces"),
                PYTHON_BIN=str(interpreter), CAPTURE_FILE=str(capture),
-               OUTPUT_DIR=str(tmp_path / "output"),
+               OUTPUT_DIR=str(tmp_path / "output"), BACKBONE_CHECKPOINT=str(tmp_path / "bb.pt"), SC_CHECKPOINT=str(tmp_path / "sc.pt"),
                EVAL_INTERVAL="2000", ITERS_TO_ACCUMULATE="8", NUM_WORKERS="4")
     options = ["--dry-run"] if dry_run else []
     expected = (2000, 8, 4)
@@ -51,7 +51,9 @@ def test_hai_launcher_argument_precedence(tmp_path, dry_run, override):
     assert ("--dry-run" in args) == dry_run
     if dry_run:
         assert last_value("--device") == "cpu"
-    assert last_value("--protenix-code-dir") == str(tmp_path / "Code With Spaces/Protenix")
+    assert last_value("--protenix-code-dir") == str(ROOT / "Protenix")
+    preflight = next(call for call in calls if call[0] == "scripts/utilities/preflight_stage4_fampnn.py")
+    assert preflight[3:] == args[1:]
 
 
 def _smoke_selector():

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import math
@@ -18,16 +19,40 @@ RAW_METRICS = (
 )
 
 
+def _parsed(value):
+    if isinstance(value, str):
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return value
+    return value
+
+
 def _truth(value: Any) -> bool:
+    value = _parsed(value)
+    if isinstance(value, (tuple, list)):
+        return bool(value) and all(_truth(item) for item in value)
     return str(value).strip().lower() in {"1", "true", "t", "yes"}
 
 
 def _float(value: Any) -> float | None:
+    value = _parsed(value)
+    if isinstance(value, (tuple, list)):
+        values = [_float(item) for item in value]
+        if not values or any(item is None for item in values):
+            return None
+        return sum(values) / len(values)
+    if isinstance(value, bool):
+        return None
     try:
         result = float(value)
         return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
+
+
+def valid_score(row):
+    return all(_float(row.get(metric)) is not None for metric in RAW_METRICS[:3])
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,7 +74,8 @@ def main() -> None:
             with score_csv.open() as handle:
                 scores = list(csv.DictReader(handle))
         expected = int(task["expected_sequences"])
-        successes = sum(_truth(row.get("af2_opt_success")) for row in scores)
+        valid = [row for row in scores if valid_score(row)]
+        successes = sum(_truth(row.get("af2_opt_success")) for row in valid)
         row: dict[str, Any] = {
             "model_label": task["model_label"],
             "target": task["target"],
@@ -57,6 +83,10 @@ def main() -> None:
             "n_backbones": int(task["n_backbones"]),
             "expected_sequences": expected,
             "scored_sequences": len(scores),
+            "valid_scored_sequences": len(valid),
+            "invalid_scores": len(scores) - len(valid),
+            "missing_scores": max(0, expected - len(scores)),
+            "scored_failures": len(valid) - successes,
             "coverage": len(scores) / expected if expected else 0.0,
             "strict_af2ig_successes": successes,
             "designability": successes / expected if expected else 0.0,
@@ -66,6 +96,7 @@ def main() -> None:
             values = [_float(item.get(metric)) for item in scores]
             finite = [value for value in values if value is not None]
             row[f"mean_{metric}"] = sum(finite) / len(finite) if finite else None
+            row[f"n_{metric}"] = len(finite)
         detail_rows.append(row)
 
     aggregates = []
@@ -90,6 +121,15 @@ def main() -> None:
             }
         )
 
+        aggregate = aggregates[-1]
+        for key in ("valid_scored_sequences", "invalid_scores", "missing_scores", "scored_failures"):
+            aggregate[key] = sum(row[key] for row in rows)
+        for metric in RAW_METRICS:
+            count = sum(row[f"n_{metric}"] for row in rows)
+            aggregate[f"mean_{metric}"] = sum((row[f"mean_{metric}"] or 0.) * row[f"n_{metric}"] for row in rows) / count if count else None
+
+    if not detail_rows:
+        raise ValueError("Task file contains no evaluation tasks")
     out = Path(args.output_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     detail_path = out / "designability_by_target.csv"

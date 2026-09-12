@@ -175,3 +175,16 @@ def test_prepare_tasks_and_summary_count_missing_scores_as_failures(
         row = next(csv.DictReader(handle))
     assert float(row["coverage"]) == pytest.approx(0.5)
     assert float(row["designability"]) == pytest.approx(0.5)
+
+
+def test_summary_parses_scalar_and_list_scores():
+    summary = _module("alpha_summary_forms", "scripts/evaluation/summarize_alphaproteo_designability.py")
+    assert summary._float("[0.91]") == pytest.approx(.91)
+    assert summary._float("[1.0, 3.0]") == 2.
+    assert summary._float("bad") is None
+    assert summary._float("[]") is None
+    assert summary._float("[None]") is None
+    assert summary._float("nan") is None
+    assert summary._truth("[True]")
+    assert not summary._truth("[False]")
+    assert not summary.valid_score({"af2_opt_success": 1})

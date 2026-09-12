@@ -22,13 +22,13 @@
 #   sbatch scripts/training/slurm_stage4_fampnn_smoke_hai.sh
 set -euo pipefail
 
-export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-stage4-fampnn}
+export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn}
 export PROTEOAA_DATA_ROOT=${PROTEOAA_DATA_ROOT:-/hai/scratch/yfsun}
 export PROTEOAA_CODE_ROOT=${PROTEOAA_CODE_ROOT:-/hai/users/y/f/yfsun/Protein Project}
 export PYTHON_BIN=${PYTHON_BIN:-/hai/users/y/f/yfsun/miniconda3/envs/ml/bin/python}
 # Smoke the donor a production run really warm-starts from, not the AA-head-only
 # stand-in: this cluster has a Stage III co-evolution binder checkpoint.
-export DONOR=${DONOR:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt}
+export SC_CHECKPOINT=${SC_CHECKPOINT:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt}
 export OUTPUT_DIR=${OUTPUT_DIR:-$PROTEOAA_DATA_ROOT/proteo_aa_runs/stage4_fampnn_smoke/${SLURM_JOB_ID:-manual}}
 
 exec bash "$PROTEOAA_REPO/scripts/training/slurm_stage4_fampnn_smoke.sh" "$@"

@@ -140,6 +140,8 @@ def main() -> None:
 
     single = _load_single_target_module()
     model = single.build_model(str(checkpoint), args.device)
+    if getattr(model, "aa_backend", "mlp") == "fampnn":
+        readouts = ["fampnn"]
     manifest_rows: list[dict[str, object]] = []
     commit = _git_commit()
 
@@ -188,6 +190,8 @@ def main() -> None:
                     sampler_mode=args.sampler_mode,
                     seq_mode="complete_unmask",
                     sidechain_cycle=False,
+                    seed=seed,
+                    refinement_steps=0,
                     aa_readout_mode=(readouts[0] if readouts else "final"),
                     aa_readout_sigma=args.aa_readout_sigma,
                 )
@@ -199,7 +203,7 @@ def main() -> None:
                 )
                 for readout in readouts if args.mode == "proteoaa" else ():
                     sequence = (
-                        generated["aa_readouts"][readout]["sequence"]
+                        (generated["sequence"] if readout == "fampnn" else generated["aa_readouts"][readout]["sequence"])
                         .detach().cpu().numpy()
                     )
                     single.write_cif(

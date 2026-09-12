@@ -4,7 +4,29 @@
 不限 binder，覆盖 enzyme、antibody、nanobody、peptide、motif scaffolding、无条件生成。
 
 **日期**：2026-09-10
-**状态**：第一轮广度调研完成，逐篇精读核实尚未开始。表中标 `待核` 的条目来自检索摘要而非原文，进正式材料前需要核一遍。
+**状态**：广度调研完成。**binder / ProtDBench / A-CODE 已做过一轮源码级核实**（2026-09-12），事实逐条带证据标记，见文首。抗体、纳米抗体、酶三节仍以第一轮广度调研为主，标记从保守。
+
+## 事实标记与适用性标记
+
+每条事实后面跟一个标记，说明它的证据强度。**不要把 INFERRED 当成论文写明的 protocol 用。**
+
+| 标记 | 含义 |
+|---|---|
+| `EXPLICIT_SOURCE` | 论文正文、附录或 SI 里明确写出的。引用时可以直接说"论文规定" |
+| `CODE_VERIFIED` | 从放出的源码或数据里直接读到/算出来的。强度高于论文正文——代码和论文不一致时以代码为准，并把不一致本身记下来 |
+| `INFERRED` | 由现有证据推出，但没有任何一处明确这么写。**不能当 protocol 引用** |
+| `UNRESOLVED` | 查过但没查到，或两处来源冲突未能裁决。明确标出来，不要填一个看着合理的数 |
+
+对 Proteo-AA 的适用性另用一组标记：
+
+| 标记 | 含义 |
+|---|---|
+| `DIRECT_NOW` | 靶点/输入格式和我们现有管线对得上，拿到权重和打分环境就能跑 |
+| `NEEDS_ADAPTER` | 任务本身我们能做，但要写接入代码（输入格式、条件化方式或打分接口不同） |
+| `FUTURE` | 依赖我们目前没有的能力（配体条件化、抗体框架等），训练侧补上之后才谈得上 |
+| `OUT_OF_SCOPE` | 不是设计任务（性质预测、对接、打分器评测），只作参考 |
+
+---
 
 ## 覆盖对照：mentor 点名的范围
 
@@ -44,7 +66,7 @@
 
 **三条线（binder / 单体 / 酶）都有公开证据说 in-silico 排名预测不了实验结果。**
 
-而且这不只是"预测不了实验"——**连计算结果本身都复现不了**：同一个方法、同一批靶点、名义上同一套过滤器，两篇论文报出的数字最多差 302 倍（见 §6.5.3）。
+需要和这条分开说的是**复现性**：论文之间其实复现得很好。ProtDBench 的 `af2_easy` 逐个靶点复现 A-CODE Table 4 到小数点后两位（§6.5.3，`CODE_VERIFIED`）。真正让数字剧烈变化的是**换过滤档**——同一批设计换一档，均值差 2.2 倍、个别靶点差 300 倍。所以"数字对不上"通常不是谁算错了，是没说清用的哪把尺子。
 
 这直接决定我们该交付什么：不只是一张 benchmark 清单，而是**我们该在哪个测试集上、用哪个打分器报数**的一个明确建议。
 
@@ -68,24 +90,29 @@
 
 ### 3.1 binder（miniprotein / peptide）
 
+**详细 recipe 见 §9**，本表只作索引。数字均已与 §9 对齐。
+
 一个反常识的发现：**binder 这边看着有三个 benchmark，实际上是同一批靶点套了三层壳。**
-ProtDBench、PXDesignBench、A-CODE 跑的都是 AlphaProteo 那十个，过滤器都锚在 AF2-IG 上。
+ProtDBench、PXDesignBench、A-CODE 跑的都是 AlphaProteo 那十个，只是过滤档不同。
 
-| 名称 | 年 | 靶点数 | 打分器 | 代码 | 我们能跑吗 |
-|---|---|---|---|---|---|
-| **AlphaProteo 靶点面板** `arXiv:2409.08022` | 2024 | 10 设计面板 / 8 做了湿实验（`待核`） | AF2/AF3 类 | 无 | **已复现** |
-| **ProtDBench** `arXiv:2605.04118` | 2026 | 10 + 5 个 Cao 靶点 | AF2-IG、ColabFold、Protenix、Protenix-Mini、Boltz-1、Boltz-2、Chai-1、ESMFold | `congliuUvA/ProtDBench` | **靶点全对上** |
-| **A-CODE** `arXiv:2605.03360` | 2026 | 10 | AF2-IG | 无 | 已复现 |
-| **PXDesign / PXDesignBench** bioRxiv 2025.08.15.670450 | 2025 | 10 蛋白 + 12 环肽 | AF2-IG、Protenix；单体用 ESMFold | `bytedance/PXDesignBench` | 待看 |
-| **BindCraft 12 靶点** Nature 2025 | 2025 | 12（`待核`） | AF2-multimer | `martinpacesa/BindCraft` | 可建 |
-| **BoltzGen** bioRxiv 2025.11.20.689494 | 2025 | 26 靶点 / 8 场湿实验；9 个低同源新靶点 | 未在 README 中说明 | `HannesStark/boltzgen` | 可建 |
-| **Latent-X** `arXiv:2507.19375` | 2025 | 7 湿实验 + 200 个近期 PDB 结构 | Chai-1（主）、Boltz-2 | 无（仅平台） | 不可复现 |
-| **Cao 数据集** Nature 2022 | 2022 | 11 靶点（ProtDBench 用其中 5 个） | 原文是 Rosetta 时代 | 有 PDF | 可建 |
-| **Adaptyv EGFR 竞赛** bioRxiv 2025.04.17.648362 | 2025 | 1 靶点，400 设计做实验，53 个结合 | 无统一打分 | `adaptyvbio/egfr_competition_2` | 数据可用 |
-| **BindEnergyCraft** `arXiv:2505.21241` | 2025 | 8 | AF2-Multimer、Rosetta、Boltz-1 | 未放出 | 可建 |
-| **Proteína-Complexa** `arXiv:2603.27950` | 2026 | 14 或 19（`待核`）+ 4 小分子 + 41 AME | AF2-Multimer、RoseTTAFold3 | 承诺放出 | 可建 |
+| 名称 | 年 | 靶点数 | 打分器 | 代码 | Proteo-AA | recipe |
+|---|---|---|---|---|---|---|
+| **AlphaProteo** `arXiv:2409.08022` | 2024 | **10**（Table S1 全部）/ 8 做湿实验 | AF2 类 | 无 | `DIRECT_NOW` | §9.1 |
+| **ProtDBench** `arXiv:2605.04118` | 2026 | 10 + 5 个 Cao 靶点 | AF2-IG、ColabFold、Protenix(-Mini)、Boltz-1/2、Chai-1、ESMFold | `congliuUvA/ProtDBench` | `DIRECT_NOW` | §9.1 |
+| **A-CODE** `arXiv:2605.03360` | 2026 | 10 | AF2-IG（`af2_easy` 档） | 无 | `DIRECT_NOW` | §9.1 |
+| **PXDesign / PXDesignBench** bioRxiv 2025.08.15.670450 | 2025 | 10 蛋白 + 12 环肽 | AF2-IG、Protenix；单体用 ESMFold | `bytedance/PXDesignBench` | `DIRECT_NOW` | §9.1 |
+| **BindCraft** Nature 2025 | 2025 | **12**（v1 预印本 10） | AF2-multimer 设计 + AF2 单体重预测 | `martinpacesa/BindCraft` | `NEEDS_ADAPTER` | §9.2 |
+| **BoltzGen** bioRxiv 2025.11.20.689494 | 2025 | **10** 个低同源新靶点 + 5 简单；8 场湿实验共 26 靶点 | **Boltz-2** | `HannesStark/boltzgen` | `NEEDS_ADAPTER` | §9.3 |
+| **RFdiffusion** Nature 2023 | 2023 | 5 | AF2 带 initial guess + 靶点模板 | `RosettaCommons/RFdiffusion` | `NEEDS_ADAPTER` | §9.4 |
+| **Latent-X** `arXiv:2507.19375` | 2025 | 7 湿实验 + 200 结构 in-silico 集 | Chai-1（主）、Boltz-2 | **无**（商业） | `OUT_OF_SCOPE` | §9.5 |
+| **ODesign** `arXiv:2510.22304` | 2025 | 10 或 11（`UNRESOLVED`） | AlphaFold3，只给靶点 MSA | `UNRESOLVED` | `NEEDS_ADAPTER` | §9.6 |
+| **Cao et al.** Nature 2022 | 2022 | **12 蛋白 / 13 位点** | RIFDock + Rosetta，酵母展示筛选 | IPD 六个 tar.gz | 打分器校准 `DIRECT_NOW` | §9.7 |
+| **Adaptyv EGFR** bioRxiv 2025.04.17.648362 | 2025 | 1 靶点；R1 201 条 / R2 402 条 | ColabFold（两轮设置不同） | `adaptyvbio/egfr_competition_{1,2}` | 标签数据 `DIRECT_NOW` | §9.8 |
+| **BoltzDesign1** bioRxiv 2025.04.06.647261 | 2025 | `UNRESOLVED` | Boltz-1 设计环 + AF3 验证 | `yehlincho/BoltzDesign1` | `NEEDS_ADAPTER` | §9.9 |
+| **BindEnergyCraft** `arXiv:2505.21241` | 2025 | 8 | AF2-Multimer、Rosetta、Boltz-1 | 未放出 | `NEEDS_ADAPTER` | 未做 recipe |
+| **Proteína-Complexa** `arXiv:2603.27950` | 2026 | **19**（12 easy + 7 hard）+ 4 小分子 + 41 AME | AF2-Multimer、RoseTTAFold3 | 承诺放出 | `NEEDS_ADAPTER` | 未做 recipe |
 
-**peptide 单独一支**：PepBench（4157 个复合物，来自 PepGLAD）、BOND-PEP（193 对，2026）、DiffPepBuilder（30 个重建 + 3 个 de novo）、RFpeptides 大环肽面板（4 个靶点）。
+**peptide 单独一支**（§9.10）：PepBench / PepGLAD（测试 93）、BOND-PEP（193 对）、DiffPepBuilder（30 个重建）、RFpeptides（4 个大环肽靶点）。
 
 ### 3.2 单体 / motif scaffolding
 
@@ -278,7 +305,7 @@ A-CODE 自陈按 **PXDesign protocol** 做 Table 4。第三方佐证：ODesign �
 
 `af2_opt`（pLDDT>0.9、unscaled ipAE<7.0、binder RMSD<1.5）是**另一套更严的档**，ProtDBench 把两套都保留了。**它不是 A-CODE Table 4 用的那套。**
 
-> ⚠️ **`benchmarks/alphaproteo10/README.md:79` 和 `docs/binder_benchmark.md:53` 目前写错了**——两处都把 `ipAE<7.0 / pLDDT>0.9 / RMSD<1.5` 标为"strict AF2-IG"并当作复现 Table 4 应该用的档。按此跑出的数与 Table 4 不可比，**需要改**。
+> **已修复**：`benchmarks/alphaproteo10/README.md` 和 `docs/binder_benchmark.md` 一度把 `ipAE<7.0 / pLDDT>0.9 / RMSD<1.5` 标为复现 Table 4 应该用的档，按此跑出的数与 Table 4 不可比。两处已改为 `af2_easy`，并附上逐靶点吻合的验证脚本（分支 `bench/alphaproteo-10-targets`，commit `d715f88`）。
 
 ### 6.5.4 十靶点的均值被四个简单靶点主导
 
@@ -356,9 +383,10 @@ A-CODE 自陈按 **PXDesign protocol** 做 Table 4。第三方佐证：ODesign �
 
 另外我们本地没有 GPU、模型权重在合作者服务器上，所以这边能交付的是**测试集定义 + 可运行的接入代码 + 跑法说明**，出数在服务器上做。
 
-## 八、待核实项
+## 八、核实记录
 
-进正式材料前需要读原文核对：
+**这一节是核实过程的流水账**（查了什么、结论是什么、推翻了什么）。
+**binder 线当前仍未解决的项已整理到 §9.11**，那里是按 recipe 字段组织的；本节保留过程记录，便于追溯为什么某个结论变过。
 
 1. ~~AlphaProteo 8 还是 10 个靶点~~ —— **已核实：Table S1 有十个，正文的八个是湿实验子集。原先的猜测是对的，见 §8.1**
 2. **RAbD 60 vs 55** —— **仍未核实**，PMC 有人机验证挡住了。对我们眼下报数无影响（抗体不是当前主线），留待需要时再查
@@ -449,201 +477,250 @@ ProtDBench 的数据同时存了两列（`i_pAE` 和 `unscaled_i_pAE`），实�
 
 # 九、配方明细：binder / peptide
 
-第二轮深挖结果。阈值原样抄录并标注量纲，优先取仓库配置文件而非论文正文。
+每条按统一字段记录，字段缺失就写 `UNRESOLVED`，不填看着合理的数。证据标记见文首。
 
-## 9.0 四条横跨全表的坑
+> **本节状态**：binder / ProtDBench / A-CODE 已做过一轮源码级核实（2026-09-12）。peptide 部分仍以第一轮广度调研为主，标记偏保守。
 
-**坑一：ipAE 有两个归一化族。** ColabDesign 系除以 31.0：
+## 9.0 四条横跨全表的量纲坑
 
-| 出处 | 写的值 | 折算原始 Å |
-|---|---|---|
-| BindCraft `default_filters.json` | `i_pAE < 0.35` | ≈ **10.85** |
-| RFpeptides（AfCycDesign） | `iPAE < 0.3` | ≈ **9.3** |
-| RFpeptides GABARAP 档 | `iPAE < 0.13` | ≈ **4.0** |
+**坑一：ipAE 有两个量纲，差 31 倍。** `CODE_VERIFIED`
 
-原始埃值族：RFdiffusion `< 10`、Adaptyv 两轮、BoltzGen（均值约 8.67）、Latent-X `min_ipae < 1`。
-pLDDT 同样分裂：BindCraft / BoltzDesign1 用 0–1；RFdiffusion / Adaptyv / ODesign-AF3 用 0–100。
+ProtDBench `protdbench/tools/af2/main_af2_complex.py:84-85`：
 
-> ODesign 原文写：其阈值"基于 **PXdesign 里的 AF2-IG-easy 过滤器定义**（ipAE<10.85, pLDDT>0.8, ipTM>0.5, binder bound/unbound RMSD < 3.5Å）"。**10.85 就是 BindCraft 的 0.35×31**——我们自己的仓库出现在了这个数字的引用链上。
+```python
+"i_pAE": round(metrics["i_pae"], 2),               # i_pae divdied by 31
+"unscaled_i_pAE": round(metrics["i_pae"] * 31, 2), # raw i_pae
+```
 
-**坑二：min 和 mean 是两个独立的量。** Latent-X 的 `min_ipae < 1 Å` 和 BoltzGen 的 `min_design_to_target_pae` 是**界面残基对上的最小值**；RFdiffusion 和 Adaptyv 的 `pae_interaction` 是**均值**。1 和 10 不在同一根轴上。
+即 **ColabDesign 交出来的 `i_pae` 本身就是归一化的**，除数是 AlphaFold 的 PAE 上限 31.0；ProtDBench 乘回 31 得到原始埃值。BindCraft 走同一条链路（`functions/colabdesign_utils.py:259` 直接取 `prediction_model.aux["log"]`），所以它的 `0.35` 是归一化值，等价原始 **≈10.85 Å**——**比 `7.0` 松，不是严**。
 
-**坑三：有三个基准没有绝对阈值。**
-- BoltzGen：加权排名取最差排名，再做质量-多样性贪心筛选
-- BOND-PEP：成功 = 超过该靶点晶体结构里**天然肽自己的 ipTM**，逐靶点浮动
-- Cao 2022：取分布前 1%
+| 出处 | 写的值 | 原始 Å | 标记 |
+|---|---|---|---|
+| BindCraft `settings_filters/default_filters.json` | `i_pAE < 0.35` | ≈10.85 | `CODE_VERIFIED` |
+| ProtDBench `af2_easy` | `i_pAE < 0.35` | ≈10.85 | `CODE_VERIFIED` |
+| ProtDBench `af2_opt` | `unscaled_i_pAE < 7.0` | 7.0 | `CODE_VERIFIED` |
+| RFdiffusion README | `pae_interaction < 10` | 10 | `CODE_VERIFIED` |
+| RFpeptides（AfCycDesign） | `iPAE < 0.3` / GABARAP 档 `0.13` | ≈9.3 / ≈4.0 | `INFERRED`（除数按 ColabDesign 族推定，未见该文自陈） |
 
-任何带"阈值"列的表都会歪曲这三个。
+pLDDT 同样分裂：BindCraft / BoltzDesign1 用 0–1；RFdiffusion / Adaptyv / ODesign-AF3 用 0–100。`CODE_VERIFIED`
 
-**坑四：RFdiffusion 实际用的阈值不是流传的那套。** 原文（Extended Data Fig. 8F）是 **pLDDT > 80（单体，0–100）、interaction pAE < 10、单体 RMSD < 1 Å**。我们在用的 `pLDDT > 0.9 / ipAE < 7.0 / RMSD < 1.5` 是**后来更严的变体**。同一篇里还有第二套：单体和 motif 用**全局** `pAE < 5`，跟 binder 的**界面** `pAE < 10` 不是一个量。
+> ODesign 附录 C.1.2 自陈其阈值"基于 **PXdesign 里的 AF2-IG-easy 过滤器定义**（ipAE<10.85, pLDDT>0.8, ipTM>0.5, binder bound/unbound RMSD < 3.5Å）"。`EXPLICIT_SOURCE`
+
+**坑二：min 和 mean 是两个量。** `EXPLICIT_SOURCE`
+Latent-X 的 `min_ipae` 是界面残基对上的**最小值**（原文 "the minimum value across all interchain terms in the predicted alignment error matrix"），BoltzGen 的 `min_design_to_target_pae` 同理；RFdiffusion 和 Adaptyv 的 `pae_interaction` 是**均值**。`< 1` 和 `< 10` 不在同一根轴上。
+
+**坑三：三个基准没有绝对阈值。** `CODE_VERIFIED` / `EXPLICIT_SOURCE`
+BoltzGen 只有 RMSD 和氨基酸组成两条硬过滤，置信度全部走排名聚合（`src/boltzgen/task/filter/filter.py`）；BOND-PEP 的成功线是"超过该靶点天然肽自己的 ipTM"，逐靶点浮动；Cao 2022 取分布前 1%。带"阈值"列的表会歪曲这三个。
+
+**坑四：RFdiffusion 的阈值有两套，别混。** README `CODE_VERIFIED`，论文数值 `EXPLICIT_SOURCE`（二手，未核原文）
+README 原文：*"We have found that filtering at **pae_interaction < 10** is a good predictor of a binder working experimentally"*。论文 Extended Data Fig. 8F 另给 **单体 pLDDT > 80、interaction pAE < 10、单体 RMSD < 1 Å**。同一篇里**单体和 motif 用全局 `pAE < 5`**，与 binder 的**界面** `pAE < 10` 不是一个量。
+> 流传的 `pLDDT>0.9 / ipAE<7.0 / RMSD<1.5` **不是 RFdiffusion 的**，那是 ProtDBench 的 `af2_opt`。
 
 ---
 
-## 9.1 BindCraft
+## 9.1 ProtDBench / A-CODE / AlphaProteo 十靶点（同一批靶点，三层壳）
 
-`bioRxiv 2024.09.30.615802` / `Nature s41586-025-09429-6`，`github.com/martinpacesa/BindCraft`
+这三者共用同一组靶点与规格，差别在过滤档和采样协议，合并成一条 recipe。
 
-**靶点 12 个**（Nature 版；**v1 预印本只有 10 个**，无 CLDN1 和 CbAgo——引"12"要引 Nature）：
-PD-1、PD-L1、IFNAR2(2LAG)、CD45(5FMV)、CLDN1（用可溶类似物 sCLDN1）、BBF-14(9HAG，de novo β 桶)、CrSAS-6、Der f7(3UV1)、Der f21(5YNY)、Bet v1、SpCas9 REC1 域(4ZT0)、CbAgo N-PIWI/PAZ(6QZK)。HER2(1N8Z) 只在 AAV 重定向那节，不属于基准。
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | 条件式 binder 设计（给定靶点结构 + 裁剪范围 + hotspot，生成 binder 序列与结构） | `EXPLICIT_SOURCE` |
+| **test cases** | 10 个靶点：BHRF1 `2wh6`、SC2RBD `6m0j`、IL-7RA `3di3`、PD-L1 `5o45`、TrkA `1www`、IR `4zxb`、H1 `5vli`、IL-17A `4hsa`、TNFα `1tnf`、VEGF-A `1bj1` | `CODE_VERIFIED`（我们仓库十个 cif + ProtDBench Table 3 一致） |
+| **case selection** | 出自 AlphaProteo 附录 Table S1（p38），表题 "Binder design problem specifications for in silico benchmarking **and** experimental testing"。正文的"八个靶点"是**湿实验子集**（7 成功 + TNFα 失败） | `EXPLICIT_SOURCE` |
+| **input conditioning** | 靶点结构**作为已知条件给定**（裁剪范围 + hotspot 残基列表），不重建靶点 | `EXPLICIT_SOURCE` |
+| **expected output** | binder 序列 + 复合物坐标 | `EXPLICIT_SOURCE` |
+| **sample count / length** | **ProtDBench**：范围内**每个整数长度** × **4 条骨架** × **8 条序列**；逐靶点 1,312–2,912 条，十靶点合计 22,720。长度范围逐靶点不同：BHRF1/SC2RBD 80–120、IL-7RA/PD-L1/TrkA/TNFα 50–120、IR/H1 40–120、IL-17A/VEGF-A 50–140<br>**A-CODE**：十靶点**统一** 80–130，每靶点 328–728 条 | ProtDBench `CODE_VERIFIED`（设计名 `BHRF1_len100_sample_2` 100% 可解析，长度×骨架×序列 = 实际条数精确吻合）<br>A-CODE `EXPLICIT_SOURCE` |
+| **sequence design route** | 每条骨架 8 条序列（`seq_idx` 0–7） | `CODE_VERIFIED` |
+| **evaluator** | AF2，**单链非 multimer**，`model_ids: [0]`（只用 model 1），`use_initial_guess: True`，`use_binder_template: True`；**af2 块没有 `use_msa` 键** | `CODE_VERIFIED`（`protd_configs/eval.py`） |
+| **metric / units** | `pLDDT` 0–1；`i_pTM` 0–1；`i_pAE` 归一化（原始/31）；`unscaled_i_pAE` 原始 Å；`bound_unbound_RMSD` = binder 单独预测 vs 复合物预测里的 binder 链；`af2_binder_pred_design_rmsd` = binder 单独预测 vs **原始设计** | `CODE_VERIFIED`（`tools/af2/main_af2_monomer.py:164,176`） |
+| **threshold** | **`af2_easy`（= A-CODE Table 4 用的档）**：`pLDDT>0.8`、`i_pTM>0.5`、`i_pAE<0.35`（≈10.85 Å）、`bound_unbound_RMSD<3.5`<br>**`af2_opt`**：`pLDDT>0.9`、`unscaled_i_pAE<7.0`、`af2_binder_pred_design_rmsd<1.5`<br>**`ptx`/`ptx_mini`**：`iptm_binder>0.85`、`ptm_binder>0.88`、`RMSD<2.5`；**`ptx_basic`** 放宽到 0.8/0.8 | `CODE_VERIFIED` |
+| **aggregation** | designability = 通过率（条数占比）；同一靶点不同 binder 长度的成功数汇总 | `EXPLICIT_SOURCE` |
+| **diversity / novelty** | ProtDBench 另有簇级成功率（Foldseek 聚类后计数）和 24 小时 GPU 预算下的吞吐量 | `EXPLICIT_SOURCE`；聚类参数 `UNRESOLVED` |
+| **wet-lab labels** | 这十个靶点本身无逐设计标签。ProtDBench 另带 Cao 湿实验打分表：**236,246 条设计 × 8 打分器，1,485 条阳性**（`data/filter_benchmark/cao_verifier_scores.csv.gz`） | `CODE_VERIFIED` |
+| **code / data** | `github.com/congliuUvA/ProtDBench`，`data/` 164 MB 随仓库发布（七个方法的逐条设计分数 + Cao 打分表）。构建于 `github.com/bytedance/PXDesignBench`（python 包多一个 `post_processing/` 模块，配置命名空间 `pxd_configs`→`protd_configs`） | `CODE_VERIFIED` |
+| **compute** | 打分需 AF2 + ESMFold + ProteinMPNN 权重（`download_tool_weights.sh`）。生成 22,720 条设计是主要成本 | `EXPLICIT_SOURCE` |
+| **Proteo-AA** | `DIRECT_NOW` —— 十个靶点已复现为可运行配置（`benchmarks/alphaproteo10/`，链/裁剪范围/hotspot 经 Latent-X 表 S3 独立比对逐字符一致）。缺的是权重和打分环境，两者都在服务器上 | — |
 
-**流程**：AF2 **multimer** 幻觉设计 → AF2 **单体**模型重预测（3 轮循环、2 个模板模型、单序列模式）→ Rosetta FastRelax(200) + InterfaceAnalyzer。ProteinMPNN **soluble** 权重 `v_48_020`，温度 0.1。
+### 9.1a 哪一档对应 A-CODE Table 4 —— 已用数据裁决
 
-**阈值**（`settings_filters/default_filters.json` 为准）：pLDDT>0.8（归一化）、pTM>0.55、i_pTM>0.5、**i_pAE<0.35（归一化）**、形状互补>0.6、表面疏水性<0.35、界面氢键>3、未成键埋藏氢键<4、界面残基>7、dSASA>1、dG<0、Binder RMSD<3.5 Å、Hotspot RMSD<6 Å、Loop 占比<90%、界面 K≤3 / M≤3。
-肽预设不同（`peptide_filters.json`）：i_pTM 0.4、i_pAE 0.3、Binder RMSD 2.5。
+`CODE_VERIFIED`。拿 ProtDBench 放出的逐条分数按两档各算一遍，与 A-CODE Table 4 的 PXDesign 行比：
 
-> ⚠️ **v1 预印本正文写的是 `i_pAE > 0.35`，符号写反了**。Nature 版和仓库 JSON（`higher: false`）都是 `< 0.35`。
+| | 平均绝对偏差 | 相关系数 | 均值 |
+|---|---:|---:|---:|
+| **`af2_easy`** | **0.00** | **1.000** | 21.19% |
+| `af2_opt` | 11.49 | 0.867 | 9.70% |
+| A-CODE Table 4 | — | — | 21.19% |
 
-**跑起来需要**：CUDA GPU（建议 32GB+ 显存）、AF2 权重约 5.3 GB、**PyRosetta**（非学术需商业授权）、DSSP、DAlphaBall。
+十个靶点逐个吻合到小数点后两位。复算脚本：`benchmarks/alphaproteo10/verify_filter_protocol.py`（在 `bench/alphaproteo-10-targets` 分支上）。
 
-## 9.2 BoltzGen
+**A-CODE 附录 C.2 的阈值** = `af2_easy`：`pLDDT>0.80、ipTM>0.50、ipAE<10.85 Å、bound/unbound RMSD<3.5`。`EXPLICIT_SOURCE`
+第三方佐证：ODesign 附录 C.1.2 明写同一组值并归因 PXDesign。`EXPLICIT_SOURCE`
 
-`bioRxiv 2025.11.20.689494`，`github.com/HannesStark/boltzgen`
+> 换档带来的差异远大于换论文：同一批设计 `af2_easy` 21.19% vs `af2_opt` 9.70%，个别靶点差 300 倍（H1 12.08→0.04、IL7RA 29.80→0.26）。`CODE_VERIFIED`
 
-**是 10 个新靶点不是 9 个**，流传的"6 of 9"是命中数。十个低同源新靶点只给 PDB 编号（与仓库 `example/hard_targets/` 一一对应）：**1G13、1JQD、1NB0、2A1X、2PNY、3APU、3CH4、3QKG、6M1U、7AAH**。
-另有 5 个"简单"靶点：TNFα、PD-L1、PDGFR(3MJG)、IL-7Rα、InsulinR(4ZXB)。
+### 9.1b 七个方法在这十个靶点上的实测（af2_opt 档）
 
-**验证器**：**Boltz-2**，权重 `boltz2_conf_final.ckpt`，`recycling_steps:3`、`sampling_steps:200`、`diffusion_samples:5`、给靶点模板、**不用 MSA**。
+`CODE_VERIFIED`，从 `data/generative_benchmark/10_targets/` 算出：
 
-**硬过滤只有 RMSD 和组成**（`src/boltzgen/task/filter/filter.py`）：refolding RMSD ≤ **2.5 Å**（肽协议 2.0）、**设计单独重折** RMSD ≤ 2.5 Å、`CYS_fraction ≤ 0`、单一氨基酸占比 ≤ 0.3。
-**没有任何绝对置信度阈值**——ipTM/pAE/氢键/ΔSASA 只做**排名聚合**，权重在 **Cao 2022 的 11,000 条设计、11 个靶点**上标定。
+| 方法 | 设计条数 | af2_easy | af2_opt | ptx_mini |
+|---|---:|---:|---:|---:|
+| PXDesign | 22,720 | **19.88%** | 8.48% | 4.18% |
+| BindCraft | 30,992 | `UNRESOLVED`（该列为空） | **12.24%** | 3.60% |
+| BoltzGen | 22,720 | 12.27% | 4.49% | **4.43%** |
+| RFdiffusion-3 | 22,720 | 8.61% | 3.07% | 1.14% |
+| BoltzDesign-1 | 22,720 | 13.08% | 2.06% | 0.16% |
+| ODesign | 22,720 | 8.64% | 1.37% | 0.38% |
+| Protpardelle-1c | 22,720 | 1.41% | 0.13% | 0.01% |
 
-**规模**：每个新靶点 6 万条纳米抗体 + 6 万条蛋白，长度 80–140，**每靶点各取前 15 条**送实验。
-**别人没有的检查**：设计**不带靶点单独重折**——"它离开靶点还折得起来吗"。
+**排名随档位变化**：af2_easy 下 PXDesign 第 1、BoltzDesign-1 第 2；af2_opt 下 BindCraft 第 1、BoltzDesign-1 掉到第 5；ptx_mini 下 BoltzGen 第 1、BoltzDesign-1 第 6。BoltzDesign-1 通过率跨档相差 80 倍。
 
-## 9.3 BoltzDesign1
+**四个靶点对所有方法都接近 0**（H1、IL17A、IL7RA、TNFa，最好的不到 1.1%），十靶点均值几乎由 BHRF1/PDL1/IR/TrkA 四个决定。`CODE_VERIFIED`
 
-`bioRxiv 2025.04.06.647261`，`github.com/yehlincho/BoltzDesign1`
+---
 
-设计环用 **Boltz-1**（默认只用 distogram，`--recycling_steps 0`），序列重设计 ProteinMPNN/LigandMPNN，验证用 **AlphaFold3**（需自行安装）。
+## 9.2 BindCraft
 
-**成功门只有两条**（`boltzdesign.py:488`）：`i_ptm > 0.5` 且 `complex_plddt > 0.7`（**归一化 0–1，且是复合物 pLDDT 不是 binder pLDDT**）。**没有 ipAE、没有 RMSD、没有 Rosetta 项。**
-靶点清单未取得（bioRxiv 限流），仓库只有单例。
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | 幻觉式 binder 设计（AF2 反向优化，非扩散） | `EXPLICIT_SOURCE` |
+| **test cases** | Nature 版 12 个靶点：PD-1、PD-L1、IFNAR2 `2LAG`、CD45 `5FMV`、CLDN1（用可溶类似物 sCLDN1）、BBF-14 `9HAG`、CrSAS-6、Der f7 `3UV1`、Der f21 `5YNY`、Bet v1、SpCas9 REC1 `4ZT0`、CbAgo `6QZK`。**v1 预印本只有 10 个**（无 CLDN1、CbAgo）。HER2 `1N8Z` 只在 AAV 重定向那节，不属于基准 | `EXPLICIT_SOURCE`；PD-1/PD-L1/CLDN1/CrSAS-6/Bet v1 的 PDB 编号 `UNRESOLVED` |
+| **case selection** | 覆盖细胞表面受体、常见过敏原、de novo 设计蛋白、多结构域核酸酶 | `EXPLICIT_SOURCE` |
+| **input conditioning** | 靶点结构 + hotspot（`settings_target/*.json` 的 `target_hotspot_residues`），长度给区间（PDL1 示例 `[65, 150]`） | `CODE_VERIFIED` |
+| **sample count / length** | `number_of_final_designs: 100`；README 建议"先出至少 100 条全过滤的设计，再挑前 5–20 条做实验" | `CODE_VERIFIED` |
+| **sequence design route** | ProteinMPNN **soluble** 权重 `v_48_020`，温度 0.1，`num_seqs: 20`，`max_mpnn_sequences: 2` | `CODE_VERIFIED` |
+| **evaluator** | AF2 **multimer** 做设计，AF2 **单体**模型重预测（3 轮循环、2 个模板模型、单序列模式）+ Rosetta FastRelax(200) + InterfaceAnalyzer | `EXPLICIT_SOURCE` |
+| **threshold** | `settings_filters/default_filters.json`，18 类 54 条。核心：pLDDT>0.8（归一化）、pTM>0.55、i_pTM>0.5、**i_pAE<0.35（归一化）**、形状互补>0.6、表面疏水性<0.35、界面氢键>3、未成键埋藏氢键<4、界面残基>7、dSASA>1、dG<0、Binder RMSD<3.5 Å、Hotspot RMSD<6 Å、Loop 占比<90%、界面 K≤3/M≤3。肽预设另有一套（`peptide_filters.json`：i_pTM 0.4、i_pAE 0.3、Binder RMSD 2.5） | `CODE_VERIFIED` |
+| **wet-lab labels** | 每靶点 6–53 条设计做实验，命中数在论文 Fig. 1b | `EXPLICIT_SOURCE` |
+| **code / data** | `github.com/martinpacesa/BindCraft`（MIT），设计模型 Zenodo `10.5281/zenodo.14249738` | `CODE_VERIFIED` |
+| **compute** | CUDA GPU，README 建议 32 GB+ 显存；AF2 权重约 5.3 GB；**PyRosetta（非学术需商业授权）**、DSSP、DAlphaBall | `EXPLICIT_SOURCE` |
+| **Proteo-AA** | `NEEDS_ADAPTER` —— 靶点+hotspot 的条件化方式与我们一致，但它的过滤器叠了一整套 Rosetta 界面能量项，我们要么补这些计算、要么只报它的 AF2 子集并说明 | — |
 
-## 9.4 ODesign
+> ⚠️ **v1 预印本正文写 `i_pAE > 0.35`，符号写反了**；Nature 版和仓库 JSON（`higher: false`）都是 `<`。`CODE_VERIFIED`
 
-`arXiv:2510.22304`
+## 9.3 BoltzGen
 
-**靶点数论文自相矛盾**：正文和附录都写 "eleven"，但图 2a 说明写 "ten"。十一个里只点名 EGFR 和 CD3d，其余九个未列。来源是 **Cao 2022**，且跟 BoltzGen、Latent-X 的 Cao 子集**不是同一批**。
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | 通用 binder 生成（蛋白、纳米抗体、肽、小分子靶点） | `EXPLICIT_SOURCE` |
+| **test cases** | **10 个低同源新靶点**（只给 PDB 编号）：`1G13 1JQD 1NB0 2A1X 2PNY 3APU 3CH4 3QKG 6M1U 7AAH`，与仓库 `example/hard_targets/` 一一对应；另 5 个简单靶点 TNFα、PD-L1、PDGFR `3MJG`、IL-7Rα、InsulinR `4ZXB` | `EXPLICIT_SOURCE` + `CODE_VERIFIED` |
+| **case selection** | PDB 单体生物组装 + 仅单体的 30% mmseqs 簇 + Sino Biological 目录可购。与任何非单体链的最大序列同一性 0.0–27.9% | `EXPLICIT_SOURCE` |
+| **sample count** | 每个新靶点 6 万条纳米抗体 + 6 万条蛋白，长度 80–140（简单靶点 80–120）；**每靶点各取前 15 条**送实验 | `EXPLICIT_SOURCE` |
+| **evaluator** | **Boltz-2**，权重 `boltz2_conf_final.ckpt`，`recycling_steps:3`、`sampling_steps:200`、`diffusion_samples:5`、给靶点模板、**不用 MSA** | `CODE_VERIFIED` |
+| **threshold** | **只有 RMSD 和组成两条硬过滤**：refolding RMSD ≤ **2.5 Å**（肽协议 2.0）、**设计单独重折** RMSD ≤ 2.5 Å、`CYS_fraction ≤ 0`、单一氨基酸占比 ≤ 0.3。**无任何绝对置信度阈值**——ipTM/pAE/氢键/ΔSASA 只做排名聚合 | `CODE_VERIFIED`（`src/boltzgen/task/filter/filter.py`） |
+| **aggregation** | 加权排名取最差排名，再做质量-多样性贪心筛选（`alpha` 默认 0.001） | `CODE_VERIFIED` |
+| **wet-lab labels** | 8 场 campaign，26 个靶点；排名权重在 **Cao 2022 的 11,000 条设计、11 个靶点**上标定 | `EXPLICIT_SOURCE` |
+| **code / data** | `github.com/HannesStark/boltzgen`，`pip install boltzgen`，权重约 6 GB 自动下载 | `CODE_VERIFIED` |
+| **Proteo-AA** | `NEEDS_ADAPTER` —— 它的"设计不带靶点单独重折"这一项我们没有对应实现；靶点条件化本身兼容 | — |
 
-**验证器**：**AlphaFold3，只给靶点的 MSA**——binder 的 MSA 和模板都排除。缺 MSA 的配体案例用 Chai-1 + ESM 嵌入。
+> 值得借鉴的一项：**设计单独重折**——"它离开靶点还折得起来吗"。AF2-IG 那套没有这个检查。
 
-**阈值**（附录 C.1.2 为准）：`ipAE < 10.85`、**`pLDDT > 80`**、`ipTM > 0.5`、复合物 RMSD < 2.5 Å。论文特意解释："pLDDT 阈值设成 80 而不是 0.8，因为 AlphaFold3 的 pLDDT 不做归一化。"
-它把 BindCraft 的 binder bound/unbound RMSD<3.5 换成**复合物 RMSD<2.5**——**两个不同的量，不能互换**。
+## 9.4 RFdiffusion
 
-**协议**：每靶点 100 条骨架 × 8 条序列 = 800 候选（BoltzDesign1/BindCraft 因成本只跑 10 条）。指标是**单张 H100 上 24 小时内通过过滤的骨架数**。代码地址未找到。
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | 扩散式 binder 骨架生成 | `EXPLICIT_SOURCE` |
+| **test cases** | 5 个：流感 A H1 血凝素、IL-7Rα、PD-L1、胰岛素受体、TrkA（后四个出自 Cao 2022） | `EXPLICIT_SOURCE`（二手，未核原文） |
+| **sample count** | 每靶点约 1 万条骨架 × 2 条序列 ≈ 2 万条设计；每靶点选 95 条做实验。README 补充"有些靶点约 1000 条骨架可能就够" | `EXPLICIT_SOURCE` |
+| **sequence design route** | ProteinMPNN-FastRelax，每骨架 2 条序列 | `EXPLICIT_SOURCE` |
+| **evaluator** | **AF2 带 initial guess 和靶点模板**，脚本 `github.com/nrbennet/dl_binder_design` | `CODE_VERIFIED`（README） |
+| **threshold** | README：`pae_interaction < 10`（"过不了的设计不值得下单"）。论文 Extended Data Fig. 8F：单体 pLDDT > 80、interaction pAE < 10、单体 RMSD < 1 Å | README `CODE_VERIFIED`；论文数值 `EXPLICIT_SOURCE`（二手） |
+| **wet-lab labels** | 总体实验成功率 19% | `EXPLICIT_SOURCE` |
+| **code / data** | `github.com/RosettaCommons/RFdiffusion`；设计结构、AF2 模型、实测数据 figshare | `CODE_VERIFIED` |
+| **Proteo-AA** | `NEEDS_ADAPTER` —— 它是骨架生成 + 独立序列设计的两段式，我们是 co-design；要比的话得决定是否也走 ProteinMPNN 重设计那一路 | — |
 
 ## 9.5 Latent-X
 
-`arXiv:2507.19375`（LatentLabs）
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **test cases** | 7 个湿实验靶点，规格完整（表 S3）：MDM2 `4hfz` A26-108、MCL-1 `2pqk`、PD-L1 `5o45` A17-132、BHRF1 `2wh6` A2-158、IL-7Rα `3di3` B17-209、SC2RBD `6m0j` E333-526、TrkA `1www` X282-382。另有 200 结构的 in-silico 集 | `EXPLICIT_SOURCE` |
+| **case selection**（in-silico 集） | 2023-11-24 之后发布的 PDB（晚于相关模型训练截止）；排除 NMR；分辨率<3 Å；无核酸；所有链解析>90%；排除 C2/D2 对称；40% 同源簇取一代表；**每靶点自动选 3 个不重叠表位** → 200×3×100 = 6 万条 | `EXPLICIT_SOURCE` |
+| **evaluator** | **Chai-1**（主），Boltz-2 复现。不用 AF3 的原因论文写明"由于商业限制" | `EXPLICIT_SOURCE` |
+| **threshold** | 按验证器分别网格搜索（在 Cao 数据上调的）：AF3 `min_ipae<1.5 / ptm_binder>0.8 / complex_rmsd<2.5`；**Chai-1 `<1 / >0.9 / <2`**；Boltz-2 `<1 / >0.95 / <2.5`。大环肽**整个丢掉 `ptm_binder`** | `EXPLICIT_SOURCE` |
+| **code / data** | **无**——商业模型，代码权重都不公开 | `EXPLICIT_SOURCE` |
+| **Proteo-AA** | `OUT_OF_SCOPE`（不可复现）；但它的**靶点规格独立验证了我们的配置**——五个重叠靶点的链、裁剪范围、每个 hotspot 与我们逐字符一致 | `CODE_VERIFIED` |
 
-**七个湿实验靶点，规格完整（表 S3）**：
+## 9.6 ODesign
 
-| 靶点 | 形态 | PDB | 链+残基 | hotspots | 长度 |
-|---|---|---|---|---|---|
-| MDM2 | 大环肽 | 4hfz | A26-108 | A54,58,61 | 12–18 |
-| MCL-1 | 大环肽 | 2pqk | A172-197, A203-321 | A224,227,231,235,249,253,263 | 12–18 |
-| PD-L1 | 大环肽 | 5o45 | A17-132 | A56,115,123 | 12–18 |
-| BHRF1 | 迷你蛋白 | 2wh6 | A2-158 | A65,74,77,82,85,93 | 80–120 |
-| IL-7Rα | 迷你蛋白 | 3di3 | B17-209 | B58,80,139 | 80–120 |
-| PD-L1 | 迷你蛋白 | 5o45 | A17-132 | A56,115,123 | 80–120 |
-| SC2RBD | 迷你蛋白 | 6m0j | E333-526 | E485,489,494,500,505 | 80–120 |
-| TrkA | 迷你蛋白 | 1www | X282-382 | X294,296,333 | 80–120 |
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **test cases** | 从 Cao 2022 取的靶点。**论文自相矛盾**：正文 §3.1 和附录 C.1.2 写 "eleven"，图 2a 说明写 "ten"。只点名 EGFR 和 CD3d | `UNRESOLVED` |
+| **sample count** | ODesign 与 RFdiffusion 每靶点 100 条骨架 × 8 条 ProteinMPNN 序列 = 800 候选；BoltzDesign1/BindCraft 因成本只跑 10 条 | `EXPLICIT_SOURCE` |
+| **evaluator** | **AlphaFold3，只给靶点的 MSA**（binder 的 MSA 和模板都排除）；缺 MSA 的配体案例用 Chai-1 + ESM 嵌入 | `EXPLICIT_SOURCE` |
+| **threshold** | `ipAE < 10.85`、**`pLDDT > 80`**、`ipTM > 0.5`、复合物 RMSD < 2.5 Å。论文特意解释"pLDDT 阈值设成 80 而不是 0.8，因为 AlphaFold3 的 pLDDT 不做归一化" | `EXPLICIT_SOURCE` |
+| **aggregation** | **单张 H100 上 24 小时内通过过滤的骨架数**——同时是个算力基准 | `EXPLICIT_SOURCE` |
+| **code / data** | `UNRESOLVED`（论文正文未见仓库地址，只有网页服务） | — |
+| **Proteo-AA** | `NEEDS_ADAPTER` —— 它把 BindCraft 的 binder bound/unbound RMSD<3.5 换成**复合物 RMSD<2.5**，是不同的量，接的时候别互换 | — |
 
-> **这五个迷你蛋白靶点的规格与我们 `benchmarks/alphaproteo10/` 逐字符一致**——链、裁剪范围、每一个 hotspot 残基。Latent-X 是独立第三方，等于**独立验证了我们的靶点规格**。
+## 9.7 Cao et al. 2022 —— 领域的共享底座
 
-**阈值按验证器分别网格搜索**（表 S1，在 Cao 数据上调的）：
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **test cases** | **12 个天然蛋白 / 13 个靶点位点**（EGFR 取两个位点）：TrkA、FGFR2、EGFR(域 I/III)、PDGFR、胰岛素受体、IGF1R、TIE2、IL-7Rα、CD3δ、TGFβ、流感 A H3 血凝素、VirB8 | `EXPLICIT_SOURCE`（二手） |
+| **sample count** | 每位点 1.5 万–10 万条设计，binder 长度 50–65 残基 | `EXPLICIT_SOURCE`（二手） |
+| **evaluator** | 无深度学习验证器——**RIFDock + Rosetta**；筛选靠**酵母表面展示 + 多轮 FACS** | `EXPLICIT_SOURCE`（二手） |
+| **metric** | 实验指标 **SC₅₀**（50% 表达细胞被收集时的靶点浓度）；设计阶段排序用 Rosetta ddG 和 contact molecular surface | `EXPLICIT_SOURCE`（二手） |
+| **threshold** | 设计阶段的 ddG/CMS 数值阈值只在放出的 `cao_2021_protocol/` 脚本里，论文正文没有 | `UNRESOLVED` |
+| **wet-lab labels** | 这是**领域里最大的公开 binder 标签集**。ProtDBench 的 Cao 打分表含 **236,246 条设计 × 8 打分器，1,485 条阳性**（12 个靶点） | `CODE_VERIFIED` |
+| **code / data** | 六个 tar.gz：`files.ipd.uw.edu/pub/robust_de_novo_design_minibinders_2021/supplemental_files/` | `EXPLICIT_SOURCE`（二手，未下载核对） |
+| **Proteo-AA** | `OUT_OF_SCOPE` 作为生成基准（设计已存在），但作为**打分器校准数据**是 `DIRECT_NOW`——§6.5.2 那组 AUC 就是拿它算的，不需要任何湿实验能力 | — |
 
-| 验证器 | min_ipae | ptm_binder | complex_rmsd |
-|---|---|---|---|
-| AlphaFold 3 | < 1.5 | > 0.8 | < 2.5 |
-| **Chai-1**（主用） | **< 1** | **> 0.9** | **< 2** |
-| Boltz-2 | < 1 | > 0.95 | < 2.5 |
+> 为什么它重要：BoltzGen 在它上面标定排名权重、Latent-X 在它上面网格搜索三个验证器的阈值、ODesign 从它取基准靶点、Adaptyv 拿它当序列排除库。
 
-大环肽**整个丢掉 `ptm_binder`**（已验证的大环肽 9cdz/7oun/1sfi 只有 0.19/0.18/0.22）。不用 AF3 的原因：论文写明"由于商业限制"。
+## 9.8 Adaptyv EGFR 竞赛（两轮）
 
-**200 结构 in-silico 基准**：2023-11-24 之后的 PDB（晚于所有相关模型的训练截止）；排除 NMR、分辨率<3 Å、无核酸、所有链解析>90%、排除 C2/D2 对称、每个 40% 同源簇取一代表、**每靶点自动选 3 个不重叠表位** → 200×3×100 = 6 万条。**构造得最干净的留出集**，但代码权重都没公开（商业模型）。
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | 众包 binder 设计竞赛，**前瞻性**（先提交后做实验） | `EXPLICIT_SOURCE` |
+| **test cases** | 单靶点 **EGFR**。R1 201 条设计 / 461 条重复测量；R2 **402 条设计** / 953 条重复，另放出全部 400 条的 AF2 结构 | `CODE_VERIFIED`（仓库 CSV 行数） |
+| **evaluator** | R1：ColabFold `1.5.5-cuda12.2.2`，**2 模型、5 轮循环、无 initial guess、无模板**<br>R2：**5 模型、3 轮循环、3 种子、带模板**，仍无 initial guess | `EXPLICIT_SOURCE` |
+| **metric** | `pae_interaction` 定义指向 `nrbennet/dl_binder_design/af2_initial_guess/predict.py#L197`——跨靶点-binder 残基对的 **PAE 均值，原始 Å**；`plddt` 只对 binder 链取平均（0–100） | `EXPLICIT_SOURCE` |
+| **threshold** | **不发布通过线**，全部作排序。硬门槛两条：表达量 **< 0.02 µg/mL 排除**；与已发表序列距离 **< 10 个氨基酸排除**（库含 SwissProt、THPdb、USPTO、Cao 2022，R2 加 R1 序列） | `EXPLICIT_SOURCE` |
+| **wet-lab labels** | **BLI 测的 K_D**。R2 另加中和系数 | `EXPLICIT_SOURCE` |
+| **code / data** | `github.com/adaptyvbio/egfr_competition_1` 和 `_2`，代码 Apache-2.0、**数据 ODbL** | `CODE_VERIFIED` |
+| **Proteo-AA** | `NEEDS_ADAPTER` 作为生成任务（单靶点、需自己下单做实验才有新标签）；作为**已有标签数据**是 `DIRECT_NOW` | — |
 
-## 9.6 Cao et al. 2022 —— 整个领域的共享底座
+> ⚠️ 两轮的 BLI 缓冲液和浓度范围不同（R1 PBS-T + 0.02% BSA、316.2→10 nM；R2 HBS-T + 0.5% BSA、1000→10 nM），**跨轮比较 K_D 不干净**。`EXPLICIT_SOURCE`
 
-`Nature 605:551–560`
+## 9.9 BoltzDesign1
 
-**12 个天然蛋白 / 13 个靶点位点**（EGFR 取两个位点）：TrkA、FGFR2、EGFR(域 I=EGFRn，域 III=EGFRc)、PDGFR、胰岛素受体、IGF1R、TIE2、IL-7Rα、CD3δ、TGFβ、流感 A H3 血凝素、VirB8。binder 长度 50–65 残基。
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | 反演 Boltz-1 做通用 binder 设计（蛋白、小分子、核酸、金属） | `EXPLICIT_SOURCE` |
+| **test cases** | `UNRESOLVED` —— 仓库只有单个示例（`7v11`/OQO、`5zmc` DNA），论文靶点表未取得（bioRxiv 反复限流）。第三方信息：ODesign 在同样 11 个 Cao 靶点上跑了它，每靶点 10 条 | — |
+| **evaluator** | 设计环用 **Boltz-1**（默认只用 distogram，`--recycling_steps 0`）；验证用 **AlphaFold3**（需自行安装） | `CODE_VERIFIED` |
+| **threshold** | **只有两条**（`boltzdesign.py:488`）：`i_ptm > 0.5` 且 `complex_plddt > 0.7`（**归一化 0–1，且是复合物 pLDDT 不是 binder pLDDT**）。**无 ipAE、无 RMSD、无 Rosetta 项** | `CODE_VERIFIED` |
+| **Proteo-AA** | `NEEDS_ADAPTER` | — |
 
-没有任何深度学习验证器——**RIFDock + Rosetta**，筛选靠**酵母表面展示 + 多轮 FACS**。实验指标是 **SC₅₀**。
+## 9.10 peptide 那一支
 
-**数据分发**：`https://files.ipd.uw.edu/pub/robust_de_novo_design_minibinders_2021/supplemental_files/` 六个 tar.gz。
+第一轮广度调研结果，**尚未做源码级核实**，标记从保守。
 
-**为什么它最重要**：BoltzGen 在它上面标定排名权重；Latent-X 在它上面网格搜索三个验证器的阈值；ODesign 从它取 11 个基准靶点；Adaptyv 拿它当序列排除库。**如果只下载一样东西，下它。**
+| 名称 | 案例数 | 验证器 / 判据 | 标记 | Proteo-AA |
+|---|---:|---|---|---|
+| **PepBench / PepGLAD** | 训练 4,157 / 验证 114 / **测试 93**（LNR） | **无结构预测验证器**——对着晶体肽打分：Cα RMSD 分档 ≤2/≤5/≤10 Å、AAR、**PyRosetta ΔG<0** | `EXPLICIT_SOURCE`（Zenodo README） | `NEEDS_ADAPTER` |
+| **BOND-PEP** | 193 对 | AF-Multimer 经 ColabFold；**成功 = 超过该靶点天然肽自己的 ipTM**（相对阈值，逐靶点浮动） | `EXPLICIT_SOURCE` | `NEEDS_ADAPTER` |
+| **DiffPepBuilder** | 30 个（PDB 编号已记录在 §9.10a） | 无结构预测验证器；L-RMSD、Rosetta ddG、**有效率 = ddG<0 比例** | `EXPLICIT_SOURCE` | `NEEDS_ADAPTER` |
+| **RFpeptides** | 4 个靶点（MCL1、MDM2、GABARAP、RbtA） | **AfCycDesign**（带环状位置编码的 AF2）；iPAE<0.3 归一化 + Cα RMSD<1.5，GABARAP 档收紧到 0.13 | `EXPLICIT_SOURCE`；除数 31 是 `INFERRED` | `FUTURE`（大环肽需环状位置编码） |
 
-## 9.7 Adaptyv EGFR 竞赛（两轮）
+### 9.10a DiffPepBuilder 的 30 个 PDB
 
-`github.com/adaptyvbio/egfr_competition_1` 和 `_2`，数据 ODbL
-
-单靶点 **EGFR**。R1：201 条设计 / 461 条重复。R2：**402 条设计** / 953 条重复，另放出全部 400 条 AF2 结构。
-
-**两轮验证器设置不同**：R1 = ColabFold `1.5.5-cuda12.2.2`，**2 模型、5 轮循环、无 initial guess、无模板**；R2 = **5 模型、3 轮循环、3 种子、带模板**、仍无 initial guess。
-`pae_interaction` 两轮定义相同，明确指向 **`nrbennet/dl_binder_design/af2_initial_guess/predict.py#L197`**——跨靶点-binder 残基对的 **PAE 均值，原始 Å**。`plddt` 只对 binder 链取平均（0–100）。
-
-**没有发布通过阈值**，全作排序。硬门槛两条：表达量 **< 0.02 µg/mL 排除**；与已发表序列距离 **< 10 个氨基酸排除**（库含 SwissProt、THPdb、USPTO、**Cao 2022**，R2 加 R1 序列）。
-R2 多三个轴：**ESM2 PLL**（未按长度归一化）、**Foldseek TM-score 新颖性**、约 **70 项 DE-STRESS 理化性质**。
-
-> ⚠️ 两轮 BLI 缓冲液和浓度范围不同，**跨轮比 K_D 不干净**。
-
-## 9.8 PepBench / PepGLAD（肽）
-
-`arXiv:2402.13555`，`github.com/THUNLP-MT/PepGLAD`，数据 Zenodo `13373108`
-
-**划分规模（Zenodo README 为准，论文正文没印）**：2023-12-08 前的 PDB 二聚体，去 90% 冗余，肽 4–25 残基 → **6,105 个非冗余复合物**；**训练 4,157 / 验证 114 / 测试 93**。测试集 = **LNR**（Tsaban 2021 的 93 个专家整理复合物）。按受体 **>40% 同一性**聚类划分。另有 **ProtFrag 增强 70,498 片段**。
-
-**指标**（`cal_metrics.py`）：Cα RMSD（分档 **≤2.0 / ≤5.0 / ≤10.0 Å**）、全原子 RMSD、AAR 和滑动 AAR、多样性、**PyRosetta ΔG，成功 = ΔG < 0**、DockQ（>0.23 / >0.49）。每案例采 40 条。
-**完全没有结构预测验证器**——重建基准，对着晶体结构打分。
-
-## 9.9 BOND-PEP（肽）
-
-`bioRxiv 2026.02.18.706554` / *Advanced Science*，数据 Zenodo `10.5281/zenodo.19841318`
-
-**193 对**：严格档筛选 **BSA ≥ 400 Å²、肽 ≤ 25 aa、靶点 ≥ 30 aa**；靶点先用 **MMseqs2 按 30% 同一性聚类再划分**。
-
-**验证器**：AlphaFold-Multimer 经 ColabFold，默认设置，取最终 5 个输出里**最高 ipTM**。
-
-**success@8**：*"至少一条前 8 名生成肽的 ipTM 高于同一协议下该 PDB 参考肽自己的 ipTM"*。
-⚠️ **相对阈值，逐靶点浮动，没有固定门槛。** 结果：BOND-PEP 65.80%、RFdiffusion 37.31%、PepMLM 35.75%、PepPrCLIP 19.17%。
-
-## 9.10 DiffPepBuilder（肽）
-
-`arXiv:2405.00128`，`github.com/YuzheWangPKU/DiffPepBuilder`
-
-**30 个重建复合物（PepPC-HF）**：`1BJR 1J7Z 1RJK 1SJH 2A4R 2AQ9 2BBA 2FTS 2IZX 3EQS 3H0A 3ZQI 4ERZ 4GQ6 4K0U 4P6X 4QJR 4R1E 4RRV 5IZU 5LY1 5LY3 5N8B 5UL6 5V1Y 5WUK 6H7B 6JJZ 6MA3 6S07`。
-筛选：822 个 PepPC 与 PDBbind2020 取交集 → CD-HIT 40% → 只留活性 **≤ 0.1 µM** → 与训练靶点去重（最高 60%）→ 30 个，分辨率优于 2.5 Å。
-
-**没有结构预测验证器**。指标：L-RMSD、序列相似度、**Rosetta ddG**、**有效率 = ddG<0 的比例**、TM-score 多样性。默认假设 **8 张 GPU**，需 PyRosetta。
-
-## 9.11 RFpeptides（大环肽）
-
-`Nat. Chem. Biol. s41589-025-01929-w`，数据 Zenodo `10.5281/zenodo.15264344`
-
-**四个靶点**：MCL1、MDM2、GABARAP、**RbtA**（只有预测结构）。每靶点合成 20 条以内。
-**验证器**：**AfCycDesign**（带环状位置编码的 AF2，原版 AF2 表示不了头尾相接的大环）。
-
-**阈值逐靶点重调**：通用 iPAE<0.3（归一化，≈9.3 Å）+ Cα RMSD<1.5 Å；MDM2 档 4 万条→7,495 过 iPAE<0.3→17 条同时满足 ddG<−50、CMS>300 Å²、SAP<35→取前 11 合成；GABARAP 档收紧到 **iPAE<0.13（≈4.0 Å）**、ddG<−30，最好的 6 nM。
-协议在 RFdiffusion 仓库：`examples/design_macrocyclic_binder.sh`，新增 `inference.cyclic` 和 `inference.cyc_chains`。
-
-## 9.12 RFdiffusion
-
-`Nature 620:1089–1100`，`github.com/RosettaCommons/RFdiffusion`
-
-**五个 binder 靶点**：流感 A H1 血凝素、IL-7Rα、PD-L1、胰岛素受体、TrkA（后四个来自 Cao 2022）。每靶点选 95 条做实验，总体实验成功率 **19%**。
-**验证器**：**AF2 带 initial guess 和靶点模板**，脚本 `github.com/nrbennet/dl_binder_design`。序列来自 ProteinMPNN-FastRelax，每骨架 2 条。
-**阈值**：**单体 pLDDT>80、interaction pAE<10、单体对设计 RMSD<1 Å**。README："过不了 `pae_interaction < 10` 的设计不值得下单"。
-**规模**：每靶点约 1 万条骨架 × 2 条序列 ≈ 2 万条设计。
+`1BJR 1J7Z 1RJK 1SJH 2A4R 2AQ9 2BBA 2FTS 2IZX 3EQS 3H0A 3ZQI 4ERZ 4GQ6 4K0U 4P6X 4QJR 4R1E 4RRV 5IZU 5LY1 5LY3 5N8B 5UL6 5V1Y 5WUK 6H7B 6JJZ 6MA3 6S07` `EXPLICIT_SOURCE`
 
 ---
 
-## 未能核实（binder 线）
+## 9.11 binder 线仍未解决的
 
-BoltzDesign1 的靶点清单（bioRxiv 限流）；ODesign 未点名的九个 Cao 靶点及其代码地址；Latent-X 代码权重（商业未公开）；Cao 2022 设计阶段的 ddG/CMS 数值阈值（只在放出的脚本里）；BoltzGen 前两场之外的 26 靶点名单；PepBDB 划分规模。
-
----
+| 项 | 状态 |
+|---|---|
+| ODesign 到底 10 还是 11 个靶点，以及未点名的那九个 | `UNRESOLVED`——论文正文与图注冲突 |
+| ODesign 的代码地址 | `UNRESOLVED` |
+| BoltzDesign1 论文的靶点清单 | `UNRESOLVED`——bioRxiv 限流 |
+| Cao 2022 设计阶段的 ddG / CMS 数值阈值 | `UNRESOLVED`——只在放出的脚本里，未下载核对 |
+| BindCraft 的 PD-1 / PD-L1 / CLDN1 / CrSAS-6 / Bet v1 五个 PDB 编号 | `UNRESOLVED` |
+| BoltzGen 除前两场之外的 26 靶点完整名单 | `UNRESOLVED` |
+| ProtDBench 簇级成功率的 Foldseek 聚类参数 | `UNRESOLVED` |
+| RFdiffusion 论文 Extended Data Fig. 8F 的阈值 | 二手，未核原文（Nature 付费墙） |
+| BindCraft 的 12 靶点实验命中数逐个对应 | 二手，未核原文 |
 
 # 十、配方明细：抗体 / 纳米抗体
 

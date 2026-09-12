@@ -10,7 +10,7 @@ UPSTREAM_REVISION = "aaf788b1502ad95d5c5a84455cfc53f2544f3b45"
 
 
 class FaMPNNHead(nn.Module):
-    def __init__(self, checkpoint_path, source_revision=UPSTREAM_REVISION):
+    def __init__(self, checkpoint_path=None, source_revision=UPSTREAM_REVISION, identity=None):
         super().__init__()
         from fampnn.model import fampnn as upstream_module
         from fampnn.data import residue_constants as rc
@@ -23,19 +23,27 @@ class FaMPNNHead(nn.Module):
             raise ValueError(f"FaMPNN source revision mismatch: {actual}")
         if subprocess.check_output(["git", "-C", str(root), "diff", "--name-only", "HEAD", "--", "fampnn"], text=True).strip():
             raise ValueError("FaMPNN tracked source has local modifications")
-        path = Path(checkpoint_path).resolve()
-        with path.open("rb") as stream:
-            checksum = hashlib.file_digest(stream, "sha256").hexdigest()
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-        full = SeqDenoiser(checkpoint["model_cfg"])
-        full.load_state_dict(checkpoint["state_dict"], strict=True)
+        if identity is None:
+            path = Path(checkpoint_path).resolve()
+            with path.open("rb") as stream:
+                checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+            full = SeqDenoiser(checkpoint["model_cfg"])
+            full.load_state_dict(checkpoint["state_dict"], strict=True)
+            identity = dict(backend="fampnn", upstream_revision=actual,
+                checkpoint_sha256=checksum, model_config=OmegaConf.to_container(checkpoint["model_cfg"], resolve=True),
+                mapping_version=MAPPING_VERSION)
+        else:
+            from pxdesign_train.checkpoints import plain_config
+            identity = plain_config(identity)
+            if identity["upstream_revision"] != actual or identity["mapping_version"] != MAPPING_VERSION:
+                raise ValueError("Saved FAMPNN source/mapping mismatch")
+            full = SeqDenoiser(OmegaConf.create(identity["model_config"]))
         self.sequence_network = full.denoiser.seq_design_module
         if self.sequence_network.autoregressive:
             raise ValueError("Stage IV block decoding requires the released non-autoregressive configuration")
         self.register_buffer("canonical_indices", torch.tensor([rc.restype_order[a] for a in AA_ORDER]))
-        self.identity = dict(backend="fampnn", upstream_revision=actual,
-            checkpoint_sha256=checksum, model_config=OmegaConf.to_container(checkpoint["model_cfg"], resolve=True),
-            mapping_version=MAPPING_VERSION)
+        self.identity = dict(identity)
 
     def forward(self, *, denoised_coords, aatype_noised, seq_mask,
                 atom_mask_noised, residue_index, chain_encoding):

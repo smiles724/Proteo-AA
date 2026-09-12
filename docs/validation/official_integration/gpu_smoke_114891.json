@@ -1,0 +1,1336 @@
+{
+  "status": "passed",
+  "device": "cuda",
+  "checkpoint": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/runs/official_components_smoke/114891/checkpoints/step1_smoke.pt",
+  "feedback_checkpoint": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/runs/official_components_smoke/114891/feedback_checkpoints/step1_feedback.pt",
+  "phase_transition_and_resume": true,
+  "gradients": {
+    "refine_to_feedback": 2811.92305919528
+  },
+  "losses": {
+    "loss": 5.0991315841674805,
+    "loss_bb": 0.0,
+    "loss_sc": 0.0,
+    "mse": 0.7316855788230896,
+    "denoise_weighted_mse": 0.2092943638563156,
+    "lddt_unweighted": 0.25969284772872925,
+    "ca_rmsd": 0.6846354007720947,
+    "bb_rmsd": 0.7584006190299988,
+    "tm_score": 0.9198503494262695,
+    "lddt": 0.25969284772872925,
+    "distogram": 4.027405738830566,
+    "sigma_low_frac": 1.0,
+    "aa_ce": 0.0,
+    "aa_acc": 0.0,
+    "aa_mask_frac": 0.0,
+    "sc_local": 0.0,
+    "sc_phys": 0.0,
+    "sc_pack": 0.0,
+    "sc_global": 0.0,
+    "bb_post": 0.7316855788230896,
+    "aa_post": 0.0,
+    "stage4/aa_pre": 0.16872970759868622,
+    "stage4/aa_revision": 0.0,
+    "stage4/sc_aux": 4.930401802062988,
+    "stage4/phys": 0.0,
+    "stage4/recovery_pre": 0.9166666865348816,
+    "stage4/recovery_revision": 0.0,
+    "aa_head_grad_norm": 0.0,
+    "aa_head_clipped_grad_norm": 0.0,
+    "aa_head_update_norm": 0.0,
+    "aa_head_relative_update": 0.0
+  },
+  "identity": {
+    "backend": "fampnn",
+    "checkpoint_sha256": "8969b3f1f3c941178076c7800952595a18b56fd3828d15bb993d3ef537938a05",
+    "mapping_version": "proteoaa-fampnn-atom-name-v1",
+    "model_config": {
+      "denoiser": {
+        "confidence_module": {
+          "c_h_V": 128,
+          "enabled": true,
+          "hidden_size": 128,
+          "n_aatype": 21,
+          "sce_bins": {
+            "max_bin": 4.0,
+            "min_bin": 0.0,
+            "n_bins": 33
+          },
+          "scn_diffusion": {
+            "churn_cfg": {
+              "num_steps": 50,
+              "s_churn": 0,
+              "s_noise": 1.0,
+              "s_t_max": 50.0,
+              "s_t_min": 0.01
+            },
+            "noise_schedule": {
+              "c": 1.5,
+              "name": "step_scale"
+            },
+            "num_steps": 50,
+            "timestep_schedule": {
+              "mode": "linear",
+              "num_steps": 50,
+              "t_end": 1.0,
+              "t_start": 0.0
+            }
+          },
+          "structure_encoder": {
+            "dropout_p": 0.1,
+            "k_neighbors": 48,
+            "n_aatype": 21,
+            "n_channel": 128,
+            "n_layers": 3
+          },
+          "subsample_train_iter_mult": 8
+        },
+        "interpolant": {
+          "name": "edm",
+          "rho": 7,
+          "s_max": 80,
+          "s_min": 0.01,
+          "training_noise_cfg": {
+            "constant_t": {
+              "t": 1.0
+            },
+            "lognormal": {
+              "psigma_mean": 1.5,
+              "psigma_std": 1.0
+            },
+            "trunc_normal_t": {
+              "loc": 0.6,
+              "scale": 0.1,
+              "t_max": 1.0,
+              "t_min": 0.0
+            },
+            "uniform_sigma": null,
+            "uniform_t": {
+              "t_max": 1.0,
+              "t_min": 0.0
+            }
+          },
+          "training_noise_schedule": "lognormal"
+        },
+        "minimpnn": {
+          "aggregation": "sum",
+          "augment_eps": 0.3,
+          "autoregressive": false,
+          "dec_edge_up": true,
+          "dropout_p": 0.1,
+          "gcp": {
+            "chi_hidden_dim": 16,
+            "decoder_residual_updates": true,
+            "dropout": 0.1,
+            "e_hidden_dim": 512,
+            "edge_input_dims": [
+              32,
+              56
+            ],
+            "h_hidden_dim": 128,
+            "layer": {
+              "dropout": 0.1,
+              "mp": {
+                "edge_encoder": false,
+                "edge_gate": false,
+                "message_ff_multiplier": 1,
+                "message_residual": 0,
+                "num_message_layers": 3,
+                "self_message": true,
+                "use_residual_message_gcp": true
+              },
+              "nonlinearity_slope": 0.01,
+              "num_feedforward_layers": 2,
+              "pre_norm": false
+            },
+            "module": {
+              "ablate_frame_updates": true,
+              "ablate_scalars": false,
+              "ablate_vectors": false,
+              "bottleneck": 1,
+              "default_bottleneck": 1,
+              "default_vector_residual": false,
+              "enable_e3_equivariance": false,
+              "frame_gate": false,
+              "nonlinearities": [
+                "relu",
+                null
+              ],
+              "norm_x_diff": false,
+              "scalar_gate": 0,
+              "scalar_nonlinearity": "relu",
+              "scalarization_vectorization_output_dim": 3,
+              "sigma_frame_gate": false,
+              "vector_frame_residual": false,
+              "vector_gate": true,
+              "vector_identity": true,
+              "vector_linear": true,
+              "vector_nonlinearity": null,
+              "vector_residual": false
+            },
+            "node_input_dims": [
+              6,
+              15
+            ],
+            "num_encoder_layers": 3,
+            "num_positional_embeddings": 16,
+            "xi_hidden_dim": 1
+          },
+          "graph_transformer": {
+            "attn_bias": true,
+            "dim_key": 3,
+            "dim_pos_enc": 16,
+            "hidden_dim": 32,
+            "input_dim": 37,
+            "layers_per_nn": 4,
+            "nns": [
+              8,
+              16,
+              32,
+              64
+            ],
+            "num_heads": 2,
+            "out_dim": 128,
+            "pos_enc": true
+          },
+          "gvp": {
+            "dropout": 0.1,
+            "edge_hidden_dim_scalar": 512,
+            "edge_hidden_dim_vector": 1,
+            "graph_embedding": {
+              "edge_hidden_dim_scalar": 512,
+              "edge_hidden_dim_vector": 1,
+              "mpnn_n_channel": 128,
+              "n_aatype": 21,
+              "node_hidden_dim_scalar": 128,
+              "node_hidden_dim_vector": 16,
+              "num_positional_embeddings": 16,
+              "remove_edges_without_coords": true,
+              "top_k_neighbors": 48
+            },
+            "node_hidden_dim_scalar": 128,
+            "node_hidden_dim_vector": 16,
+            "num_encoder_layers": 5,
+            "out_dim": 128,
+            "rotate_out": false
+          },
+          "k_neighbors": 48,
+          "model_type": "sidechain",
+          "n_aatype": 21,
+          "n_channel": 128,
+          "n_layers": 5,
+          "no_aatype_pred": false,
+          "noise_cond_mult": 4,
+          "residue_transformer": {
+            "condition_on_seq": false,
+            "depth": 4,
+            "edge_attn_bias": true,
+            "edge_hidden_size": 512,
+            "hidden_size": 256,
+            "in_channels": 128,
+            "inf": 1000000000.0,
+            "mlp_dropout": 0.0,
+            "mlp_ratio": 4.0,
+            "n_aatype": 21,
+            "num_heads": 8,
+            "out_channels": 128,
+            "qk_rmsnorm": true,
+            "rotary_emb": null
+          },
+          "return_embedding": "last",
+          "use_gcp": false,
+          "use_gvp": true,
+          "use_residue_transformer": false,
+          "use_self_conditioning_seq": false,
+          "use_time_cond": false
+        },
+        "name": "minimpnn",
+        "pos_encoding": "rotary_residx",
+        "scn_diffusion_module": {
+          "confidence_module": {
+            "c_h_V": 128,
+            "enabled": true,
+            "hidden_size": 128,
+            "n_aatype": 21,
+            "sce_bins": {
+              "max_bin": 4.0,
+              "min_bin": 0.0,
+              "n_bins": 33
+            },
+            "scn_diffusion": {
+              "churn_cfg": {
+                "num_steps": 50,
+                "s_churn": 0,
+                "s_noise": 1.0,
+                "s_t_max": 50.0,
+                "s_t_min": 0.01
+              },
+              "noise_schedule": {
+                "c": 1.5,
+                "name": "step_scale"
+              },
+              "num_steps": 50,
+              "timestep_schedule": {
+                "mode": "linear",
+                "num_steps": 50,
+                "t_end": 1.0,
+                "t_start": 0.0
+              }
+            },
+            "structure_encoder": {
+              "dropout_p": 0.1,
+              "k_neighbors": 48,
+              "n_aatype": 21,
+              "n_channel": 128,
+              "n_layers": 3
+            },
+            "subsample_train_iter_mult": 8
+          },
+          "hidden_size": 256,
+          "interpolant": {
+            "name": "edm",
+            "rho": 7,
+            "s_max": 80,
+            "s_min": 0.01,
+            "training_noise_cfg": {
+              "constant_t": {
+                "t": 1.0
+              },
+              "lognormal": {
+                "psigma_mean": 1.5,
+                "psigma_std": 1.0
+              },
+              "trunc_normal_t": {
+                "loc": 0.6,
+                "scale": 0.1,
+                "t_max": 1.0,
+                "t_min": 0.0
+              },
+              "uniform_sigma": null,
+              "uniform_t": {
+                "t_max": 1.0,
+                "t_min": 0.0
+              }
+            },
+            "training_noise_schedule": "lognormal"
+          },
+          "scn_denoiser": {
+            "c_h_V": 128,
+            "depth": 4,
+            "hidden_size": 256,
+            "mlp_dropout": 0.0,
+            "mlp_ratio": 4.0,
+            "n_aatype": 21,
+            "num_atoms_in": 37,
+            "self_cond_p": 0.5,
+            "use_self_conditioning": true
+          },
+          "self_cond_p": 0.5,
+          "training_batch_size_mult": 8,
+          "translation_scale": 1.0,
+          "use_self_conditioning": true
+        },
+        "seq_head": {
+          "in_channels": 128,
+          "n_aatype": 21
+        },
+        "task": "allatom_seq_des",
+        "use_self_conditioning_seq": false
+      },
+      "eps": 1e-08,
+      "inf": 1000000000.0,
+      "interpolant": {
+        "name": "mar",
+        "training_noise_cfg": {
+          "constant_t": {
+            "t": 1.0
+          },
+          "uniform_cbrt_t": {
+            "t_max": 1.0,
+            "t_min": 0.0
+          },
+          "uniform_cosine_t": {
+            "t_max": 1.0,
+            "t_min": 0.0
+          },
+          "uniform_cubed_t": {
+            "t_max": 1.0,
+            "t_min": 0.0
+          },
+          "uniform_sqrt_t": {
+            "t_max": 1.0,
+            "t_min": 0.0
+          },
+          "uniform_squared_t": {
+            "t_max": 1.0,
+            "t_min": 0.0
+          },
+          "uniform_t": {
+            "t_max": 1.0,
+            "t_min": 0.0
+          }
+        },
+        "training_noise_schedule": "uniform_sqrt_t"
+      },
+      "n_aatype": 21,
+      "num_atoms_in": 37,
+      "override_sigma_data": [
+        9.6,
+        0.64
+      ],
+      "task": "allatom_seq_des"
+    },
+    "upstream_revision": "aaf788b1502ad95d5c5a84455cfc53f2544f3b45",
+    "proteoaa_revision": "f92a215a0cdec8c9daff2ebdcf3f98a5d23cbb8d",
+    "implementation_sha256": "87b5746c76a6081f7caf07fa6afb076d83e86ed99c14d9e7f20807022100632e",
+    "phase": "feedback_adapt",
+    "cycle": {
+      "rounds": 2,
+      "decode_blocks": 2,
+      "query_fraction": 0.5,
+      "whole_mask_probability": 0.0,
+      "temperature": 0.0,
+      "sc_to_aa": true,
+      "sc_to_bb": true,
+      "packing_enabled": true,
+      "backbone_refinement_enabled": true
+    },
+    "inference_rounds": 0,
+    "mask_policy": "query-X-hide-SC-before-encoding-v1",
+    "sidechain_edm": false,
+    "optimizer_policy": "joint-AA-SC-BB-v1",
+    "optimizer": {
+      "aa_lr": 1e-05,
+      "sc_lr": 1e-05,
+      "bb_lr": 1e-06
+    },
+    "bb_trainable_prefixes": [],
+    "objectives": {
+      "weight_aa_pre": 1.0,
+      "weight_aa_revision": 1.0,
+      "weight_sc_aux": 1.0,
+      "weight_physical": 0.1
+    },
+    "template_provider": "dunbrack_mode",
+    "diffusion_samples": 1,
+    "feedback": {
+      "sc_a_direct": false,
+      "sc_a_direct_pre": true,
+      "sc_q_direct": true,
+      "sc_hres_inject": false
+    }
+  },
+  "generation": {
+    "seed": 17,
+    "temperature": 0.0,
+    "cycle": {
+      "rounds": 3,
+      "decode_blocks": 2,
+      "query_fraction": 0.5,
+      "whole_mask_probability": 0.0,
+      "temperature": 0.0,
+      "sc_to_aa": true,
+      "sc_to_bb": true,
+      "packing_enabled": true,
+      "backbone_refinement_enabled": true
+    },
+    "protocol": {
+      "initial_target_policy": "joint",
+      "subsequent_target": "generated_complex",
+      "frame": "sampler_returned",
+      "backbone_sampler": "pxdesign_native",
+      "packing_enabled": true
+    },
+    "component_origins": {
+      "backbone": {
+        "path": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/runs/component_donors/pxdesign_v0.1.0.pt",
+        "sha256": "b075867bae942dc0c6487173736922b0e2913308c1ba542d227418b6e176478d",
+        "revision": null,
+        "step": null,
+        "runtime_sources": {
+          "pxdesign": {
+            "revision": "f788441313c84c3074fe9596ac2433f96b15c763",
+            "patch_sha256": "e7a98dedf601463cf87578c3d63b7d6c320a9cd6698b3e4ccd6d2ffac3206814",
+            "path": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/PXDesign"
+          },
+          "protenix": {
+            "revision": "c3bfc365b3e1341a11935eddfe7bfdc308092147",
+            "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "path": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/Protenix"
+          }
+        }
+      },
+      "fampnn": {
+        "backend": "fampnn",
+        "upstream_revision": "aaf788b1502ad95d5c5a84455cfc53f2544f3b45",
+        "checkpoint_sha256": "8969b3f1f3c941178076c7800952595a18b56fd3828d15bb993d3ef537938a05",
+        "model_config": {
+          "task": "allatom_seq_des",
+          "override_sigma_data": [
+            9.6,
+            0.64
+          ],
+          "num_atoms_in": 37,
+          "n_aatype": 21,
+          "eps": 1e-08,
+          "inf": 1000000000.0,
+          "denoiser": {
+            "name": "minimpnn",
+            "task": "allatom_seq_des",
+            "pos_encoding": "rotary_residx",
+            "use_self_conditioning_seq": false,
+            "minimpnn": {
+              "autoregressive": false,
+              "no_aatype_pred": false,
+              "n_aatype": 21,
+              "use_self_conditioning_seq": false,
+              "use_time_cond": false,
+              "use_gvp": true,
+              "use_gcp": false,
+              "use_residue_transformer": false,
+              "n_channel": 128,
+              "n_layers": 5,
+              "k_neighbors": 48,
+              "noise_cond_mult": 4,
+              "model_type": "sidechain",
+              "augment_eps": 0.3,
+              "dropout_p": 0.1,
+              "dec_edge_up": true,
+              "aggregation": "sum",
+              "return_embedding": "last",
+              "graph_transformer": {
+                "nns": [
+                  8,
+                  16,
+                  32,
+                  64
+                ],
+                "layers_per_nn": 4,
+                "hidden_dim": 32,
+                "input_dim": 37,
+                "num_heads": 2,
+                "dim_key": 3,
+                "out_dim": 128,
+                "dim_pos_enc": 16,
+                "pos_enc": true,
+                "attn_bias": true
+              },
+              "gvp": {
+                "out_dim": 128,
+                "node_hidden_dim_scalar": 128,
+                "node_hidden_dim_vector": 16,
+                "edge_hidden_dim_scalar": 512,
+                "edge_hidden_dim_vector": 1,
+                "rotate_out": false,
+                "graph_embedding": {
+                  "mpnn_n_channel": 128,
+                  "top_k_neighbors": 48,
+                  "num_positional_embeddings": 16,
+                  "n_aatype": 21,
+                  "remove_edges_without_coords": true,
+                  "node_hidden_dim_scalar": 128,
+                  "node_hidden_dim_vector": 16,
+                  "edge_hidden_dim_scalar": 512,
+                  "edge_hidden_dim_vector": 1
+                },
+                "dropout": 0.1,
+                "num_encoder_layers": 5
+              },
+              "gcp": {
+                "h_hidden_dim": 128,
+                "chi_hidden_dim": 16,
+                "e_hidden_dim": 512,
+                "xi_hidden_dim": 1,
+                "node_input_dims": [
+                  6,
+                  15
+                ],
+                "edge_input_dims": [
+                  32,
+                  56
+                ],
+                "num_encoder_layers": 3,
+                "dropout": 0.1,
+                "decoder_residual_updates": true,
+                "num_positional_embeddings": 16,
+                "module": {
+                  "norm_x_diff": false,
+                  "scalar_gate": 0,
+                  "vector_gate": true,
+                  "vector_residual": false,
+                  "vector_frame_residual": false,
+                  "frame_gate": false,
+                  "sigma_frame_gate": false,
+                  "scalar_nonlinearity": "relu",
+                  "vector_nonlinearity": null,
+                  "nonlinearities": [
+                    "relu",
+                    null
+                  ],
+                  "bottleneck": 1,
+                  "vector_linear": true,
+                  "vector_identity": true,
+                  "default_vector_residual": false,
+                  "default_bottleneck": 1,
+                  "ablate_frame_updates": true,
+                  "ablate_scalars": false,
+                  "ablate_vectors": false,
+                  "enable_e3_equivariance": false,
+                  "scalarization_vectorization_output_dim": 3
+                },
+                "layer": {
+                  "pre_norm": false,
+                  "num_feedforward_layers": 2,
+                  "dropout": 0.1,
+                  "nonlinearity_slope": 0.01,
+                  "mp": {
+                    "edge_encoder": false,
+                    "edge_gate": false,
+                    "num_message_layers": 3,
+                    "message_residual": 0,
+                    "message_ff_multiplier": 1,
+                    "self_message": true,
+                    "use_residual_message_gcp": true
+                  }
+                }
+              },
+              "residue_transformer": {
+                "in_channels": 128,
+                "out_channels": 128,
+                "hidden_size": 256,
+                "n_aatype": 21,
+                "num_heads": 8,
+                "condition_on_seq": false,
+                "edge_attn_bias": true,
+                "qk_rmsnorm": true,
+                "mlp_ratio": 4.0,
+                "mlp_dropout": 0.0,
+                "depth": 4,
+                "edge_hidden_size": 512,
+                "inf": 1000000000.0,
+                "rotary_emb": null
+              }
+            },
+            "seq_head": {
+              "in_channels": 128,
+              "n_aatype": 21
+            },
+            "scn_diffusion_module": {
+              "hidden_size": 256,
+              "interpolant": {
+                "name": "edm",
+                "rho": 7,
+                "s_min": 0.01,
+                "s_max": 80,
+                "training_noise_schedule": "lognormal",
+                "training_noise_cfg": {
+                  "lognormal": {
+                    "psigma_mean": 1.5,
+                    "psigma_std": 1.0
+                  },
+                  "uniform_sigma": null,
+                  "uniform_t": {
+                    "t_min": 0.0,
+                    "t_max": 1.0
+                  },
+                  "trunc_normal_t": {
+                    "loc": 0.6,
+                    "scale": 0.1,
+                    "t_min": 0.0,
+                    "t_max": 1.0
+                  },
+                  "constant_t": {
+                    "t": 1.0
+                  }
+                }
+              },
+              "use_self_conditioning": true,
+              "self_cond_p": 0.5,
+              "training_batch_size_mult": 8,
+              "translation_scale": 1.0,
+              "scn_denoiser": {
+                "num_atoms_in": 37,
+                "use_self_conditioning": true,
+                "n_aatype": 21,
+                "self_cond_p": 0.5,
+                "c_h_V": 128,
+                "depth": 4,
+                "hidden_size": 256,
+                "mlp_dropout": 0.0,
+                "mlp_ratio": 4.0
+              },
+              "confidence_module": {
+                "enabled": true,
+                "subsample_train_iter_mult": 8,
+                "scn_diffusion": {
+                  "num_steps": 50,
+                  "timestep_schedule": {
+                    "num_steps": 50,
+                    "mode": "linear",
+                    "t_start": 0.0,
+                    "t_end": 1.0
+                  },
+                  "noise_schedule": {
+                    "name": "step_scale",
+                    "c": 1.5
+                  },
+                  "churn_cfg": {
+                    "s_churn": 0,
+                    "s_noise": 1.0,
+                    "s_t_min": 0.01,
+                    "s_t_max": 50.0,
+                    "num_steps": 50
+                  }
+                },
+                "c_h_V": 128,
+                "hidden_size": 128,
+                "n_aatype": 21,
+                "sce_bins": {
+                  "min_bin": 0.0,
+                  "max_bin": 4.0,
+                  "n_bins": 33
+                },
+                "structure_encoder": {
+                  "n_aatype": 21,
+                  "n_channel": 128,
+                  "n_layers": 3,
+                  "k_neighbors": 48,
+                  "dropout_p": 0.1
+                }
+              }
+            },
+            "confidence_module": {
+              "enabled": true,
+              "subsample_train_iter_mult": 8,
+              "scn_diffusion": {
+                "num_steps": 50,
+                "timestep_schedule": {
+                  "num_steps": 50,
+                  "mode": "linear",
+                  "t_start": 0.0,
+                  "t_end": 1.0
+                },
+                "noise_schedule": {
+                  "name": "step_scale",
+                  "c": 1.5
+                },
+                "churn_cfg": {
+                  "s_churn": 0,
+                  "s_noise": 1.0,
+                  "s_t_min": 0.01,
+                  "s_t_max": 50.0,
+                  "num_steps": 50
+                }
+              },
+              "c_h_V": 128,
+              "hidden_size": 128,
+              "n_aatype": 21,
+              "sce_bins": {
+                "min_bin": 0.0,
+                "max_bin": 4.0,
+                "n_bins": 33
+              },
+              "structure_encoder": {
+                "n_aatype": 21,
+                "n_channel": 128,
+                "n_layers": 3,
+                "k_neighbors": 48,
+                "dropout_p": 0.1
+              }
+            },
+            "interpolant": {
+              "name": "edm",
+              "rho": 7,
+              "s_min": 0.01,
+              "s_max": 80,
+              "training_noise_schedule": "lognormal",
+              "training_noise_cfg": {
+                "lognormal": {
+                  "psigma_mean": 1.5,
+                  "psigma_std": 1.0
+                },
+                "uniform_sigma": null,
+                "uniform_t": {
+                  "t_min": 0.0,
+                  "t_max": 1.0
+                },
+                "trunc_normal_t": {
+                  "loc": 0.6,
+                  "scale": 0.1,
+                  "t_min": 0.0,
+                  "t_max": 1.0
+                },
+                "constant_t": {
+                  "t": 1.0
+                }
+              }
+            }
+          },
+          "interpolant": {
+            "name": "mar",
+            "training_noise_schedule": "uniform_sqrt_t",
+            "training_noise_cfg": {
+              "uniform_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "constant_t": {
+                "t": 1.0
+              },
+              "uniform_squared_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "uniform_cubed_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "uniform_cosine_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "uniform_sqrt_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "uniform_cbrt_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              }
+            }
+          }
+        },
+        "mapping_version": "proteoaa-fampnn-atom-name-v1"
+      },
+      "feedback": {
+        "origin": "fresh"
+      },
+      "sidechain": {
+        "path": "/hai/scratch/yfsun/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt",
+        "sha256": "60b0bd236c49f9d9d86c9f394886e6b104d84fbd68a40fa56d091c46b10a3c50",
+        "revision": null,
+        "step": 6000,
+        "architecture": {
+          "bb_context": true,
+          "centre_coord_input": true,
+          "frame_aware_head": false,
+          "template_residual": false,
+          "type_logits_input": true,
+          "edm": false,
+          "a_bs_concat": true,
+          "q_bs": false
+        },
+        "atom_vocabulary": "Proteo-AA-37-append-only",
+        "frame": "global-input-CA-Gram-Schmidt",
+        "edm": false
+      }
+    },
+    "stop_reason": "fixed_budget",
+    "rng_streams": {
+      "backbone": 17,
+      "query": 18,
+      "sequence": 19,
+      "sidechain": 20,
+      "feature": 21
+    },
+    "feature_convention": "fresh_positive_sigma_v1",
+    "feature_sigma": 0.4000000059604645,
+    "rounds": [
+      {
+        "round": 1,
+        "query_count": [
+          [
+            12
+          ]
+        ],
+        "coverage_count": [
+          [
+            12
+          ]
+        ],
+        "change_count": [
+          [
+            5
+          ]
+        ],
+        "binder_ca_displacement": [
+          [
+            1.559330701828003
+          ]
+        ],
+        "state_version": 15
+      },
+      {
+        "round": 2,
+        "query_count": [
+          [
+            10
+          ]
+        ],
+        "coverage_count": [
+          [
+            18
+          ]
+        ],
+        "change_count": [
+          [
+            6
+          ]
+        ],
+        "binder_ca_displacement": [
+          [
+            0.8034559488296509
+          ]
+        ],
+        "state_version": 23
+      },
+      {
+        "round": 3,
+        "query_count": [
+          [
+            12
+          ]
+        ],
+        "coverage_count": [
+          [
+            20
+          ]
+        ],
+        "change_count": [
+          [
+            7
+          ]
+        ],
+        "binder_ca_displacement": [
+          [
+            0.3236294984817505
+          ]
+        ],
+        "state_version": 31
+      }
+    ]
+  },
+  "component_origins": {
+    "backbone": {
+      "path": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/runs/component_donors/pxdesign_v0.1.0.pt",
+      "sha256": "b075867bae942dc0c6487173736922b0e2913308c1ba542d227418b6e176478d",
+      "revision": null,
+      "step": null,
+      "runtime_sources": {
+        "pxdesign": {
+          "revision": "f788441313c84c3074fe9596ac2433f96b15c763",
+          "patch_sha256": "e7a98dedf601463cf87578c3d63b7d6c320a9cd6698b3e4ccd6d2ffac3206814",
+          "path": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/PXDesign"
+        },
+        "protenix": {
+          "revision": "c3bfc365b3e1341a11935eddfe7bfdc308092147",
+          "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "path": "/hai/users/y/f/yfsun/Proteo-AA-official-pxdesign-fampnn/Protenix"
+        }
+      }
+    },
+    "fampnn": {
+      "backend": "fampnn",
+      "upstream_revision": "aaf788b1502ad95d5c5a84455cfc53f2544f3b45",
+      "checkpoint_sha256": "8969b3f1f3c941178076c7800952595a18b56fd3828d15bb993d3ef537938a05",
+      "model_config": {
+        "task": "allatom_seq_des",
+        "override_sigma_data": [
+          9.6,
+          0.64
+        ],
+        "num_atoms_in": 37,
+        "n_aatype": 21,
+        "eps": 1e-08,
+        "inf": 1000000000.0,
+        "denoiser": {
+          "name": "minimpnn",
+          "task": "allatom_seq_des",
+          "pos_encoding": "rotary_residx",
+          "use_self_conditioning_seq": false,
+          "minimpnn": {
+            "autoregressive": false,
+            "no_aatype_pred": false,
+            "n_aatype": 21,
+            "use_self_conditioning_seq": false,
+            "use_time_cond": false,
+            "use_gvp": true,
+            "use_gcp": false,
+            "use_residue_transformer": false,
+            "n_channel": 128,
+            "n_layers": 5,
+            "k_neighbors": 48,
+            "noise_cond_mult": 4,
+            "model_type": "sidechain",
+            "augment_eps": 0.3,
+            "dropout_p": 0.1,
+            "dec_edge_up": true,
+            "aggregation": "sum",
+            "return_embedding": "last",
+            "graph_transformer": {
+              "nns": [
+                8,
+                16,
+                32,
+                64
+              ],
+              "layers_per_nn": 4,
+              "hidden_dim": 32,
+              "input_dim": 37,
+              "num_heads": 2,
+              "dim_key": 3,
+              "out_dim": 128,
+              "dim_pos_enc": 16,
+              "pos_enc": true,
+              "attn_bias": true
+            },
+            "gvp": {
+              "out_dim": 128,
+              "node_hidden_dim_scalar": 128,
+              "node_hidden_dim_vector": 16,
+              "edge_hidden_dim_scalar": 512,
+              "edge_hidden_dim_vector": 1,
+              "rotate_out": false,
+              "graph_embedding": {
+                "mpnn_n_channel": 128,
+                "top_k_neighbors": 48,
+                "num_positional_embeddings": 16,
+                "n_aatype": 21,
+                "remove_edges_without_coords": true,
+                "node_hidden_dim_scalar": 128,
+                "node_hidden_dim_vector": 16,
+                "edge_hidden_dim_scalar": 512,
+                "edge_hidden_dim_vector": 1
+              },
+              "dropout": 0.1,
+              "num_encoder_layers": 5
+            },
+            "gcp": {
+              "h_hidden_dim": 128,
+              "chi_hidden_dim": 16,
+              "e_hidden_dim": 512,
+              "xi_hidden_dim": 1,
+              "node_input_dims": [
+                6,
+                15
+              ],
+              "edge_input_dims": [
+                32,
+                56
+              ],
+              "num_encoder_layers": 3,
+              "dropout": 0.1,
+              "decoder_residual_updates": true,
+              "num_positional_embeddings": 16,
+              "module": {
+                "norm_x_diff": false,
+                "scalar_gate": 0,
+                "vector_gate": true,
+                "vector_residual": false,
+                "vector_frame_residual": false,
+                "frame_gate": false,
+                "sigma_frame_gate": false,
+                "scalar_nonlinearity": "relu",
+                "vector_nonlinearity": null,
+                "nonlinearities": [
+                  "relu",
+                  null
+                ],
+                "bottleneck": 1,
+                "vector_linear": true,
+                "vector_identity": true,
+                "default_vector_residual": false,
+                "default_bottleneck": 1,
+                "ablate_frame_updates": true,
+                "ablate_scalars": false,
+                "ablate_vectors": false,
+                "enable_e3_equivariance": false,
+                "scalarization_vectorization_output_dim": 3
+              },
+              "layer": {
+                "pre_norm": false,
+                "num_feedforward_layers": 2,
+                "dropout": 0.1,
+                "nonlinearity_slope": 0.01,
+                "mp": {
+                  "edge_encoder": false,
+                  "edge_gate": false,
+                  "num_message_layers": 3,
+                  "message_residual": 0,
+                  "message_ff_multiplier": 1,
+                  "self_message": true,
+                  "use_residual_message_gcp": true
+                }
+              }
+            },
+            "residue_transformer": {
+              "in_channels": 128,
+              "out_channels": 128,
+              "hidden_size": 256,
+              "n_aatype": 21,
+              "num_heads": 8,
+              "condition_on_seq": false,
+              "edge_attn_bias": true,
+              "qk_rmsnorm": true,
+              "mlp_ratio": 4.0,
+              "mlp_dropout": 0.0,
+              "depth": 4,
+              "edge_hidden_size": 512,
+              "inf": 1000000000.0,
+              "rotary_emb": null
+            }
+          },
+          "seq_head": {
+            "in_channels": 128,
+            "n_aatype": 21
+          },
+          "scn_diffusion_module": {
+            "hidden_size": 256,
+            "interpolant": {
+              "name": "edm",
+              "rho": 7,
+              "s_min": 0.01,
+              "s_max": 80,
+              "training_noise_schedule": "lognormal",
+              "training_noise_cfg": {
+                "lognormal": {
+                  "psigma_mean": 1.5,
+                  "psigma_std": 1.0
+                },
+                "uniform_sigma": null,
+                "uniform_t": {
+                  "t_min": 0.0,
+                  "t_max": 1.0
+                },
+                "trunc_normal_t": {
+                  "loc": 0.6,
+                  "scale": 0.1,
+                  "t_min": 0.0,
+                  "t_max": 1.0
+                },
+                "constant_t": {
+                  "t": 1.0
+                }
+              }
+            },
+            "use_self_conditioning": true,
+            "self_cond_p": 0.5,
+            "training_batch_size_mult": 8,
+            "translation_scale": 1.0,
+            "scn_denoiser": {
+              "num_atoms_in": 37,
+              "use_self_conditioning": true,
+              "n_aatype": 21,
+              "self_cond_p": 0.5,
+              "c_h_V": 128,
+              "depth": 4,
+              "hidden_size": 256,
+              "mlp_dropout": 0.0,
+              "mlp_ratio": 4.0
+            },
+            "confidence_module": {
+              "enabled": true,
+              "subsample_train_iter_mult": 8,
+              "scn_diffusion": {
+                "num_steps": 50,
+                "timestep_schedule": {
+                  "num_steps": 50,
+                  "mode": "linear",
+                  "t_start": 0.0,
+                  "t_end": 1.0
+                },
+                "noise_schedule": {
+                  "name": "step_scale",
+                  "c": 1.5
+                },
+                "churn_cfg": {
+                  "s_churn": 0,
+                  "s_noise": 1.0,
+                  "s_t_min": 0.01,
+                  "s_t_max": 50.0,
+                  "num_steps": 50
+                }
+              },
+              "c_h_V": 128,
+              "hidden_size": 128,
+              "n_aatype": 21,
+              "sce_bins": {
+                "min_bin": 0.0,
+                "max_bin": 4.0,
+                "n_bins": 33
+              },
+              "structure_encoder": {
+                "n_aatype": 21,
+                "n_channel": 128,
+                "n_layers": 3,
+                "k_neighbors": 48,
+                "dropout_p": 0.1
+              }
+            }
+          },
+          "confidence_module": {
+            "enabled": true,
+            "subsample_train_iter_mult": 8,
+            "scn_diffusion": {
+              "num_steps": 50,
+              "timestep_schedule": {
+                "num_steps": 50,
+                "mode": "linear",
+                "t_start": 0.0,
+                "t_end": 1.0
+              },
+              "noise_schedule": {
+                "name": "step_scale",
+                "c": 1.5
+              },
+              "churn_cfg": {
+                "s_churn": 0,
+                "s_noise": 1.0,
+                "s_t_min": 0.01,
+                "s_t_max": 50.0,
+                "num_steps": 50
+              }
+            },
+            "c_h_V": 128,
+            "hidden_size": 128,
+            "n_aatype": 21,
+            "sce_bins": {
+              "min_bin": 0.0,
+              "max_bin": 4.0,
+              "n_bins": 33
+            },
+            "structure_encoder": {
+              "n_aatype": 21,
+              "n_channel": 128,
+              "n_layers": 3,
+              "k_neighbors": 48,
+              "dropout_p": 0.1
+            }
+          },
+          "interpolant": {
+            "name": "edm",
+            "rho": 7,
+            "s_min": 0.01,
+            "s_max": 80,
+            "training_noise_schedule": "lognormal",
+            "training_noise_cfg": {
+              "lognormal": {
+                "psigma_mean": 1.5,
+                "psigma_std": 1.0
+              },
+              "uniform_sigma": null,
+              "uniform_t": {
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "trunc_normal_t": {
+                "loc": 0.6,
+                "scale": 0.1,
+                "t_min": 0.0,
+                "t_max": 1.0
+              },
+              "constant_t": {
+                "t": 1.0
+              }
+            }
+          }
+        },
+        "interpolant": {
+          "name": "mar",
+          "training_noise_schedule": "uniform_sqrt_t",
+          "training_noise_cfg": {
+            "uniform_t": {
+              "t_min": 0.0,
+              "t_max": 1.0
+            },
+            "constant_t": {
+              "t": 1.0
+            },
+            "uniform_squared_t": {
+              "t_min": 0.0,
+              "t_max": 1.0
+            },
+            "uniform_cubed_t": {
+              "t_min": 0.0,
+              "t_max": 1.0
+            },
+            "uniform_cosine_t": {
+              "t_min": 0.0,
+              "t_max": 1.0
+            },
+            "uniform_sqrt_t": {
+              "t_min": 0.0,
+              "t_max": 1.0
+            },
+            "uniform_cbrt_t": {
+              "t_min": 0.0,
+              "t_max": 1.0
+            }
+          }
+        }
+      },
+      "mapping_version": "proteoaa-fampnn-atom-name-v1"
+    },
+    "feedback": {
+      "origin": "fresh"
+    },
+    "sidechain": {
+      "path": "/hai/scratch/yfsun/proteo_aa_runs/stage3_binder_coevolution/111408/checkpoints/step6000.pt",
+      "sha256": "60b0bd236c49f9d9d86c9f394886e6b104d84fbd68a40fa56d091c46b10a3c50",
+      "revision": null,
+      "step": 6000,
+      "architecture": {
+        "bb_context": true,
+        "centre_coord_input": true,
+        "frame_aware_head": false,
+        "template_residual": false,
+        "type_logits_input": true,
+        "edm": false,
+        "a_bs_concat": true,
+        "q_bs": false
+      },
+      "atom_vocabulary": "Proteo-AA-37-append-only",
+      "frame": "global-input-CA-Gram-Schmidt",
+      "edm": false
+    }
+  },
+  "native_parity": {
+    "backbone_max_error": 2.288818359375e-05,
+    "first_input_max_error": 0.0
+  },
+  "validation": {
+    "loss": 12.230265617370605,
+    "loss_bb": 0.0,
+    "loss_sc": 0.0,
+    "mse": 15.005667686462402,
+    "denoise_weighted_mse": 0.09714976698160172,
+    "lddt_unweighted": 0.39729928970336914,
+    "ca_rmsd": 3.862290382385254,
+    "bb_rmsd": 3.8874905109405518,
+    "tm_score": 0.32491663098335266,
+    "lddt": 0.0,
+    "distogram": 0.0,
+    "sigma_low_frac": 0.0,
+    "aa_ce": 0.0,
+    "aa_acc": 0.0,
+    "aa_mask_frac": 0.0,
+    "sc_local": 0.0,
+    "sc_phys": 0.0,
+    "sc_pack": 0.0,
+    "sc_global": 0.0,
+    "bb_post": 15.005667686462402,
+    "aa_post": 0.0,
+    "stage4/aa_pre": 2.988527297973633,
+    "stage4/aa_revision": 0.0,
+    "stage4/sc_aux": 9.241728782653809,
+    "stage4/phys": 9.577344462741166e-05,
+    "stage4/recovery_pre": 0.0416666679084301,
+    "stage4/recovery_revision": 0.0
+  },
+  "sample_id": "smoke_binder#0",
+  "supervision": {
+    "observed_sc_atoms": 101,
+    "observed_sc_residues": 22,
+    "candidates_checked": 1
+  }
+}

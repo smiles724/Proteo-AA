@@ -1,0 +1,29 @@
+{
+  "cpu_tests": {
+    "job": 114895,
+    "passed": 630,
+    "warnings": 3,
+    "seconds": 24.03
+  },
+  "gpu_smoke": {
+    "job": 114891,
+    "status": "passed",
+    "phase_transition_and_resume": true
+  },
+  "phase_preflight": {
+    "job": 114894,
+    "status": "passed"
+  },
+  "pilots": [
+    114889,
+    114892
+  ],
+  "source_scope": "pinned Stage III d15de33 and FAMPNN 17120fa",
+  "quality_gate": "failed: feedback benefit and SC generalization unestablished; do not update pretrained networks",
+  "unvalidated": [
+    "multi-GPU DDP runtime",
+    "exact dataloader worker/prefetch replay",
+    "production crop memory",
+    "full AlphaProteo-10/ProteinMPNN/AF2 quality assessment"
+  ]
+}

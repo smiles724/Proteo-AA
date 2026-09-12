@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--output",required=True)
     parser.add_argument("--rounds",type=int,nargs="+",default=[3])
     parser.add_argument("--arms",nargs="+",choices=["N","A","B","C","D"],default=["D"])
-    parser.add_argument("--backbone-steps",type=int,default=20)
+    parser.add_argument("--backbone-steps",type=int,default=400)
     parser.add_argument("--temperature",type=float,default=0.)
     parser.add_argument("--seed",type=int,default=17)
     parser.add_argument("--device",default="cuda")

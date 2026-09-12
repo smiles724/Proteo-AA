@@ -1,0 +1,158 @@
+[
+  {
+    "source": "monomer",
+    "steps": 20,
+    "samples": 12,
+    "design_residue_range": [
+      78,
+      111
+    ],
+    "ca_ca": {
+      "count": 1086,
+      "mean_angstrom": 7.657456957031301,
+      "min_angstrom": 0.6280414476301124,
+      "max_angstrom": 28.503491189427933
+    },
+    "peptide_cn": {
+      "count": 1086,
+      "mean_angstrom": 5.94504462327612,
+      "min_angstrom": 0.1875926112762421,
+      "max_angstrom": 23.844494573970675
+    },
+    "n_ca": {
+      "count": 1098,
+      "mean_angstrom": 6.429266273388489,
+      "min_angstrom": 0.2973928802611007,
+      "max_angstrom": 25.571782007558433
+    },
+    "ca_c": {
+      "count": 1098,
+      "mean_angstrom": 6.366288644271503,
+      "min_angstrom": 0.5663854482424072,
+      "max_angstrom": 23.116367197306605
+    },
+    "c_o": {
+      "count": 1098,
+      "mean_angstrom": 5.660346735303191,
+      "min_angstrom": 0.37813403909120397,
+      "max_angstrom": 24.418724246994344
+    }
+  },
+  {
+    "source": "monomer",
+    "steps": 400,
+    "samples": 12,
+    "design_residue_range": [
+      78,
+      111
+    ],
+    "ca_ca": {
+      "count": 1086,
+      "mean_angstrom": 3.81710663864399,
+      "min_angstrom": 3.740852090458446,
+      "max_angstrom": 3.8947469033541653
+    },
+    "peptide_cn": {
+      "count": 1086,
+      "mean_angstrom": 1.3252151553778913,
+      "min_angstrom": 1.2579242692270076,
+      "max_angstrom": 1.3754178082901682
+    },
+    "n_ca": {
+      "count": 1098,
+      "mean_angstrom": 1.4633434885393841,
+      "min_angstrom": 1.441256103135979,
+      "max_angstrom": 1.47974096745734
+    },
+    "ca_c": {
+      "count": 1098,
+      "mean_angstrom": 1.5280899454923424,
+      "min_angstrom": 1.5003210933065358,
+      "max_angstrom": 1.5506982360216293
+    },
+    "c_o": {
+      "count": 1098,
+      "mean_angstrom": 1.2349727614017645,
+      "min_angstrom": 1.20262668266007,
+      "max_angstrom": 1.2562876649909827
+    }
+  },
+  {
+    "source": "binder",
+    "steps": 20,
+    "samples": 11,
+    "design_residue_range": [
+      40,
+      48
+    ],
+    "ca_ca": {
+      "count": 470,
+      "mean_angstrom": 8.608994907548617,
+      "min_angstrom": 1.024640029967448,
+      "max_angstrom": 24.173639803314636
+    },
+    "peptide_cn": {
+      "count": 470,
+      "mean_angstrom": 6.920997049009717,
+      "min_angstrom": 0.5821677748129015,
+      "max_angstrom": 23.774281949497343
+    },
+    "n_ca": {
+      "count": 481,
+      "mean_angstrom": 7.694287007110636,
+      "min_angstrom": 0.6383540930452943,
+      "max_angstrom": 28.720635743861255
+    },
+    "ca_c": {
+      "count": 481,
+      "mean_angstrom": 7.585903243414673,
+      "min_angstrom": 0.4000478659441063,
+      "max_angstrom": 25.21253545123382
+    },
+    "c_o": {
+      "count": 481,
+      "mean_angstrom": 6.758319041607156,
+      "min_angstrom": 0.4904164762062793,
+      "max_angstrom": 26.945486087323147
+    }
+  },
+  {
+    "source": "binder",
+    "steps": 400,
+    "samples": 11,
+    "design_residue_range": [
+      40,
+      48
+    ],
+    "ca_ca": {
+      "count": 470,
+      "mean_angstrom": 3.809596723243906,
+      "min_angstrom": 3.7563884270775656,
+      "max_angstrom": 3.854921775216746
+    },
+    "peptide_cn": {
+      "count": 470,
+      "mean_angstrom": 1.327704538868271,
+      "min_angstrom": 1.2963889218111686,
+      "max_angstrom": 1.3580988084127086
+    },
+    "n_ca": {
+      "count": 481,
+      "mean_angstrom": 1.463188229853383,
+      "min_angstrom": 1.435361505696558,
+      "max_angstrom": 1.477037060328275
+    },
+    "ca_c": {
+      "count": 481,
+      "mean_angstrom": 1.525171820123609,
+      "min_angstrom": 1.5020202059604004,
+      "max_angstrom": 1.5409119251845624
+    },
+    "c_o": {
+      "count": 481,
+      "mean_angstrom": 1.23504819378681,
+      "min_angstrom": 1.1884923846547535,
+      "max_angstrom": 1.2512425871732507
+    }
+  }
+]

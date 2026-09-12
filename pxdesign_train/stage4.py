@@ -306,7 +306,7 @@ def checkpoint_identity(model):
 
 
 @torch.no_grad()
-def generate(model, input_feature_dict, N_step=20, temperature=0.0,
+def generate(model, input_feature_dict, N_step=400, temperature=0.0,
              refinement_steps=None, seed=0, allow_one_round_ablation=False,
              backbone_sampler=None, initial_target_policy=None, packing_enabled=None,
              backbone_refinement_enabled=None):

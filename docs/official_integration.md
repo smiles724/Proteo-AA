@@ -198,3 +198,11 @@ Eight commits group the implementation by dependency:
 6. `88d9a9b`: focused component/runtime/loss regression contracts.
 7. `3597bcc`: launchers, evaluators, parsing and real GPU smoke.
 8. This pilot/report commit: bounded SC-then-feedback experiments and gate evidence.
+
+## Subsequent backbone geometry check
+
+[2026-09-12 investigation](official_backbone_metrics_2026-09-12.md): 400-step native
+sampling yielded 0/1086 bad CA pairs in 12 monomers and 0/470 in 11 unique binders.
+Twenty-step sampling was inadequate (88.12% and 91.49%). Integrated generation
+and co-design evaluation now default to 400 steps. This changes inference
+budgets, not the frozen backbone weights or SC-only training phase.

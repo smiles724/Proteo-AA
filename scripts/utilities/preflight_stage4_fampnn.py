@@ -46,7 +46,8 @@ def main():
     else:
         if not a.backbone_checkpoint or not a.fampnn_checkpoint:
             raise ValueError('Composition requires official backbone and pretrained FAMPNN checkpoints')
-        compose_components(model,backbone_checkpoint=a.backbone_checkpoint,sidechain_checkpoint=a.sidechain_checkpoint or None)
+        compose_components(model,backbone_checkpoint=a.backbone_checkpoint,sidechain_checkpoint=a.sidechain_checkpoint or None,
+            sidechain_init=getattr(config.training,"sidechain_init","checkpoint"))
         for path,prefixes in ((a.backbone_checkpoint,BACKBONE_PREFIXES),(a.sidechain_checkpoint,SC_PREFIXES)):
             if path:
                 expected = component_state(model,read_checkpoint(path),prefixes)

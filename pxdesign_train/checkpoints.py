@@ -15,6 +15,9 @@ BACKBONE_PREFIXES = ("design_condition_embedder.", "diffusion_module.")
 SC_PREFIXES = ("sidechain_module.",)
 FEEDBACK_PREFIXES = ("sidechain_feedback.", "hres_injector.", "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding")
 SC_LAYOUT_KEYS = ("bb_context", "centre_coord_input", "frame_aware_head", "template_residual", "type_logits_input", "edm", "a_bs_concat", "q_bs")
+# Same one-step architecture as the validated donor, with no donor weights.
+SCRATCH_SC_LAYOUT = dict(bb_context=True, centre_coord_input=True, frame_aware_head=False,
+    template_residual=False, type_logits_input=True, edm=False, a_bs_concat=True, q_bs=False)
 
 
 def unwrap(model):
@@ -101,8 +104,14 @@ def check_sc_layout(model, checkpoint):
     return dict(saved)
 
 
-def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None):
+def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None, sidechain_init="checkpoint"):
     model = unwrap(model)
+    if sidechain_init not in ("checkpoint", "scratch"):
+        raise ValueError(f"Unknown SC initialization {sidechain_init}")
+    if sidechain_init == "scratch" and sidechain_checkpoint:
+        raise ValueError("Scratch SC initialization cannot also load an SC donor")
+    if sidechain_init == "scratch" and not getattr(model, "enable_sidechain", False):
+        raise ValueError("Scratch SC initialization requires an SC module")
     if getattr(model, "aa_backend", None) != "fampnn":
         raise ValueError("Component composition requires the strictly initialized FAMPNN adapter")
     # All validation precedes any writes; FAMPNN was strictly initialized by its adapter.
@@ -116,8 +125,14 @@ def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None)
         state.update(component_state(model, sidechain, SC_PREFIXES))
         origins["sidechain"] = dict(**source_record(sidechain_checkpoint, sidechain), architecture=arch,
             atom_vocabulary="Proteo-AA-37-append-only", frame="global-input-CA-Gram-Schmidt", edm=False)
+    elif sidechain_init == "scratch":
+        arch = {key:bool(getattr(model.configs.sidechain,key)) for key in SC_LAYOUT_KEYS}
+        if arch["edm"]:
+            raise ValueError("Scratch SC initialization requires one-step packing (edm=false)")
+        origins["sidechain"] = dict(origin="scratch", initialization="module_constructors", seed=int(torch.initial_seed()),
+            architecture=arch, atom_vocabulary="Proteo-AA-37-append-only", frame="global-input-CA-Gram-Schmidt", edm=False)
     elif getattr(model, "enable_sidechain", False):
-        raise ValueError("Packing requires --sidechain-checkpoint for the migration experiment")
+        raise ValueError("Packing requires --sidechain-checkpoint or explicit --sidechain-init scratch")
     model.load_state_dict(state, strict=False)
     origins["backbone"]["runtime_sources"] = sources
     model.component_origins = origins

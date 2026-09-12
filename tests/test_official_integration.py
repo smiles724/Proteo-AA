@@ -233,3 +233,46 @@ def test_feedback_transition_requires_explicit_runtime():
     model.configs.loss=SimpleNamespace(weight_bb_post=0.)
     with pytest.raises(ValueError,match='explicit revision rounds'):
         transition_config({'integrated':integrated_record(model)},phase='feedback_adapt')
+
+
+def test_explicit_scratch_sc_preserves_constructor_weights_and_frozen_components(tmp_path):
+    model=Components();bb,sc=donors(tmp_path,model)
+    before={k:v.clone() for k,v in model.state_dict().items()}
+    compose_components(model,backbone_checkpoint=bb,sidechain_init='scratch')
+    assert torch.equal(model.diffusion_module.weight,torch.ones(2,2))
+    for k,v in model.state_dict().items():
+        if not k.startswith(BACKBONE_PREFIXES): assert torch.equal(v,before[k])
+    assert model.component_origins['sidechain']['origin']=='scratch'
+    apply_phase(model)
+    assert all(n.startswith('sidechain_module.') for n,p in model.named_parameters() if p.requires_grad)
+    saved=dict(model=model.state_dict(),integrated=integrated_record(model))
+    restored=restore_model(Components(),saved)
+    assert restored.component_origins['sidechain']['origin']=='scratch'
+    assert all(torch.equal(v,restored.state_dict()[k]) for k,v in model.state_dict().items())
+    with pytest.raises(ValueError,match='cannot also load'):
+        compose_components(model,backbone_checkpoint=bb,sidechain_checkpoint=sc,sidechain_init='scratch')
+    with pytest.raises(ValueError,match='explicit --sidechain-init scratch'):
+        compose_components(Components(),backbone_checkpoint=bb)
+
+
+def test_scratch_cli_uses_explicit_layout_without_donor(tmp_path,monkeypatch):
+    import importlib.util
+    import sys
+    from pathlib import Path
+    from pxdesign_train.checkpoints import SCRATCH_SC_LAYOUT
+    entry=Path(__file__).resolve().parents[1]/'scripts/training/train_protenix_monomer.py'
+    spec=importlib.util.spec_from_file_location('scratch_driver',entry)
+    driver=importlib.util.module_from_spec(spec);spec.loader.exec_module(driver)
+    fampnn=tmp_path/'fampnn.pt';fampnn.touch()
+    monkeypatch.setattr(sys,'argv',['train','--training-stage','stage4_fampnn',
+        '--sidechain-init','scratch','--backbone-checkpoint','official.pt',
+        '--fampnn-checkpoint',str(fampnn),'--diffusion-batch-size','1'])
+    args=driver.parse_args();driver.apply_training_stage_args(args)
+    config=driver.build_configs(args,torch.device('cpu'))
+    assert not config.training.sidechain_checkpoint
+    assert config.training.sidechain_init=='scratch'
+    assert {k:getattr(config.sidechain,k) for k in SCRATCH_SC_LAYOUT}==SCRATCH_SC_LAYOUT
+    assert config.stage4.phase=='sc_adapt' and not config.stage4.sc_to_bb
+    args.sidechain_checkpoint='donor.pt'
+    with pytest.raises(ValueError,match='cannot be combined'):
+        driver.build_configs(args,torch.device('cpu'))

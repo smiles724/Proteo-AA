@@ -631,6 +631,13 @@ def build_configs(args: argparse.Namespace, device):
     )
 
     configs = parse_configs(training_configs, arg_str="")
+    sc_init = getattr(args, "sidechain_init", "checkpoint")
+    if sc_init == "scratch":
+        if args.training_stage != "stage4_fampnn" or not args.packing_enabled:
+            raise ValueError("Scratch SC initialization requires stage4_fampnn with packing enabled")
+        if args.sidechain_checkpoint or args.load_checkpoint or args.warm_start_checkpoint or args.resume_checkpoint:
+            raise ValueError("Scratch SC initialization cannot be combined with donor, warm-start or resume weights")
+    configs.training.sidechain_init = sc_init
     if getattr(args, "warm_start_checkpoint", ""):
         if args.resume_checkpoint or args.load_checkpoint or args.backbone_checkpoint or args.sidechain_checkpoint or args.fampnn_checkpoint:
             raise ValueError("Phase transition uses only --warm-start-checkpoint, without donors or resume")
@@ -999,6 +1006,10 @@ def build_configs(args: argparse.Namespace, device):
         # stage's defaults. Adopt it from the checkpoint's own record.
         adopt_sidechain_arch_from_checkpoint(configs, args)
     if args.training_stage == "stage4_fampnn":
+        if sc_init == "scratch":
+            from pxdesign_train.checkpoints import SCRATCH_SC_LAYOUT
+            for key,value in SCRATCH_SC_LAYOUT.items():
+                setattr(configs.sidechain,key,value)
         if not args.fampnn_checkpoint or not Path(args.fampnn_checkpoint).is_file():
             raise ValueError("Stage IV requires --fampnn-checkpoint with released pretrained weights")
         if args.load_aa_head_from:
@@ -1636,6 +1647,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-denoise", type=float, default=4.)
     p.add_argument("--backbone-checkpoint", default="")
     p.add_argument("--sidechain-checkpoint", default="")
+    p.add_argument("--sidechain-init", choices=["checkpoint", "scratch"], default="checkpoint",
+                   help="Explicitly construct a fresh one-step SC network without loading any SC donor")
     p.add_argument("--resume-checkpoint", default="")
     p.add_argument("--warm-start-checkpoint", default="", help="New phase using saved architecture and weights, fresh optimizer/counters")
     p.add_argument("--fampnn-checkpoint", default="")

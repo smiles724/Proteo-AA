@@ -29,7 +29,9 @@ def select_supervised_batch(dataset):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--backbone-checkpoint",required=True)
-    parser.add_argument("--sidechain-checkpoint",required=True)
+    parser.add_argument("--sidechain-checkpoint",default="")
+    parser.add_argument("--sidechain-init",choices=["checkpoint","scratch"],default="checkpoint")
+    parser.add_argument("--sc-only",action="store_true",help="Validate SC training/resume without enabling feedback")
     parser.add_argument("--output",required=True)
     parser.add_argument("--data-root",required=True)
     parser.add_argument("--fampnn-checkpoint",required=True)
@@ -54,6 +56,7 @@ def main():
     args=driver.parse_args();sys.argv=old
     args.training_stage="stage4_fampnn";args.backbone_checkpoint=a.backbone_checkpoint;args.sidechain_checkpoint=a.sidechain_checkpoint
     args.fampnn_checkpoint=a.fampnn_checkpoint;args.warm_start_params_only=True
+    args.sidechain_init=a.sidechain_init
     args.stage4_phase="sc_adapt";args.stage4_train_rounds=0;args.stage4_decode_blocks=2
     args.stage4_whole_mask_probability=0.;args.stage4_query_fraction=0.5
     args.crop_size=128;args.max_n_token=128;args.diffusion_batch_size=1
@@ -87,6 +90,7 @@ def main():
     model=trainer.raw_model
     from pxdesign_train.checkpoints import read_checkpoint, component_state, BACKBONE_PREFIXES, SC_PREFIXES
     for path,prefixes in ((a.backbone_checkpoint,BACKBONE_PREFIXES),(a.sidechain_checkpoint,SC_PREFIXES)):
+        if not path: continue
         expected=component_state(model,read_checkpoint(path),prefixes)
         actual=model.state_dict()
         assert all(torch.equal(actual[k].cpu(),v.to(actual[k].dtype)) for k,v in expected.items())
@@ -96,6 +100,9 @@ def main():
             if name.startswith(BACKBONE_PREFIXES + ("aa_head.",)):
                 digest.update(name.encode());digest.update(value.detach().cpu().contiguous().numpy().tobytes())
         return digest.hexdigest()
+    if a.sidechain_init == "scratch":
+        assert model.component_origins["sidechain"]["origin"] == "scratch"
+        assert "sha256" not in model.component_origins["sidechain"]
     frozen_before=frozen_digest()
     tensor_batch=trainer._to_device(batch)
     torch.save(batch,output/"smoke_batch.pt")
@@ -136,44 +143,46 @@ def main():
     restored=evaluation_model(checkpoint,device=device)
     assert all(torch.equal(v,restored.state_dict()[k]) for k,v in model.state_dict().items())
     del restored
-    # Only after component validation: exercise feedback through frozen BB/AA.
-    sys.argv=[old[0], '--warm-start-checkpoint', checkpoint,
-        '--stage4-phase','feedback_adapt','--stage4-train-rounds','2',
-        '--backbone-refinement-enabled','--stage4-sc-to-aa','--stage4-sc-to-bb',
-        '--weight-refine','1']
-    transition_args=driver.parse_args();sys.argv=old
-    transition=driver.build_configs(transition_args,device)
-    del trainer,model
-    trainer=PXDesignTrainer(transition,components,device=device,checkpoint_dir=str(output/"feedback_checkpoints"))
-    model=trainer.raw_model
-    assert trainer.step==0 and model.configs.stage4.phase=='feedback_adapt'
-    assert model.configs.loss.weight_bb_post==1.
-    assert frozen_before == frozen_digest()
-    model.train();apply_phase(model)
-    out=model(input_feature_dict=tensor_batch["input_feature_dict"],label_dict=tensor_batch["label_dict"],mode="train")
-    feedback=[p for p in model.parameters() if p.requires_grad]
-    objective=out["post_pred_coordinate"].float().square().mean()
-    gradients=torch.autograd.grad(objective,feedback,allow_unused=True)
-    total=sum(float(g.detach().abs().sum()) for g in gradients if g is not None)
-    assert total > 0 and all(torch.isfinite(g).all() for g in gradients if g is not None)
-    gradient_metrics["refine_to_feedback"]=total
-    del out
-    # One bounded feedback update is an engineering gate, not quality evidence.
-    trainer.train_step(batch)
-    assert frozen_before == frozen_digest()
-    feedback_checkpoint=trainer.save_checkpoint('feedback')
-    sys.argv=[old[0], '--resume-checkpoint', feedback_checkpoint]
-    resume_args=driver.parse_args();sys.argv=old
-    resumed=PXDesignTrainer(driver.build_configs(resume_args,device),components,device=device)
-    assert resumed.step==trainer.step==1
-    assert resumed.raw_model.configs.stage4.phase=='feedback_adapt'
-    assert resumed.raw_model.configs.loss.weight_bb_post==1.
-    assert all(torch.equal(v,resumed.raw_model.state_dict()[k]) for k,v in model.state_dict().items())
-    del resumed
+    feedback_checkpoint=None
+    if not a.sc_only:
+        # Only after component validation: exercise feedback through frozen BB/AA.
+        sys.argv=[old[0], '--warm-start-checkpoint', checkpoint,
+            '--stage4-phase','feedback_adapt','--stage4-train-rounds','2',
+            '--backbone-refinement-enabled','--stage4-sc-to-aa','--stage4-sc-to-bb',
+            '--weight-refine','1']
+        transition_args=driver.parse_args();sys.argv=old
+        transition=driver.build_configs(transition_args,device)
+        del trainer,model
+        trainer=PXDesignTrainer(transition,components,device=device,checkpoint_dir=str(output/"feedback_checkpoints"))
+        model=trainer.raw_model
+        assert trainer.step==0 and model.configs.stage4.phase=='feedback_adapt'
+        assert model.configs.loss.weight_bb_post==1.
+        assert frozen_before == frozen_digest()
+        model.train();apply_phase(model)
+        out=model(input_feature_dict=tensor_batch["input_feature_dict"],label_dict=tensor_batch["label_dict"],mode="train")
+        feedback=[p for p in model.parameters() if p.requires_grad]
+        objective=out["post_pred_coordinate"].float().square().mean()
+        gradients=torch.autograd.grad(objective,feedback,allow_unused=True)
+        total=sum(float(g.detach().abs().sum()) for g in gradients if g is not None)
+        assert total > 0 and all(torch.isfinite(g).all() for g in gradients if g is not None)
+        gradient_metrics["refine_to_feedback"]=total
+        del out
+        # One bounded feedback update is an engineering gate, not quality evidence.
+        trainer.train_step(batch)
+        assert frozen_before == frozen_digest()
+        feedback_checkpoint=trainer.save_checkpoint('feedback')
+        sys.argv=[old[0], '--resume-checkpoint', feedback_checkpoint]
+        resume_args=driver.parse_args();sys.argv=old
+        resumed=PXDesignTrainer(driver.build_configs(resume_args,device),components,device=device)
+        assert resumed.step==trainer.step==1
+        assert resumed.raw_model.configs.stage4.phase=='feedback_adapt'
+        assert resumed.raw_model.configs.loss.weight_bb_post==1.
+        assert all(torch.equal(v,resumed.raw_model.state_dict()[k]) for k,v in model.state_dict().items())
+        del resumed
     print("SMOKE generation",flush=True)
-    result=generate(model,tensor_batch["input_feature_dict"],N_step=3,refinement_steps=3,seed=17)
+    result=generate(model,tensor_batch["input_feature_dict"],N_step=3,refinement_steps=0 if a.sc_only else 3,seed=17)
     write_mmcif(result["atoms"],output/"generated.cif")
-    metrics=dict(status="passed",device=str(device),checkpoint=checkpoint,feedback_checkpoint=feedback_checkpoint,phase_transition_and_resume=True,gradients=gradient_metrics,
+    metrics=dict(status="passed",device=str(device),checkpoint=checkpoint,feedback_checkpoint=feedback_checkpoint,phase_transition_and_resume=not a.sc_only,sc_only=a.sc_only,pretrained_weights_unchanged=frozen_before == frozen_digest(),gradients=gradient_metrics,
         losses={k:float(v.detach()) for k,v in loss.items()},identity=checkpoint_identity(model),
         generation=result["metadata"],component_origins=model.component_origins,native_parity=parity,validation={k:float(v) for k,v in validation.items()},sample_id=batch.get("sample_id"),supervision=supervision)
     (output/"smoke_result.json").write_text(json.dumps(metrics,indent=2))

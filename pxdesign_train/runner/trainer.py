@@ -279,7 +279,8 @@ class PXDesignTrainer:
         if backbone:
             from pxdesign_train.checkpoints import compose_components
             origins = compose_components(self.raw_model, backbone_checkpoint=backbone,
-                sidechain_checkpoint=getattr(self.configs.training, "sidechain_checkpoint", "") or None)
+                sidechain_checkpoint=getattr(self.configs.training, "sidechain_checkpoint", "") or None,
+                sidechain_init=getattr(self.configs.training, "sidechain_init", "checkpoint"))
             self._log("Loaded components: " + ", ".join(f"{name}={record.get('sha256', record.get('checkpoint_sha256', record.get('origin')))}" for name,record in origins.items()))
         self._apply_trainable_filter()
         if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":

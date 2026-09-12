@@ -26,8 +26,13 @@ elif [[ -n ${WARM_START_CHECKPOINT:-} ]]; then
   COMPONENT_ARGS=(--warm-start-checkpoint "$WARM_START_CHECKPOINT")
 else
   : "${BACKBONE_CHECKPOINT:?Set BACKBONE_CHECKPOINT to official PXDesign weights}"
-  : "${SC_CHECKPOINT:?Set SC_CHECKPOINT to the compatible SC donor}"
-  COMPONENT_ARGS=(--backbone-checkpoint "$BACKBONE_CHECKPOINT" --sidechain-checkpoint "$SC_CHECKPOINT" --fampnn-checkpoint "$FAMPNN_CHECKPOINT")
+  COMPONENT_ARGS=(--backbone-checkpoint "$BACKBONE_CHECKPOINT" --fampnn-checkpoint "$FAMPNN_CHECKPOINT")
+  if [[ ${SC_INIT:-checkpoint} == scratch ]]; then
+    COMPONENT_ARGS+=(--sidechain-init scratch)
+  else
+    : "${SC_CHECKPOINT:?Set SC_CHECKPOINT to the compatible SC donor}"
+    COMPONENT_ARGS+=(--sidechain-checkpoint "$SC_CHECKPOINT")
+  fi
 fi
 STAGE4_PHASE=${STAGE4_PHASE:-sc_adapt}
 TRAIN_ROUNDS=${TRAIN_ROUNDS:-0}

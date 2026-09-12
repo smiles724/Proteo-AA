@@ -32,6 +32,8 @@ class HResInjector(nn.Module):
             nn.LayerNorm(c_hres),
             nn.Linear(c_hres, c_trunk),
         )
+        nn.init.zeros_(self.proj[-1].weight)
+        nn.init.zeros_(self.proj[-1].bias)
 
     def forward(self, h_res_prime: torch.Tensor) -> torch.Tensor:
         """h_res_prime: [..., N_token, c_hres] -> [..., N_token, c_trunk]."""

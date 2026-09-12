@@ -70,12 +70,18 @@ class PXDesignLoss(nn.Module):
         weight_sc_pack: float = 0.0,
         weight_sc_global: float = 0.5,
         eps: float = 1e-6,
+        edm_weighting: bool = False,
+        sigma_data: float = 16.0,
     ) -> None:
         super().__init__()
         self.weight_sc_local = weight_sc_local
         self.weight_sc_phys = weight_sc_phys
         self.weight_sc_pack = weight_sc_pack
         self.weight_sc_global = weight_sc_global
+        self.edm_weighting = edm_weighting
+        self.sigma_data = float(sigma_data)
+        if self.sigma_data <= 0:
+            raise ValueError("sigma_data must be positive")
         self.weight_mse = weight_mse
         self.weight_lddt = weight_lddt
         self.weight_disto = weight_disto
@@ -142,8 +148,12 @@ class PXDesignLoss(nn.Module):
         pred: torch.Tensor,                  # [..., N_sample, N_atom, 3]
         gt_aug: torch.Tensor,                # [..., N_sample, N_atom, 3]
         coordinate_mask: torch.Tensor,       # [..., N_atom]
+        per_sample: bool = False,
     ) -> torch.Tensor:
         """Heavy-atom MSE, mean over atoms, mean over samples. Returns [...]."""
+        valid = coordinate_mask[..., None, :, None].bool()
+        pred = torch.where(valid, pred.float(), 0.)
+        gt_aug = torch.where(valid, gt_aug.float(), 0.)
         if self.align_before_mse:
             # AF3-style rigid-align GT to prediction with uniform weights.
             with torch.no_grad():
@@ -161,8 +171,8 @@ class PXDesignLoss(nn.Module):
 
         se = ((pred - gt_aligned) ** 2).sum(dim=-1)             # [..., N_sample, N_atom]
         mask = coordinate_mask[..., None, :]                    # [..., 1, N_atom]
-        per_sample = (se * mask).sum(dim=-1) / (mask.sum(dim=-1) + self.eps)  # [..., N_sample]
-        return per_sample.mean(dim=-1)                          # [...]
+        values = (se * mask).sum(dim=-1) / (mask.sum(dim=-1) + self.eps)  # [..., N_sample]
+        return values if per_sample else values.mean(dim=-1)                          # [...]
 
     def _aligned_rmsd_and_tm(
         self,
@@ -446,7 +456,16 @@ class PXDesignLoss(nn.Module):
         sigma_low = (sigma < self.sigma_low_threshold).to(pred_coordinate.dtype)
 
         # --- MSE (always on) ---
-        mse = self._mse_term(pred_coordinate, gt_coordinate_aug, coordinate_mask)  # [...]
+        per_sample_mse = self._mse_term(pred_coordinate, gt_coordinate_aug, coordinate_mask, per_sample=True)
+        mse_unweighted = per_sample_mse.mean(-1)
+        if self.edm_weighting:
+            sigma_fp32 = sigma.float()
+            if not torch.isfinite(sigma_fp32).all() or (sigma_fp32 <= 0).any():
+                raise ValueError("EDM denoising requires positive finite physical sigma")
+            weighting = (sigma_fp32.square() + self.sigma_data ** 2) / (sigma_fp32.square() * self.sigma_data ** 2)
+            mse = (per_sample_mse.float() * weighting).mean(-1)
+        else:
+            mse = mse_unweighted
         with torch.no_grad():
             ca_rmsd, tm_score = self._aligned_rmsd_and_tm(
                 pred_coordinate,
@@ -464,19 +483,19 @@ class PXDesignLoss(nn.Module):
             )
 
         # --- Smooth LDDT (gated) ---
-        # SmoothLDDTLoss takes [..., N_sample, N_atom, 3] and returns per-sample lddt loss;
-        # we use dense_forward + reduction='none' to get a per-batch scalar after averaging.
-        # We compute LDDT under σ-mask by multiplying loss by mean σ-mask over samples.
-        gt_single = gt_coordinate_aug[..., 0, :, :]  # use first-sample GT for the mask
-        lddt_mask = self._build_lddt_mask(gt_single, coordinate_mask, self.lddt_radius)
-        lddt_per_batch = self.smooth_lddt.dense_forward(
-            pred_coordinate=pred_coordinate,
-            true_coordinate=gt_single,
-            lddt_mask=lddt_mask,
-        )  # smooth_lddt with reduction='none' returns [...]
-        # Apply σ-mask: average over samples where σ < threshold.
-        gate_lddt = sigma_low.mean(dim=-1)  # [...]
-        lddt = lddt_per_batch * gate_lddt
+        # Promote the sample axis to a batch axis so upstream's sample mean
+        # cannot happen before sigma gating. Each GT remains in its own frame.
+        gt_single = gt_coordinate_aug[..., 0, :, :].float()
+        masks = coordinate_mask[..., None, :].expand(pred_coordinate.shape[:-1])
+        safe_pred = torch.where(masks[..., None].bool(), pred_coordinate.float(), 0.)
+        safe_gt = torch.where(masks[..., None].bool(), gt_coordinate_aug.float(), 0.)
+        lddt_mask = self._build_lddt_mask(safe_gt, masks, self.lddt_radius)
+        lddt_per_sample = self.smooth_lddt.dense_forward(
+            pred_coordinate=safe_pred.unsqueeze(-3), true_coordinate=safe_gt, lddt_mask=lddt_mask)
+        valid_pairs = lddt_mask.sum((-1, -2)) > 0
+        lddt_per_sample = torch.where(valid_pairs, lddt_per_sample, 0.)
+        lddt = (lddt_per_sample.float() * sigma_low.float()).mean(-1)
+        gate_lddt = sigma_low.float().mean(-1)
 
         # --- Distogram (gated) ---
         if distogram_logits is not None:
@@ -663,7 +682,9 @@ class PXDesignLoss(nn.Module):
             "loss": total.mean(),
             "loss_bb": loss_bb.mean(),
             "loss_sc": loss_sc_ret,
-            "mse": mse.mean().detach(),
+            "mse": mse_unweighted.mean().detach(),
+            "denoise_weighted_mse": mse.mean().detach(),
+            "lddt_unweighted": lddt_per_sample.mean().detach(),
             "ca_rmsd": ca_rmsd,
             "bb_rmsd": bb_rmsd,
             "tm_score": tm_score,

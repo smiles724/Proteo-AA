@@ -4,7 +4,7 @@
 不限 binder，覆盖 enzyme、antibody、nanobody、peptide、motif scaffolding、无条件生成。
 
 **日期**：2026-09-10
-**状态**：广度调研完成。**binder / ProtDBench / A-CODE 已做过一轮源码级核实**（2026-09-12），事实逐条带证据标记，见文首。抗体、纳米抗体、酶三节仍以第一轮广度调研为主，标记从保守。
+**状态**：广度调研完成。**binder / ProtDBench / A-CODE（§9，2026-09-12）与 单体 / 无条件 / motif scaffolding（§13，2026-09-13）已做过源码级核实**，事实逐条带证据标记，见文首。抗体、纳米抗体、酶三节仍以第一轮广度调研为主，标记从保守。
 
 ## 事实标记与适用性标记
 
@@ -118,6 +118,8 @@ ProtDBench、PXDesignBench、A-CODE 跑的都是 AlphaProteo 那十个，只是�
 **peptide 单独一支**（§9.10）：PepBench / PepGLAD（测试 93）、BOND-PEP（193 对）、DiffPepBuilder（30 个重建）、RFpeptides（4 个大环肽靶点）。
 
 ### 3.2 单体 / motif scaffolding
+
+**详细 recipe 与核实见 §13**，本表只作索引。**注意 §13.0 先分清了 designability / co-designability / all-atom co-designability 三个词——只有最后一个测得到我们的全原子 claim。**
 
 | 名称 | 年 | 规模 | 打分器 |
 |---|---|---|---|
@@ -1444,3 +1446,181 @@ AME 发表的定义是**两原子 < 1.5 Å**；同一仓库代码里的 `criteri
 2. **在同一批设计上加 Chai-1 或 AF3 的判定**——看结论跨验证器族是否还成立（这是最能暴露过拟合的一步）
 3. **MotifBench 30 题**——独立维护、有排行榜、约 1 GPU-天，是单体/scaffolding 那条线最省事的入口
 4. **AME 41 个**——酶那条线唯一会被审稿人认的数字，但要先算清 32,800 次 Chai 折叠的账，可能得先跑子集
+
+---
+
+# 十三、配方明细：单体 / 无条件生成 / motif scaffolding
+
+第二轮核实（2026-09-13）。只做调研与协议核准，**不建实现、不写 runner**。
+
+## 13.0 先分清三个词——这一类到底在测什么
+
+这一类基准里反复出现"designability"，但**指的不是同一件事**，而这个差别正好卡在我们的 claim 上。
+
+| 词 | 序列从哪来 | 比什么 | 测到我们的全原子 claim 了吗 |
+|---|---|---|---|
+| **designability** | **ProteinMPNN 重新生成**（丢掉模型自己的序列） | 骨架 RMSD（通常只 Cα） | **没有**。它问的是"这个骨架存不存在某条序列能折成它"，与共设计能力无关 |
+| **co-designability** | **模型自己出的序列** | 骨架 RMSD | 测到了共设计，但**仍不测侧链** |
+| **all-atom co-designability** | **模型自己出的序列** | **全原子 RMSD** | **测到了** |
+
+`EXPLICIT_SOURCE`（La-Proteina 原文）：*"ESMFold to fold the corresponding sequence. If this **all-atom RMSD is less than 2Å**, the sample is deemed all-atom co-designable"*；而 *"**Designability** ... uses **ProteinMPNN** to produce sequences for generated structures"*。同一篇论文里两个指标并列，口径不同。
+
+> **对我们的直接含义**：领域里最常见的那套无条件生成协议（长度 {100,150,200,250,300}、每骨架 8 条 ProteinMPNN 序列、ESMFold、取最小 Cα scRMSD）**会把我们共设计出来的序列丢掉**，只考骨架。要考到我们真正主张的东西，必须用 all-atom co-designability 那一档。
+
+## 13.1 MotifBench
+
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | motif scaffolding：给定一段（或几段）功能 motif 的骨架坐标，生成把它包住的支架 | `EXPLICIT_SOURCE` |
+| **test cases** | **30 题**，`test_cases.csv` 随仓库发布，列为 `pdb_id, motif_residues, redesign_idcs, length, group`；另有 30 个对应的 `motif_pdbs/*.pdb` | `CODE_VERIFIED` |
+| **case selection** | 按 motif 的**连续片段数**分三组，各 10 题：group 1 单段、group 2 两段、group 3 三段及以上。30 题中 **20 题是多段** | `CODE_VERIFIED` |
+| **input conditioning** | motif 每段单独作为一条链（A/B/C…）。**可重设计的残基**剥成 N/CA/C/O 且残基类型设为 `UNK`；**不可重设计的残基保留侧链重原子**。30 题中 16 题有 `redesign_idcs` | `CODE_VERIFIED`（readme §Motif pdb files；30 个 PDB 里 28 个确实含侧链原子） |
+| **expected output** | 指定长度的支架骨架，motif 嵌在其中。motif 在支架里的位置**可以自己选**（甚至动态选） | `EXPLICIT_SOURCE` |
+| **sample count / 长度** | 每题 **100 条支架**（`sample_num` 0–99）。**长度是固定值**，逐题给定，范围 75–225 | `CODE_VERIFIED` |
+| **sequence design route** | **ProteinMPNN 出 8 条序列**（骨架不全 N/Cα/C/O 时用 Cα-only ProteinMPNN） | `EXPLICIT_SOURCE` |
+| **evaluator** | **ESMFold** | `EXPLICIT_SOURCE` |
+| **metric / units** | `motifRMSD`：输入 motif 与预测结构对应原子的 RMSD，**只用 N、Cα、C**；`scRMSD`：生成结构与预测结构的 RMSD，**只用 Cα** | `EXPLICIT_SOURCE`（白皮书正文 + Algorithm 2 两处一致） |
+| **threshold** | 八条序列中**至少一条**同时满足 `motifRMSD ≤ 1.0 Å` 且 `scRMSD ≤ 2.0 Å` | `EXPLICIT_SOURCE` |
+| **aggregation** | 成功率 = 成功数/100；唯一解 = 成功者的 Foldseek 聚类簇数；**MotifBench score** = `(1/30)·Σ (100+α)·nᵢ/(α+nᵢ)`，`α = 5`，范围 0–100（1/5/50 个解分别得 17.5/52.5/95.5） | `EXPLICIT_SOURCE` |
+| **diversity / novelty** | Foldseek 聚类算唯一解；新颖性 = 各簇 `1 − max PDB TM-score` 的均值 | `EXPLICIT_SOURCE` |
+| **wet-lab status** | 无 | `EXPLICIT_SOURCE` |
+| **code / data** | `github.com/blt2114/MotifBench`，`test_cases.csv` + `motif_pdbs/` 随仓库；内嵌 Scaffold-Lab。**有活跃排行榜**（readme 里） | `CODE_VERIFIED` |
+| **compute** | 约 **1 GPU-天**；需 ProteinMPNN、ESMFold、Foldseek + 一个 PDB 数据库 | `EXPLICIT_SOURCE` |
+| **Proteo-AA** | `NEEDS_ADAPTER`，见 §13.3 | — |
+
+> **要点：MotifBench 的评分是纯骨架的。** 输入虽然对功能残基保留了侧链，但两条判据一条用 N/Cα/C、一条只用 Cα，**侧链摆放完全不进分数**。而且它规定用 ProteinMPNN 出序列——对共设计模型而言，等于**我们自己出的序列被丢掉**。
+
+## 13.2 La-Proteina 的 motif scaffolding
+
+| 字段 | 内容 | 标记 |
+|---|---|---|
+| **task** | **全原子** motif scaffolding，两种给法：`all_atom`（给 motif 残基的全部原子）和 **`tip_atoms`（只给功能关键的侧链末端原子）** | `EXPLICIT_SOURCE` |
+| **test cases** | **26 个基础案例 × 2 种原子给法 = 52 个条目**，全在 `configs/generation/motif_dict.yaml`；对应 19 个 PDB 文件在 `motif_benchmark_pdb_files/`（5TRV/6E6R/7MRX 各有 SHORT/MED/LONG 变体） | `CODE_VERIFIED` |
+| **input conditioning** | 每条目给 `contig_string`（如 `5-20/A1-20/10-25/B1-20/5-20`，**linker 是可变长区间**）、`motif_min_length`/`motif_max_length`、`segment_order`、`atom_selection_mode` | `CODE_VERIFIED` |
+| **expected output** | 全原子结构 + 序列（模型自己共设计出来的） | `EXPLICIT_SOURCE` |
+| **sample count / 长度** | 每任务 **200 条样本**；长度是**区间**不是固定值 | `EXPLICIT_SOURCE` + `CODE_VERIFIED` |
+| **sequence design route** | **模型自己出序列**，无 ProteinMPNN 环节（这是与 MotifBench 最本质的差别之一） | `EXPLICIT_SOURCE` |
+| **evaluator** | **ESMFold** | `EXPLICIT_SOURCE` |
+| **threshold** | 四条**同时**满足：① motif 序列 **100% 恢复**；② motif Cα RMSD **< 1 Å**；③ **motif 全原子 RMSD < 2 Å**；④ **全原子 scRMSD < 2 Å**（= all-atom co-designable）。**不设 pLDDT 门槛**，pLDDT 另行单独报 | `EXPLICIT_SOURCE` |
+| **aggregation** | 每任务成功数；唯一解 = Foldseek 聚类（`--alignment-type 1 --cov-mode 0 --min-seq-id 0 --tmscore-threshold 0.5 --single-step-clustering`） | `EXPLICIT_SOURCE` |
+| **两个难度轴** | `indexed`（给 motif 残基的序号）vs **`unindexed`**（模型自己推断放哪）；× `all_atom` vs `tip_atoms` = 四种设置 | `EXPLICIT_SOURCE` |
+| **wet-lab status** | 无 | `EXPLICIT_SOURCE` |
+| **code / data** | `github.com/NVIDIA-BioNeMo/la-proteina`（**不是** NVIDIA-Digital-Bio，那是 Proteina 系列）；案例清单和 PDB 都随仓库。**无独立排行榜**，是论文自带基准 | `CODE_VERIFIED` |
+| **compute** | 26 任务 × 200 样本 + ESMFold；需 ProteinMPNN（只给 designability 那条用）、ESMFold、Foldseek | `EXPLICIT_SOURCE` |
+| **Proteo-AA** | `NEEDS_ADAPTER`，见 §13.3 | — |
+
+## 13.3 两者到底差在哪（问题一与问题三的回答）
+
+**它们不是同一个基准的两个版本，案例集只重叠 6 个 PDB。** `CODE_VERIFIED`
+
+| | MotifBench | La-Proteina |
+|---|---|---|
+| 案例数 | **30 题** | **26 基础 × 2 模式 = 52** |
+| PDB 重叠 | 共有 `1BCF 4JHW 5IUS 5WN9 5YUI 6E6R` 六个 | 同左 |
+| motif 给什么 | 非可重设计残基带侧链，可重设计的剥成骨架 + `UNK` | `all_atom` 全给 / **`tip_atoms` 只给侧链末端** |
+| 支架长度 | **固定值**（逐题给定，75–225） | **区间**（contig 里 linker 可变长） |
+| motif 位置 | 自己选 | `indexed` 给序号 / **`unindexed` 自己推断** |
+| 序列从哪来 | **ProteinMPNN 8 条** | **模型自己共设计** |
+| 判据 | **纯骨架**：motifRMSD 用 N/Cα/C ≤1 Å；scRMSD 只用 Cα ≤2 Å | **全原子**：序列 100% 恢复 + motif Cα <1 Å + **motif 全原子 <2 Å** + **全原子 scRMSD <2 Å** |
+| 每题样本 | 100 | 200 |
+| 维护方 | **独立维护 + 活跃排行榜** | 论文自带，无独立排行榜 |
+| 测到侧链了吗 | **没有** | **测到了**（尤其 tip_atoms 档） |
+
+**一句话**：MotifBench 考的是"**骨架能不能把 motif 的主链摆对**"，La-Proteina 考的是"**全原子能不能把 motif 连侧链一起摆对，而且你自己出的序列要能折回去**"。
+
+**对问题三的回答**：无条件/单体那一支的主流协议**只测骨架 designability**，而且会用 ProteinMPNN 替换掉我们的序列——**覆盖不到我们的全原子/侧链 claim**。能覆盖到的只有 all-atom co-designability 这一档（目前只有 La-Proteina 系统性地报）。
+
+## 13.4 motif 条件化与 Proteo-AA 推理语义是否一致（问题二的回答）
+
+**机制层面：一致，但那份实现不在我们当前这条线上。** `CODE_VERIFIED`
+
+- **我们现在用的采样器 `pxdesign_train/cogenerate.py` 没有任何坐标还原**——去噪每一步之后没有把固定部分压回给定坐标。它做的是"设计链整条从噪声生成，靠 trunk / pair 表示感知上下文链"。
+- **但项目里存在这个机制**：`pxdesign_train/stage4.py` 的 `generate()` 有逐步固定原子还原：
+
+```python
+atom_design = design[feat["atom_to_token_idx"].long()]        # token 级 design 掩码展开到原子
+xyz = torch.where(atom_design[None,:,None], xyz, fixed_xyz)   # 初始化就压
+for current, following in zip(schedule[:-1], schedule[1:]):
+    denoised = model.diffusion_module(...)
+    xyz = xyz + (following-current)*(xyz-denoised)/current
+    xyz = torch.where(atom_design[None,:,None], xyz, fixed_xyz)   # 每一步都压
+xyz = torch.where(atom_design[None,:,None], denoised, fixed_xyz)  # 收尾再压
+```
+
+- 掩码是**原子级**的（由 `design_token_mask` 经 `atom_to_token_idx` 展开），**原则上可以表达残基级固定**——这正是 motif scaffolding 需要的语义。
+- **但 `stage4.py` 不在 `main` 上，也不在我们这几条工作分支上**，只在 `feat/official-pxdesign-fampnn`、`feat/sc-rigid-augmentation`、`sjm/stage4-ligandmpnn`、`stage4-fampnn` 四条分支上。`CODE_VERIFIED`
+
+**差距在哪（不在采样器，在特征化和规格解析）**：
+
+| 缺什么 | 说明 |
+|---|---|
+| 残基级填充 design 掩码 | 现在 `token_is_design` 由 `_token_level_mask(..., binder_atom_mask)` 从**链级** binder 掩码派生。要做 motif，得改成按 motif 残基逐个填 |
+| contig 字符串解析 + 可变长 linker 采样 | 两个基准的规格都是 contig 或残基区间，我们没有解析器 |
+| unindexed 放置 | La-Proteina 的更难档要求模型自己推断 motif 放在哪，我们没有对应机制 |
+| 分段 motif 的多链输入 | MotifBench 把每段 motif 作为独立链给出，20/30 题是多段 |
+
+**结论**：`NEEDS_ADAPTER`。适配点主要在**特征化层和规格解析**，**采样器本身的机制已经存在**（虽然在另一条分支上）。这和 binder 那条"靶点整条链作为上下文"的语义不同，不能直接套用。
+
+> **顺带纠正一处流传的说法**：有材料称 `pxdesign_train/stage4.py` 的固定原子还原可以直接用于当前的 alphaproteo10 评估。核实结果是 `stage4.py` **不在 `main`、也不在 `bench/alphaproteo-10-targets` 上**——引用它时必须说明是哪条分支。`CODE_VERIFIED`
+
+## 13.5 无条件 / 单体那一支：哪些算基准，哪些只是惯例（问题四、五的回答）
+
+| 名称 | 是基准还是惯例 | 案例/协议是否公开 | 有基线吗 | 标记 |
+|---|---|---|---|---|
+| **MotifBench** | **基准**——独立维护、固定 30 题、**有活跃排行榜**、有明确 score 公式 | 是（`test_cases.csv` + 30 个 PDB） | 是（排行榜：RFdiffusion3 43.52、Protpardelle-1c 33.81、Genie3 31.14、La-Proteina 29.75、RFdiffusion 21.95、RFdiffusionAA 20.99） | `EXPLICIT_SOURCE` |
+| **La-Proteina 26 任务** | **论文自带基准**——案例和判据都公开，但**无独立维护方、无排行榜** | 是（`motif_dict.yaml` + 19 个 PDB） | 是（论文内对比 Protpardelle 等） | `CODE_VERIFIED` |
+| **RFdiffusion 25 题 motif 集 / Genie2 的 24 题变体** | **前身**，已被 MotifBench 取代（MotifBench 明说建立它就是因为"各家评估方式差异大导致没法比"） | 在 RFdiffusion SI 里 | 有 | `EXPLICIT_SOURCE` |
+| **无条件生成的 "FrameFlow/FoldFlow 协议"** | **只是惯例，不是基准**——没有固定案例集（长度就是 {100,150,200,250,300}），没有维护方，没有排行榜 | 协议公开、无案例集可言 | 各家自报 | `EXPLICIT_SOURCE` |
+| **ProteinBench 的 co-design / backbone design 分支** | **基准**，但**是 2024 年的快照**，有 HuggingFace 排行榜 | 部分（结果 CSV 机器可读；motif scaffolding 的案例数 `UNRESOLVED`） | 是（9 个结构设计模型、4 个逆折叠、4 个序列设计） | `EXPLICIT_SOURCE` |
+| **Protein-SE(3)** | **统一训练框架**而非评估基准——它的价值是让六个模型在同一数据同一指标下训练 | 代码公开，案例数 `UNRESOLVED` | 6 个模型 | `EXPLICIT_SOURCE` |
+
+**关键区分**：**无条件生成那套"标准协议"没有测试集**。它规定的是长度、序列条数、折叠器和阈值——是一套**评估配方**，不是一组题。所以"在无条件生成上比别人强"这句话，各家跑的是各自生成的样本，**没有共同的题面**。这与 MotifBench 那种固定 30 题有本质区别。
+
+## 13.6 候选短名单（问题六的回答）
+
+**只做分级和理由，不代表现在就去实现。**
+
+### `STRONG_CANDIDATE`
+
+**MotifBench（30 题）**
+- **唯一一个满足"固定案例集 + 独立维护 + 活跃排行榜 + 明确 score 公式"四条的**，报出来审稿人认
+- 案例清单和 motif PDB 全部随仓库发布，`CODE_VERIFIED`
+- 约 1 GPU-天，是这一类里最便宜的入口
+- **但要说清楚它测不到我们的侧链 claim**：判据纯骨架，而且规定用 ProteinMPNN 出序列——我们共设计的序列会被丢掉。**它验证的是我们的骨架生成和 motif 保持能力，不是全原子能力**
+
+**La-Proteina 的 all-atom co-designability（无条件那一档）**
+- **唯一一个直接考"模型自己出的序列 + 全原子 RMSD"的指标**，正对我们的 claim
+- 定义清楚（ESMFold 折模型自己的序列，全原子 RMSD < 2 Å，不设 pLDDT 门槛）
+- 无条件生成不需要 motif 适配，**接入成本在这一类里最低**
+- 缺点：它是论文自带指标不是社区基准，横向比较对象有限
+
+### `POSSIBLE`
+
+**La-Proteina 的 26 个 motif 任务（尤其 `tip_atoms` 档）**
+- **唯一系统性考全原子 motif 的**，`tip_atoms` 那档（只给侧链末端原子、模型补全其余）几乎是为我们这类模型设计的
+- 案例和判据都随仓库发布
+- 但适配成本明显更高：contig 解析、可变长 linker、`unindexed` 放置都要新写；而且无独立排行榜，说服力不如 MotifBench
+
+**ProteinBench 的 co-design 分支**
+- 有排行榜、有机器可读结果
+- 但是 2024 年快照，且它的 motif scaffolding 案例数我们还没核实（`UNRESOLVED`）
+
+### `SURVEY_ONLY`
+
+**无条件生成的 "FrameFlow/FoldFlow 协议"** —— 没有测试集，不构成可复现的基准；可以照它的协议报数，但那是"按惯例报"不是"在基准上报"。
+
+**RFdiffusion 25 题 / Genie2 24 题** —— 已被 MotifBench 取代，没有理由再跑旧集合。
+
+**Protein-SE(3)** —— 是训练框架不是评估基准。
+
+### 如果只能选两个
+
+**MotifBench + La-Proteina 的 all-atom co-designability。**
+
+理由是这两个**恰好互补且不重叠**：
+- MotifBench 给**外部可信度**（固定题面、排行榜、审稿人认），代价是测不到侧链
+- all-atom co-designability 给**claim 对位**（考的就是共设计序列 + 全原子），代价是社区认可度弱
+
+反过来如果只选一个，任一个单独都有明显缺口：只做 MotifBench 等于我们的全原子卖点没被任何数字支撑；只做 all-atom co-designability 则没有公认题面可以横比。
+
+**都先不实现**——等其他类别调研完统一 review。

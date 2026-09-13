@@ -186,3 +186,12 @@ def test_selector_requires_internal_bond_improvement_and_bounds_other_classes():
     candidate['bond_sc']['rate']=.19
     candidate['angle_attach']['rate']=.221
     assert not classwise_acceptance(donor,control,candidate,.02)['angle_attach']['passed']
+
+
+def test_v2_strength_arms_are_explicit_cli_choices():
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'/'training'))
+    import train_sc_adaptation as driver
+    for arm in ('D','E'):
+        options=driver.parser().parse_args(['--accepted-checkpoint','donor.pt',
+            '--phase','sc_geometry_repair','--repair-arm',arm,'--output-dir','out'])
+        assert options.repair_arm==arm

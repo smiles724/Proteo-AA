@@ -59,6 +59,16 @@ SC-parameter gradient norm on four fixed native examples and writes the chosen
 weights before the array starts. Validation and checkpoints occur every 500
 updates with fixed item and SC initialization seeds.
 
+The follow-up strength sweep is frozen in
+`runs/sc_geometry_repair/sweep_v2/preregistered_gate.json`. Arm D multiplies all
+four calibrated weights by 1.5; arm E doubles the two bond weights and retains
+the original angle weights. Both reuse the original arm B validation files as
+matched controls. The 2k screen requires at least 25% aggregate improvement,
+strict improvement in every geometry class, no pooled 20-degree chi regression,
+and symmetry RMSD no more than 0.03 A above the 46k EMA donor. A passing arm alone
+may resume to 5k. Post-extension validation applies the same gate, using matched
+B through step 2000 and frozen B step 2000 later, before opening the final test.
+
 Implementation branch: `feat/sc-adaptation-phases`, based on
 `feat/sc-rigid-augmentation` at `6ec0459`. The existing shared rigid transform,
 local/reference-coordinate conventions, chemical/model/observed masks,

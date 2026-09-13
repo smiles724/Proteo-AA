@@ -1,0 +1,71 @@
+{
+  "schema": "sc_geometry_repair_strength_sweep_v2_preregistration",
+  "registered_at_utc": "2026-09-13T19:41:35Z",
+  "registered_before_training": true,
+  "source_checkpoint": "/hai/scratch/yfsun/proteo_aa_runs/official_sc_rigid_warmup/114967/checkpoints/step46000.pt",
+  "source_checkpoint_sha256": "1c20089335d411cb82636eb1a7f15e52bad287ce65ac53d6d9f32ac5bb593a66",
+  "source_weights": "ema",
+  "calibration_sha256": "d9461aaa8d78399d2ecc9347ae5bfeeaab51f3b5dba3ccd16415b9a8f05d44a4",
+  "base_gradient_weights": {
+    "path": "/hai/scratch/yfsun/proteo_aa_runs/sc_geometry_repair/gate/115665/gradient_weights.json",
+    "sha256": "8a6f52e5942abee03e6dff6536baa59a02fe85b361730b8169dd2f6cae905d09"
+  },
+  "arms": {
+    "D": {
+      "multipliers": {"bond_sc": 1.5, "bond_attach": 1.5, "angle_sc": 1.5, "angle_attach": 1.5},
+      "weights": {"bond_sc": 0.002730466124082707, "bond_attach": 0.008242610342865239, "angle_sc": 0.002394450566473308, "angle_attach": 0.05192614958084333}
+    },
+    "E": {
+      "multipliers": {"bond_sc": 2.0, "bond_attach": 2.0, "angle_sc": 1.0, "angle_attach": 1.0},
+      "weights": {"bond_sc": 0.0036406214987769426, "bond_attach": 0.010990147123820318, "angle_sc": 0.001596300377648872, "angle_attach": 0.03461743305389555}
+    }
+  },
+  "fixed_recipe": {
+    "seed": 0,
+    "validation_input_seed": 1000003,
+    "max_steps": 2000,
+    "sc_lr": 1e-5,
+    "warmup_steps": 100,
+    "geometry_ramp_steps": 200,
+    "accumulation": 8,
+    "eval_interval": 500,
+    "checkpoint_interval": 500,
+    "symmetry_aware_coordinates": true,
+    "clash_weight": 0.0,
+    "smooth_lddt_weight": 0.0
+  },
+  "control": {
+    "arm": "B",
+    "run": "/hai/scratch/yfsun/proteo_aa_runs/sc_geometry_repair/arms_115668/arm_B",
+    "data_audit_sha256": "26d20114eaa07220cabc25b88dfd7b712807e88dc51455ab134b37679543133c",
+    "validation_sha256": {
+      "500": "8b1a03d27e789490a2b9fc7c31945ea8fd614caba0b85d589b0528f0c137162d",
+      "1000": "d46ad2014d26bef8950f2ff20bd03c2d94002775a9961a209541a5408a318e97",
+      "1500": "51366f7cf926e5b436e66162c3db92f968ae37ec67e686b15642339da186cb2d",
+      "2000": "9673941cc7ced9397841fcd5a678c1c6da53daa97f5b834a6edc0586b9841354"
+    }
+  },
+  "donor_baseline": {
+    "path": "/hai/scratch/yfsun/proteo_aa_runs/sc_geometry_repair/donor_baseline/donor_baseline.json",
+    "sha256": "57392a91e6c385a830d28f28c08bd36bcccf44b4987a8a12548510ee4e4140df"
+  },
+  "screen_gate": {
+    "aggregate_failure_reduction_vs_matched_B_min": 0.25,
+    "each_geometry_class": "candidate failure rate must be strictly lower than matched Arm B",
+    "chi1_accuracy_20deg_pooled": "candidate >= matched Arm B",
+    "chi1_chi2_accuracy_20deg_pooled": "candidate >= matched Arm B",
+    "symmetry_rmsd_per_protein_mean_max_delta_vs_donor_angstrom": 0.03
+  },
+  "extension": {
+    "requires_passing_screen": true,
+    "max_steps": 5000,
+    "checkpoint_selection": "lowest aggregate covalent failure among candidates satisfying the same gate",
+    "control_policy": "matched Arm B through step 2000; frozen Arm B step 2000 for later extension checkpoints"
+  },
+  "final_test": {
+    "requires_approved_post_extension_selection": true,
+    "evaluate_once": true,
+    "used_for_selection": false,
+    "required_before_sc_complex_adapt": true
+  }
+}

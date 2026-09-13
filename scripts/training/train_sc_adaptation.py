@@ -46,7 +46,7 @@ def parser():
     p.add_argument("--phase", choices=["sc_geometry_repair", "sc_complex_adapt", "sc_adapt"])
     p.add_argument("--output-dir", required=True)
     p.add_argument("--donor-weights", choices=["ema","raw"])
-    p.add_argument("--repair-arm", choices=["A","B","C"])
+    p.add_argument("--repair-arm", choices=["A","B","C","D","E"])
     p.add_argument("--calibration-path")
     p.add_argument("--final-test-index")
     p.add_argument("--repair-acceptance")
@@ -107,7 +107,9 @@ def resolve(options):
             if not options.repair_final_test:
                 raise ValueError("sc_complex_adapt requires --repair-final-test from post-selection evaluation")
             acceptance = json.loads(Path(options.repair_acceptance).read_text())
-            if acceptance.get('schema') != 'sc_geometry_repair_acceptance_v1' or not acceptance.get('approved'):
+            if (acceptance.get('schema') not in {
+                    'sc_geometry_repair_acceptance_v1', 'sc_geometry_repair_acceptance_v2'}
+                    or not acceptance.get('approved')):
                 raise ValueError("Repair acceptance artifact is missing approval")
             if acceptance.get('selected', {}).get('checkpoint_sha256') != sha256_file(path):
                 raise ValueError("Repair acceptance selects a different checkpoint")

@@ -19,12 +19,15 @@ def main():
     args = parser.parse_args()
     acceptance_path = Path(args.acceptance).resolve()
     acceptance = json.loads(acceptance_path.read_text())
-    if (acceptance.get('schema') != 'sc_geometry_repair_acceptance_v1'
+    if (acceptance.get('schema') not in {
+            'sc_geometry_repair_acceptance_v1', 'sc_geometry_repair_acceptance_v2'}
             or not acceptance.get('approved')):
         raise ValueError('Final-test evaluation requires an approved repair selection')
 
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if (output / 'final_test.json').exists():
+        raise ValueError('Final-test artifact already exists; the reserved panel is evaluated once')
     selected = Path(acceptance['selected']['checkpoint']).resolve()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'training'))
     import train_sc_adaptation as driver

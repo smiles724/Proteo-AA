@@ -1,0 +1,3092 @@
+{
+  "atom_order": "N,CA,C,O + instantiate.sidechain_atoms + optional terminal OXT; no H",
+  "geometry_source": "CCD ideal coordinates; not statistical restraint uncertainties",
+  "radius_source": {
+    "provider": "RDKit PeriodicTable.GetRvdw",
+    "unit": "angstrom",
+    "values": {
+      "C": 1.7,
+      "N": 1.6,
+      "O": 1.55,
+      "S": 1.8
+    },
+    "version": "2026.03.6"
+  },
+  "residues": {
+    "ALA": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -0.966,
+            0.493,
+            1.5
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.257,
+            0.418,
+            0.692
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.094,
+            0.017,
+            -0.716
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.056,
+            -0.682,
+            -0.923
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.204,
+            -0.62,
+            1.296
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.661,
+            0.439,
+            -1.742
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "6d32b34d4f7b3ddf0cd3dff3f98ddaf7649bc5303ff9a8bd95ba62283f47a1ca",
+      "source_url": "https://files.rcsb.org/ligands/download/ALA.cif"
+    },
+    "ARG": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -0.469,
+            1.11,
+            -0.993
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.004,
+            2.294,
+            -1.708
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.907,
+            2.521,
+            -2.901
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.827,
+            1.789,
+            -3.242
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.475,
+            2.15,
+            -2.127
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.745,
+            1.017,
+            -3.13
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            3.21,
+            0.954,
+            -3.557
+          ],
+          "name": "CD"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            4.071,
+            0.726,
+            -2.421
+          ],
+          "name": "NE"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            5.469,
+            0.624,
+            -2.528
+          ],
+          "name": "CZ"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            6.259,
+            0.404,
+            -1.405
+          ],
+          "name": "NH1"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            6.078,
+            0.744,
+            -3.773
+          ],
+          "name": "NH2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.588,
+            3.659,
+            -3.574
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "NE"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CZ",
+            "NE"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CZ",
+            "NH1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CZ",
+            "NH2"
+          ],
+          "order": "DOUB"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "191c437cfa501e0a87d275ca3d39974a1a9c8dc704df61bfc442a4c314e196ac",
+      "source_url": "https://files.rcsb.org/ligands/download/ARG.cif"
+    },
+    "ASN": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -0.293,
+            1.686,
+            0.094
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.448,
+            0.292,
+            -0.34
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.846,
+            -0.179,
+            -0.031
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -2.51,
+            0.402,
+            0.794
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.562,
+            -0.588,
+            0.401
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.96,
+            -0.197,
+            -0.002
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            2.132,
+            0.697,
+            -0.804
+          ],
+          "name": "OD1"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            3.019,
+            -0.841,
+            0.527
+          ],
+          "name": "ND2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -2.353,
+            -1.243,
+            -0.673
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CG",
+            "ND2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CG",
+            "OD1"
+          ],
+          "order": "DOUB"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "81491bbdb49f96e2945192c07510324d206298d3479029b76defba2ed6ab2dc7",
+      "source_url": "https://files.rcsb.org/ligands/download/ASN.cif"
+    },
+    "ASP": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -0.317,
+            1.688,
+            0.066
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.47,
+            0.286,
+            -0.344
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.868,
+            -0.18,
+            -0.029
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -2.534,
+            0.415,
+            0.786
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.539,
+            -0.58,
+            0.413
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.938,
+            -0.195,
+            0.004
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            2.109,
+            0.681,
+            -0.81
+          ],
+          "name": "OD1"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            2.992,
+            -0.826,
+            0.543
+          ],
+          "name": "OD2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -2.374,
+            -1.256,
+            -0.652
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CG",
+            "OD1"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CG",
+            "OD2"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "82c4a2d0b5eda0a32c36f106f0bb00edbc5bc51172db414fdc494025b7b8c858",
+      "source_url": "https://files.rcsb.org/ligands/download/ASP.cif"
+    },
+    "CYS": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.585,
+            0.483,
+            -0.081
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.141,
+            0.45,
+            0.186
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.095,
+            0.006,
+            1.606
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.685,
+            -0.742,
+            2.143
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.533,
+            -0.53,
+            -0.774
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "S",
+          "ideal_xyz": [
+            -0.247,
+            0.004,
+            -2.484
+          ],
+          "name": "SG"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.174,
+            0.443,
+            2.275
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "SG"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "b28c79381f9f41fe57a9e97468fc8101d5fd1064272a22da1eed6d05d27a24cc",
+      "source_url": "https://files.rcsb.org/ligands/download/CYS.cif"
+    },
+    "GLN": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.858,
+            -0.148,
+            1.125
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.517,
+            0.451,
+            1.112
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.236,
+            0.022,
+            2.344
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.005,
+            -1.049,
+            2.851
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.236,
+            -0.013,
+            -0.135
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.529,
+            0.421,
+            -1.385
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.213,
+            -0.036,
+            -2.614
+          ],
+          "name": "CD"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.252,
+            -0.65,
+            -2.5
+          ],
+          "name": "OE1"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            0.277,
+            0.236,
+            -3.839
+          ],
+          "name": "NE2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.165,
+            0.831,
+            2.878
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "NE2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "OE1"
+          ],
+          "order": "DOUB"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "b542ea5c013fbe0c7acee8e3f42d5dc4e392bd16c0aa545edbf6cb3c335ca30f",
+      "source_url": "https://files.rcsb.org/ligands/download/GLN.cif"
+    },
+    "GLU": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.199,
+            1.867,
+            -0.117
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.138,
+            0.515,
+            0.453
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            2.364,
+            -0.26,
+            0.041
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            3.01,
+            0.096,
+            -0.916
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.113,
+            -0.2,
+            -0.062
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.36,
+            0.517,
+            0.461
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -2.593,
+            -0.187,
+            -0.046
+          ],
+          "name": "CD"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -2.485,
+            -1.161,
+            -0.753
+          ],
+          "name": "OE1"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -3.811,
+            0.269,
+            0.287
+          ],
+          "name": "OE2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            2.737,
+            -1.345,
+            0.737
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "OE1"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD",
+            "OE2"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "99fa19054d31b07e7101b33ad9cc847cc6a209da60de279aed5e6a9236bb6da4",
+      "source_url": "https://files.rcsb.org/ligands/download/GLU.cif"
+    },
+    "GLY": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.931,
+            0.09,
+            -0.034
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.761,
+            -0.799,
+            -0.008
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.498,
+            0.029,
+            -0.005
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.429,
+            1.235,
+            -0.023
+          ],
+          "name": "O"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.697,
+            -0.574,
+            0.018
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "c49458946b0ebc057db6ad0a4e1557a1caaed4c80a203accd458efddccbf92ff",
+      "source_url": "https://files.rcsb.org/ligands/download/GLY.cif"
+    },
+    "HIS": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -0.04,
+            -1.21,
+            0.053
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.172,
+            -1.709,
+            0.652
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.083,
+            -3.207,
+            0.905
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.04,
+            -3.77,
+            1.222
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.484,
+            -0.975,
+            1.962
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            2.94,
+            -1.06,
+            2.353
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            3.38,
+            -2.075,
+            3.129
+          ],
+          "name": "ND1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            3.96,
+            -0.251,
+            2.046
+          ],
+          "name": "CD2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            4.693,
+            -1.908,
+            3.317
+          ],
+          "name": "CE1"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            5.058,
+            -0.801,
+            2.662
+          ],
+          "name": "NE2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            2.247,
+            -3.882,
+            0.744
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CG"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "NE2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE1",
+            "ND1"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CE1",
+            "NE2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CG",
+            "ND1"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2023-11-03",
+      "source_sha256": "89355e09d9c622dd514738e559d7a75ab0a1659df9a179978e88e1a44704a46f",
+      "source_url": "https://files.rcsb.org/ligands/download/HIS.cif"
+    },
+    "ILE": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -1.944,
+            0.335,
+            -0.343
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.487,
+            0.519,
+            -0.369
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.066,
+            -0.032,
+            -1.657
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.484,
+            -0.958,
+            -2.203
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.14,
+            -0.219,
+            0.814
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.421,
+            0.341,
+            2.122
+          ],
+          "name": "CG1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.658,
+            -0.027,
+            0.788
+          ],
+          "name": "CG2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.206,
+            -0.397,
+            3.305
+          ],
+          "name": "CD1"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            1.171,
+            0.504,
+            -2.197
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CG1"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2023-11-03",
+      "source_sha256": "8166adcc6acb4661f4a167b0a4295879612dfad3f1a6b6f1b7bd0589c5bded93",
+      "source_url": "https://files.rcsb.org/ligands/download/ILE.cif"
+    },
+    "LEU": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -1.661,
+            0.627,
+            -0.406
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.205,
+            0.441,
+            -0.467
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.18,
+            -0.055,
+            -1.836
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.591,
+            -0.731,
+            -2.474
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.221,
+            -0.583,
+            0.585
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.17,
+            -0.079,
+            1.976
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.256,
+            -1.104,
+            3.029
+          ],
+          "name": "CD1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.526,
+            1.254,
+            2.25
+          ],
+          "name": "CD2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            1.382,
+            0.254,
+            -2.348
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CG"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "fc56e022bc8baa25dc6e543b2c46664e365779aa1dda9831576fdf10b30ab84b",
+      "source_url": "https://files.rcsb.org/ligands/download/LEU.cif"
+    },
+    "LYS": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.422,
+            1.796,
+            0.198
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.394,
+            0.355,
+            0.484
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            2.657,
+            -0.284,
+            -0.032
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            3.316,
+            0.275,
+            -0.876
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.184,
+            -0.278,
+            -0.206
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.102,
+            0.282,
+            0.407
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -2.313,
+            -0.351,
+            -0.283
+          ],
+          "name": "CD"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -3.598,
+            0.208,
+            0.329
+          ],
+          "name": "CE"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -4.761,
+            -0.4,
+            -0.332
+          ],
+          "name": "NZ"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            3.05,
+            -1.476,
+            0.446
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "CE"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE",
+            "NZ"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "318a0f6fa8f98682b35e1793517d5b683b9045c1e6174bc564b7d43e07e4c07c",
+      "source_url": "https://files.rcsb.org/ligands/download/LYS.cif"
+    },
+    "MET": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -1.816,
+            0.142,
+            -1.166
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.392,
+            0.499,
+            -1.214
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.206,
+            0.002,
+            -2.504
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.236,
+            -0.989,
+            -3.033
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.334,
+            -0.145,
+            -0.032
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.273,
+            0.359,
+            1.277
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "S",
+          "ideal_xyz": [
+            0.589,
+            -0.405,
+            2.678
+          ],
+          "name": "SD"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.314,
+            0.353,
+            4.056
+          ],
+          "name": "CE"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            1.232,
+            0.661,
+            -3.066
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE",
+            "SD"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CG",
+            "SD"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "a89adea8738d069b0a7bb0c3efc26b362dcc624ef9abd3b3f4bfaedd785f3afd",
+      "source_url": "https://files.rcsb.org/ligands/download/MET.cif"
+    },
+    "PHE": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.317,
+            0.962,
+            1.014
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.02,
+            0.426,
+            1.3
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.109,
+            0.047,
+            2.756
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.879,
+            -0.317,
+            3.346
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.27,
+            -0.809,
+            0.434
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.181,
+            -0.43,
+            -1.02
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.031,
+            -0.498,
+            -1.68
+          ],
+          "name": "CD1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.314,
+            -0.018,
+            -1.698
+          ],
+          "name": "CD2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.112,
+            -0.15,
+            -3.015
+          ],
+          "name": "CE1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.231,
+            0.333,
+            -3.032
+          ],
+          "name": "CE2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.018,
+            0.265,
+            -3.691
+          ],
+          "name": "CZ"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.286,
+            0.113,
+            3.396
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CE1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CG"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CE2"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE1",
+            "CZ"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CE2",
+            "CZ"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "002c626d24aec78fd622459d4f4470c682c7c3f9f97d32414fec4313d780496e",
+      "source_url": "https://files.rcsb.org/ligands/download/PHE.cif"
+    },
+    "PRO": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            -0.816,
+            1.108,
+            0.254
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.001,
+            -0.107,
+            0.509
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.408,
+            0.091,
+            0.005
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            1.65,
+            0.98,
+            -0.777
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.703,
+            -1.227,
+            -0.286
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -2.163,
+            -0.753,
+            -0.439
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -2.218,
+            0.614,
+            0.276
+          ],
+          "name": "CD"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            2.391,
+            -0.721,
+            0.424
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD",
+            "N"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "08674e4d60bc40ad5702b8de6e5e4abb66c2bbb603832c021c31194f4b4e593c",
+      "source_url": "https://files.rcsb.org/ligands/download/PRO.cif"
+    },
+    "SER": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.525,
+            0.493,
+            -0.608
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.1,
+            0.469,
+            -0.252
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.053,
+            0.004,
+            1.173
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.751,
+            -0.76,
+            1.649
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.642,
+            -0.489,
+            -1.184
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.496,
+            -0.049,
+            -2.535
+          ],
+          "name": "OG"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.084,
+            0.44,
+            1.913
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "OG"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "46db0296a07732854d2c3ca67ed0f74f4c82ddc5698d0e59f433039a5d7c88a0",
+      "source_url": "https://files.rcsb.org/ligands/download/SER.cif"
+    },
+    "THR": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.543,
+            -0.702,
+            0.43
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.122,
+            -0.706,
+            0.056
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.038,
+            -0.09,
+            -1.309
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.732,
+            0.761,
+            -1.683
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.675,
+            0.104,
+            1.079
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -0.193,
+            1.448,
+            1.103
+          ],
+          "name": "OG1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.511,
+            -0.521,
+            2.466
+          ],
+          "name": "CG2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.039,
+            -0.488,
+            -2.11
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "OG1"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2023-11-03",
+      "source_sha256": "feb75dfac5bfcc7045de7a75a31575f3bf3e5b411716a06e92712924759dd554",
+      "source_url": "https://files.rcsb.org/ligands/download/THR.cif"
+    },
+    "TRP": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.278,
+            1.121,
+            2.059
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.008,
+            0.417,
+            1.97
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.49,
+            0.076,
+            3.357
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.308,
+            -0.13,
+            4.24
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.168,
+            -0.868,
+            1.161
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.65,
+            -0.526,
+            -0.225
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.928,
+            -0.418,
+            -0.622
+          ],
+          "name": "CD1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.186,
+            -0.256,
+            -1.396
+          ],
+          "name": "CD2"
+        },
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.978,
+            -0.095,
+            -1.951
+          ],
+          "name": "NE1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.701,
+            0.014,
+            -2.454
+          ],
+          "name": "CE2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.564,
+            -0.21,
+            -1.615
+          ],
+          "name": "CE3"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.19,
+            0.314,
+            -3.712
+          ],
+          "name": "CZ2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -2.044,
+            0.086,
+            -2.859
+          ],
+          "name": "CZ3"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.173,
+            0.348,
+            -3.907
+          ],
+          "name": "CH2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.806,
+            0.001,
+            3.61
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CG"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "NE1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CE2"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CE3"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE2",
+            "CZ2"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE2",
+            "NE1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE3",
+            "CZ3"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CH2",
+            "CZ2"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CH2",
+            "CZ3"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2023-11-03",
+      "source_sha256": "4cea7e281ee404f3e72fc20d3ba98064373cdd9309a7f5c75479a04c4b6e36d6",
+      "source_url": "https://files.rcsb.org/ligands/download/TRP.cif"
+    },
+    "TYR": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.32,
+            0.952,
+            1.428
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.018,
+            0.429,
+            1.734
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.103,
+            0.094,
+            3.201
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.886,
+            -0.254,
+            3.799
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.274,
+            -0.831,
+            0.907
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.189,
+            -0.496,
+            -0.559
+          ],
+          "name": "CG"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.022,
+            -0.589,
+            -1.219
+          ],
+          "name": "CD1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.324,
+            -0.102,
+            -1.244
+          ],
+          "name": "CD2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            1.103,
+            -0.282,
+            -2.563
+          ],
+          "name": "CE1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -1.247,
+            0.21,
+            -2.587
+          ],
+          "name": "CE2"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.032,
+            0.118,
+            -3.252
+          ],
+          "name": "CZ"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.044,
+            0.42,
+            -4.574
+          ],
+          "name": "OH"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.279,
+            0.184,
+            3.842
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CE1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CD1",
+            "CG"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CE2"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CD2",
+            "CG"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CE1",
+            "CZ"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "CE2",
+            "CZ"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CZ",
+            "OH"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2024-09-27",
+      "source_sha256": "fa0ef32f9d623e087a527b0a146c0494a5a656037c6448d956072dd2406fa554",
+      "source_url": "https://files.rcsb.org/ligands/download/TYR.cif"
+    },
+    "VAL": {
+      "atoms": [
+        {
+          "element": "N",
+          "ideal_xyz": [
+            1.564,
+            -0.642,
+            0.454
+          ],
+          "name": "N"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            0.145,
+            -0.698,
+            0.079
+          ],
+          "name": "CA"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.037,
+            -0.093,
+            -1.288
+          ],
+          "name": "C"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            0.703,
+            0.784,
+            -1.664
+          ],
+          "name": "O"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.682,
+            0.086,
+            1.098
+          ],
+          "name": "CB"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.497,
+            -0.528,
+            2.487
+          ],
+          "name": "CG1"
+        },
+        {
+          "element": "C",
+          "ideal_xyz": [
+            -0.218,
+            1.543,
+            1.119
+          ],
+          "name": "CG2"
+        },
+        {
+          "element": "O",
+          "ideal_xyz": [
+            -1.022,
+            -0.529,
+            -2.089
+          ],
+          "name": "OXT"
+        }
+      ],
+      "bonds": [
+        {
+          "atoms": [
+            "C",
+            "CA"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "C",
+            "O"
+          ],
+          "order": "DOUB"
+        },
+        {
+          "atoms": [
+            "C",
+            "OXT"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "CB"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CA",
+            "N"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG1"
+          ],
+          "order": "SING"
+        },
+        {
+          "atoms": [
+            "CB",
+            "CG2"
+          ],
+          "order": "SING"
+        }
+      ],
+      "ccd_modified": "2023-11-03",
+      "source_sha256": "9c3c807970c817b1e1a4b43164db91a5bf1e7bf438b3269c5649f6ce84d4c0ed",
+      "source_url": "https://files.rcsb.org/ligands/download/VAL.cif"
+    }
+  },
+  "schema_version": "canonical_heavy_ccd_v1"
+}

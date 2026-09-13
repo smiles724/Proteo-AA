@@ -1,4 +1,57 @@
-# SC-only complex and predicted-input adaptation
+# SC-only geometry, complex, and predicted-input adaptation
+
+The phase order is now:
+
+`sc_warmup -> sc_geometry_repair -> sc_complex_adapt -> sc_adapt`
+
+`sc_geometry_repair` is a documented warm start from the 46,000-update EMA of
+job 114967. It starts a fresh Adam optimizer, 100-update LR warm-up, scheduler,
+and EMA shadow. The side-chain module alone is trainable. Backbone and FAMPNN
+parameters are initialized from their donor EMA values, verified after loading,
+and remain frozen. The donor checkpoint path, SHA256, step, and `weights=ema`
+are recorded; this phase is not represented as an exact continuation.
+
+Repair uses native monomers only, native BB/native residue types for the single
+SC prediction, and the existing XPB-masked frozen backbone feature pass. It has
+no AA decoding, backbone sampling, feedback, receptor context, or differentiable
+clash call. Coordinate and geometry losses act on the same SC output. Existing
+rigid augmentation and template/noise initialization are unchanged.
+
+The four covalent terms use the committed
+`sidechain/canonical_chemistry.json` registry. Their frozen calibration is in
+`runs/sc_geometry_repair/calibration_v1/calibration.yaml`; its subset contains
+32 training proteins. The 308 recent-PDB proteins remain validation, and 128
+PDBs are held out as a repair-only final test set. This final set is separate
+from repair training/validation but is not independent of the warm-up donor's
+pretraining, as recorded by the manifest.
+
+After A/B/C finish, `scripts/utilities/select_sc_geometry_repair.py` compares C
+with symmetry-only arm B at matching updates and fixed stochastic inputs. It
+requires a substantial pooled 3x-native-RMS covalent-failure reduction while
+preserving the explicitly named 20-degree chi metrics, then writes an
+`sc_geometry_repair_acceptance_v1` record. `sc_complex_adapt` requires that
+record and verifies its selected checkpoint hash. The selector never reads the
+final-test manifest.
+
+The native RMS calibration from this registry is:
+
+| Class | count | signed mean | native RMS | 3x tolerance |
+|---|---:|---:|---:|---:|
+| SC bond | 18,537 | -0.00544 A | 0.03147 A | 0.09442 A |
+| Attachment bond | 5,871 | 0.00330 A | 0.01386 A | 0.04157 A |
+| SC angle | 17,462 | 0.01060 rad | 0.03669 rad | 0.11007 rad |
+| Attachment angle | 17,963 | 0.02531 rad | 0.04801 rad | 0.14404 rad |
+
+These are RMS deviations, not estimates of statistical standard deviation.
+The older baked evaluator references agree to approximately `1e-4` at worst,
+but repair metrics still use the exact committed registry.
+
+The controlled 2,000-update comparison is an array: A uses ordinary coordinate
+loss; B uses symmetry-aware whole-residue coordinate loss; C adds all four
+geometry terms after a 200-update ramp. The GPU gate measures each component's
+SC-parameter gradient norm on four fixed native examples and writes the chosen
+weights before the array starts. Validation and checkpoints occur every 500
+updates with fixed item and SC initialization seeds.
 
 Implementation branch: `feat/sc-adaptation-phases`, based on
 `feat/sc-rigid-augmentation` at `6ec0459`. The existing shared rigid transform,
@@ -13,7 +66,7 @@ An operator must select the preceding-phase checkpoint using held-out results.
 
 | Setting | `sc_complex_adapt` | `sc_adapt` |
 |---|---|---|
-| Accepted parent | Rigid-augmentation `sc_warmup` | `sc_complex_adapt` |
+| Accepted parent | Accepted `sc_geometry_repair` | `sc_complex_adapt` |
 | Trainable | `sidechain_module.*` | `sidechain_module.*` |
 | Source mixture | Monomer .75 / PINDER .25 | Monomer .50 / PINDER .50 |
 | Coordinate mixture | Native 1.0 | Native .50 / paired reconstruction .50 |
@@ -36,15 +89,9 @@ From this checkout, create `logs/training` before `sbatch`. The ordinary phase
 launchers require an explicitly selected checkpoint and do not inspect running
 jobs.
 
-For an explicitly approved warm-up handoff, submit the selector as an `afterok`
-dependency. It reads the completed warm-up log, chooses the checkpoint with the
-lowest aggregate `val_loss`, verifies that checkpoint, and records its path and
-hash in the destination checkpoint provenance:
-
-```bash
-WARMUP_JOB_ID=114967 sbatch --dependency=afterok:114967 \
-  scripts/training/slurm_sc_complex_adapt_after_warmup_hai.sh
-```
+Direct `sc_warmup -> sc_complex_adapt` transitions are rejected. Select an
+accepted repair checkpoint after the controlled repair comparison, then launch
+complex adaptation from that checkpoint.
 
 ```bash
 export PROTEOAA_REPO=/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases

@@ -201,6 +201,25 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
     mask=feat["sc_atom_mask"].bool() & feat["sc_frame_valid"].bool()[..., None] & pack["sc_generation_mask"]
     mse=sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(),feat["sc_gt_local"].float(),
         pack["sc_frame_R"].float(),pack["sc_frame_t"].float(),mask)
+    symmetry_mse = sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(), feat["sc_gt_local"].float(),
+        pack["sc_frame_R"].float(), pack["sc_frame_t"].float(), mask, symmetry_aware=True, residue_types=native)
+    repair_terms = {}
+    repair_metrics = {}
+    if cfg.phase == "sc_geometry_repair":
+        from .sidechain.repair_calibration import pack_native_geometry, load_calibration
+        from .sidechain.packing_objective import native_geometry_repair_loss, geometry_diagnostics
+        calibration = load_calibration(str(cfg.geometry_calibration_path), str(cfg.geometry_calibration_sha256))
+        coords, chemistry, native_observed = pack_native_geometry(feat, pack["sc_pred_global"], pack["sc_generation_mask"])
+        requested = [name for name in ("bond_sc","bond_attach","angle_sc","angle_attach") if float(cfg["weight_"+name]) > 0]
+        repair_terms = native_geometry_repair_loss(coords, chemistry, calibration=calibration, terms=requested)
+        if not model.training:
+            from .sidechain.frames import to_global
+            native_xyz = to_global(feat["sc_gt_local"].float(), feat["sc_frame_R"].float(), feat["sc_frame_t"].float())
+            native_coords, _, native_observed = pack_native_geometry(feat, native_xyz, pack["sc_generation_mask"], native=True)
+            repair_metrics.update({"geometry/model/"+key:value for key,value in geometry_diagnostics(coords,chemistry,calibration).items()})
+            repair_metrics.update({"geometry/native/"+key:value for key,value in geometry_diagnostics(native_coords,chemistry,calibration,observed=native_observed).items()})
+            from .sidechain.repair_metrics import corrected_clash_diagnostics
+            repair_metrics.update({'repair_clash/'+key:value for key,value in corrected_clash_diagnostics(coords,chemistry).items()})
     physical = pack.get("sc_pack_val", pack["sc_pred_global"].float().sum()*0.)
     if float(getattr(cfg, "weight_physical", 0.)) > 0 and "sc_pack_val" not in pack:
         raise RuntimeError("Native physical objective requested but packer did not compute it")
@@ -209,7 +228,8 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
         from .sidechain.metrics import diagnose_packing
         metrics = diagnose_packing(feat, pack, native, xyz, observed=mask)
     return dict(supervised_sc=True,sc_gt_mse=mse,sc_observed_atoms=mask.sum(),
-        packing_metrics=metrics,
+        sc_symmetry_mse=symmetry_mse, sc_geometry=repair_terms,
+        packing_metrics=dict(metrics, **repair_metrics),
         sc_physical=physical, sc_clash=pack.get("sc_pack_clash", physical.detach()),
         sc_skipped_noncanonical=(design&~canonical).sum(),
         sc_invalid_native_frames=(design&~feat["sc_frame_valid"].bool()).sum(),
@@ -277,7 +297,7 @@ def apply_phase(model):
     from .checkpoints import FEEDBACK_PREFIXES, BACKBONE_PREFIXES
     cfg = model.configs.stage4
     phase = str(cfg.phase)
-    phases = ("baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-0", "IV-A", "IV-B", "IV-C")
+    phases = ("baseline", "sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-0", "IV-A", "IV-B", "IV-C")
     if phase not in phases:
         raise ValueError(f"Unknown phase {phase}")
     bb = tuple(p for p in (cfg.bb_trainable_prefixes or ()) if p)
@@ -292,7 +312,7 @@ def apply_phase(model):
         feedback = bool(selected_feedback and name.startswith(selected_feedback))
         if phase in ("baseline", "IV-0"):
             enabled = False
-        elif phase in ("sc_warmup", "sc_complex_adapt", "sc_adapt"):
+        elif phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt"):
             enabled = sc
         elif phase == "feedback_adapt":
             enabled = feedback or (sc and bool(getattr(cfg, "train_sc", False)))
@@ -363,7 +383,7 @@ def checkpoint_identity(model):
         optimizer_policy="joint-AA-SC-BB-v1",
         optimizer={key: float(getattr(cfg, key)) for key in ("aa_lr", "sc_lr", "bb_lr")},
         bb_trainable_prefixes=list(cfg.bb_trainable_prefixes or ()),
-        objectives={key: float(getattr(cfg,key)) for key in ("weight_aa_pre", "weight_aa_revision", "weight_sc_aux", "weight_physical")},
+        objectives={key: float(getattr(cfg,key,0.)) for key in ("weight_aa_pre", "weight_aa_revision", "weight_sc_aux", "weight_physical", "weight_bond_sc", "weight_bond_attach", "weight_angle_sc", "weight_angle_attach")},
         template_provider=str(getattr(model, "sc_template_provider", "none")),
         diffusion_samples=int(model.configs.training.diffusion_batch_size),
         feedback={key: bool(getattr(model, key, False)) for key in ("sc_a_direct", "sc_a_direct_pre", "sc_q_direct", "sc_hres_inject")})

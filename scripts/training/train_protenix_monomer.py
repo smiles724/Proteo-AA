@@ -1047,11 +1047,11 @@ def build_configs(args: argparse.Namespace, device):
         configs.loss.edm_weighting = True
         if args.backbone_checkpoint and args.load_checkpoint:
             raise ValueError("Component composition cannot also load a complete donor")
-        if args.stage4_phase in ("baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt"):
+        if args.stage4_phase in ("baseline", "sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt"):
             configs.stage4.sc_to_aa = configs.stage4.sc_to_bb = False
             if args.backbone_refinement_enabled:
                 raise ValueError("Initial component validation requires feedback/refinement disabled")
-        if args.stage4_phase in ("IV-A", "baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt"):
+        if args.stage4_phase in ("IV-A", "baseline", "sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt"):
             configs.loss.weight_mse = 0.0
             configs.loss.weight_lddt = 0.0
             configs.loss.weight_disto = 0.0
@@ -1063,7 +1063,7 @@ def build_configs(args: argparse.Namespace, device):
             raise ValueError("Revision round counts must be nonnegative")
         if args.diffusion_batch_size != 1:
             raise ValueError("Integrated pack/refine supports diffusion-batch-size=1; accumulate gradients")
-        if args.stage4_phase in ("sc_warmup", "sc_complex_adapt"):
+        if args.stage4_phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt"):
             if args.stage4_phase == "sc_warmup" and args.data_mode != "monomer":
                 raise ValueError("Scratch SC warm-up requires monomer-only data")
             if args.stage4_train_rounds or args.stage4_inference_rounds:
@@ -1310,7 +1310,7 @@ def apply_training_stage_args(args: argparse.Namespace) -> None:
         # that input to the predicted frame; learned B_pre features remain live in
         # both stages.
         args.predicted_frame = args.training_stage in ("predicted_mask", "stage4_fampnn")
-        if args.training_stage == "stage4_fampnn" and args.stage4_phase in ("sc_warmup", "sc_complex_adapt"):
+        if args.training_stage == "stage4_fampnn" and args.stage4_phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt"):
             args.predicted_frame = False
         args.per_sigma = True
 
@@ -1673,7 +1673,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume-checkpoint", default="")
     p.add_argument("--warm-start-checkpoint", default="", help="New phase using saved architecture and weights, fresh optimizer/counters")
     p.add_argument("--fampnn-checkpoint", default="")
-    p.add_argument("--stage4-phase", choices=["baseline", "sc_warmup", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-A", "IV-B", "IV-C"], default="sc_adapt")
+    p.add_argument("--stage4-phase", choices=["baseline", "sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt", "IV-A", "IV-B", "IV-C"], default="sc_adapt")
     p.add_argument("--stage4-train-rounds", type=int, default=0)
     p.add_argument("--stage4-native-sc-augmentation", action=argparse.BooleanOptionalAction, default=False,
                    help="Apply one random rigid transform to all native SC training inputs and frames")

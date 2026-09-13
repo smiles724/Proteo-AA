@@ -218,6 +218,18 @@ def transition_config(checkpoint, *, phase, stage4_overrides=None, training_over
     config.training.warm_start_checkpoint = ''
     previous_phase = config.stage4.phase
     config.stage4.phase = phase
+    sc_progression = {
+        "sc_warmup": "sc_geometry_repair",
+        "sc_geometry_repair": "sc_complex_adapt",
+        "sc_complex_adapt": "sc_adapt",
+    }
+    if (previous_phase in sc_progression and phase in
+            ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt")
+            and phase != sc_progression[previous_phase]):
+        raise ValueError(
+            f"Invalid SC phase transition {previous_phase} -> {phase}; "
+            f"expected {sc_progression[previous_phase]}"
+        )
     from .sc_adaptation import DEFAULTS
     for key, value in DEFAULTS.items():
         if key not in config.stage4:
@@ -227,7 +239,7 @@ def transition_config(checkpoint, *, phase, stage4_overrides=None, training_over
             if key not in section:
                 raise ValueError(f'Unknown phase-transition setting {key}')
             setattr(section,key,value)
-    if phase in ("sc_warmup", "sc_complex_adapt"):
+    if phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt"):
         if config.stage4.train_rounds or config.stage4.sc_to_aa or config.stage4.sc_to_bb or config.stage4.backbone_refinement_enabled:
             raise ValueError("Supervised SC phases require zero revisions and disabled feedback")
         config.sidechain.predicted_frame=False
@@ -242,7 +254,7 @@ def transition_config(checkpoint, *, phase, stage4_overrides=None, training_over
             config.stage4.weight_physical=float((stage4_overrides or {}).get("weight_physical", 0.))
         config.sidechain.pack_loss=float(config.stage4.weight_physical)
         config.loss.weight_bb_post=0.
-    elif previous_phase in ("sc_warmup", "sc_complex_adapt") and phase in ("sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt"):
+    elif previous_phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt") and phase in ("sc_adapt", "feedback_adapt", "aa_adapt", "joint_adapt"):
         config.sidechain.predicted_frame=True
         config.sidechain.predicted_mask=True
         config.sidechain.force_gt_type_logits=False
@@ -255,3 +267,35 @@ def transition_config(checkpoint, *, phase, stage4_overrides=None, training_over
     if phase == 'feedback_adapt' and (config.stage4.train_rounds < 1 or not config.stage4.backbone_refinement_enabled or not config.stage4.sc_to_bb):
         raise ValueError('Feedback adaptation requires explicit revision rounds, backbone refinement, and SC-to-BB')
     return config
+
+
+def materialize_starting_weights(checkpoint, *, weights, expected_step=None):
+    """Materialize an explicit EMA/raw warm start without donor optimizer state.
+
+    Every parameter present in the donor EMA is materialized from that shadow.
+    Parameters and buffers absent from EMA retain their saved model values.
+    """
+    if weights not in ('ema','raw'):
+        raise ValueError('Select donor weights explicitly: ema or raw')
+    if expected_step is not None and int(checkpoint['step']) != expected_step:
+        raise ValueError(f'Expected donor step {expected_step}')
+    state = tensor_state(checkpoint)
+    if weights == 'ema':
+        shadow = normalize_state(checkpoint.get('ema',{}).get('shadow',{}))
+        if not shadow:
+            raise ValueError('Requested EMA weights but donor has no EMA shadow')
+        sc = {key for key in checkpoint['integrated']['trainable_parameters'] if key.startswith('sidechain_module.')}
+        if not sc <= shadow.keys():
+            raise ValueError('EMA must contain every trainable donor SC parameter')
+        for key,value in shadow.items():
+            if key not in state or value.shape != state[key].shape:
+                raise ValueError(f'EMA tensor mismatch: {key}')
+        state = dict(state, **shadow)
+    result = {key:value for key,value in checkpoint.items() if key not in
+              ('optimizer','scheduler','sc_optimizer','bb_optimizer','sc_scheduler','bb_scheduler','ema','rng_torch','rng_cuda')}
+    result['model'] = state
+    result['warm_start_weights'] = dict(weights=weights,source_step=checkpoint['step'],frozen_verified=True,
+        ema_scope='all_donor_parameters',frozen_policy='ema_start_then_frozen',
+        unchanged_inactive_sc=[key for key in state if key.startswith('sidechain_module.') and weights=='ema' and key not in shadow])
+    # The source step remains metadata; params-only loading starts trainer at 0.
+    return result

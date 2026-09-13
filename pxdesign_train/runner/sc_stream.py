@@ -121,7 +121,7 @@ class SCStream(Dataset):
     def __getitem__(self, index):
         from pxdesign_train.sc_adaptation import choose_source
         seed = int(np.random.SeedSequence([self.seed, int(index)]).generate_state(1)[0])
-        source = "native" if self.cfg.phase == "sc_complex_adapt" else choose_source(self.cfg, seed=seed+19)
+        source = "native" if self.cfg.phase in ("sc_geometry_repair", "sc_complex_adapt") else choose_source(self.cfg, seed=seed+19)
         rng = np.random.default_rng(seed+31)
         idx = min(int(np.searchsorted(self.cdf, rng.random())), len(self.dataset)-1)
         with item_rng(seed):

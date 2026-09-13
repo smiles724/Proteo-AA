@@ -13,6 +13,9 @@
 #SBATCH --error=logs/training/sc-adaptation-%j.err
 set -euo pipefail
 
+echo "ERROR: direct sc_warmup -> sc_complex_adapt is disabled; run and accept sc_geometry_repair first" >&2
+exit 2
+
 export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases}
 export PYTHON_BIN=${PYTHON_BIN:-/hai/users/y/f/yfsun/miniconda3/envs/ml/bin/python}
 : "${WARMUP_JOB_ID:?Set WARMUP_JOB_ID to the completed sc_warmup Slurm job ID}"

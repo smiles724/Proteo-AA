@@ -583,6 +583,10 @@ training_configs["stage4"] = {
     "bb_trainable_prefixes": [""],  # parser needs a typed list; empty entries select nothing
     "weight_aa_pre": 1.0, "weight_aa_revision": 1.0,
     "weight_sc_aux": 1.0, "weight_physical": 0.1,
+    "monomer_fraction": 1., "symmetry_aware_coordinates": False,
+    "geometry_calibration_path": "", "geometry_calibration_sha256": "", "chemistry_registry_sha256": "",
+    "geometry_ramp_steps": 200,
+    "weight_bond_sc": 0., "weight_bond_attach": 0., "weight_angle_sc": 0., "weight_angle_attach": 0.,
     "adaptation_protocol": "legacy",  # explicit opt-in for the two SC-only recipes
     "native_fraction": 0.5, "paired_fraction": 0.5, "full_sample_fraction": 0.0,
     "reconstruction_sigmas": "0.4,1,2,4",

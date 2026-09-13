@@ -1,7 +1,8 @@
 """Packing diagnostics with explicit numerators/counts and named atom chemistry.
 
 These are evaluation metrics, not training targets. Symmetry swaps preserve atom
-elements. Covalent errors use CCD ideal bond lengths, with a stated 0.2 A cutoff.
+elements. Covalent errors use the legacy baked ideal coordinates so historical
+metrics remain continuous; repair geometry metrics use chemistry.py instead.
 """
 import torch
 from .instantiate import STD_AA_3, sidechain_atoms, instantiate_from_type_indices
@@ -80,7 +81,14 @@ def packing_metrics(types, pred_local, bb_local, generation, design, *, target=N
     rotamer_valid = valid_chi.any(-1) & ((~CHI_MASK.to(types.device)[types.clamp(0,19)]) | valid_chi).all(-1)
     result.update(chi_count=valid_chi.sum().float(), chi_recovered=recovered.sum().float(),
         rotamer_count=rotamer_valid.sum().float(),
-        rotamer_recovered=(rotamer_valid & (~valid_chi | recovered).all(-1)).sum().float())
+        rotamer_recovered=(rotamer_valid & (~valid_chi | recovered).all(-1)).sum().float(),
+        chi1_count=valid_chi[:,0].sum().float(),
+        chi1_chi2_count=valid_chi[:,:2].all(-1).sum().float())
+    for degrees in (20, 40):
+        hits = valid_chi & (angle_error < degrees*torch.pi/180)
+        result[f"chi_recovered_{degrees}deg"] = hits.sum().float()
+        result[f"chi1_recovered_{degrees}deg"] = hits[:,0].sum().float()
+        result[f"chi1_chi2_recovered_{degrees}deg"] = (valid_chi[:,:2].all(-1) & hits[:,:2].all(-1)).sum().float()
     return result
 
 
@@ -96,6 +104,13 @@ def summarize_metrics(counts):
         result["symmetry_rmsd"] = ratio("symmetry_squared_error", "observed_atoms").sqrt()
         result["chi_recovery"] = ratio("chi_recovered", "chi_count")
         result["rotamer_recovery"] = ratio("rotamer_recovered", "rotamer_count")
+        result["rotamer_recovery_40deg"] = result["rotamer_recovery"]
+        result["rotamer_outlier_fraction_40deg"] = 1.0 - result["rotamer_recovery"]
+        for degrees in (20, 40):
+            result[f"chi_recovery_{degrees}deg"] = ratio(f"chi_recovered_{degrees}deg", "chi_count")
+            result[f"chi1_accuracy_{degrees}deg"] = ratio(f"chi1_recovered_{degrees}deg", "chi1_count")
+            result[f"chi1_chi2_accuracy_{degrees}deg"] = ratio(f"chi1_chi2_recovered_{degrees}deg", "chi1_chi2_count")
+            result[f"chi1_chi2_outlier_fraction_{degrees}deg"] = 1.0 - result[f"chi1_chi2_accuracy_{degrees}deg"]
     return result
 
 

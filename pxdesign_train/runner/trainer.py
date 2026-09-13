@@ -621,8 +621,21 @@ class PXDesignTrainer:
         if out.get("supervised_sc", False):
             mse=out["sc_gt_mse"].float()
             physical=out.get("sc_physical", mse*0.).float()
-            # GT backbone is an input here, not a prediction to score as perfect.
-            return dict(loss=float(self.configs.stage4.weight_sc_aux)*mse + float(self.configs.stage4.weight_physical)*physical,
+            cfg = self.configs.stage4
+            symmetry = out.get("sc_symmetry_mse", mse).float()
+            coord = symmetry if getattr(cfg,"symmetry_aware_coordinates",False) else mse
+            total = float(cfg.weight_sc_aux)*coord + float(cfg.weight_physical)*physical
+            extra = dict(sc_symmetry_mse=symmetry.detach(), sc_symmetry_rmsd=symmetry.detach().sqrt())
+            if cfg.phase == "sc_geometry_repair":
+                ramp = min(1., (self.step+1)/max(1,int(cfg.geometry_ramp_steps))) if self.model.training else 1.
+                extra["geometry_ramp"] = mse.new_tensor(ramp)
+                for name,value in out["sc_geometry"].items():
+                    if name == "counts": continue
+                    total = total + ramp*float(cfg["weight_"+name])*value
+                    extra["geometry/"+name] = value.detach()
+                    for key,count in out["sc_geometry"]["counts"][name].items():
+                        extra[f"geometry/{name}_{key}"] = count.detach().float()
+            return dict(loss=total, **extra,
                 sc_physical=physical.detach(),
                 sc_gt_mse=mse.detach(),sc_gt_rmsd=mse.detach().sqrt(),
                 sc_observed_atoms=out["sc_observed_atoms"].detach().float(),
@@ -753,6 +766,8 @@ class PXDesignTrainer:
             aa_clipped_grad_norm = self._tensor_l2_norm(
                 p.grad for p in self.aa_head_params if p.grad is not None
             )
+            for group in self.optimizer.param_groups:
+                loss_out["lr/"+group.get("name","default")] = torch.tensor(group["lr"],device=self.device)
             aa_before = [p.detach().clone() for p in self.aa_head_params]
             for opt in self._optimizers:
                 opt.step()
@@ -933,7 +948,8 @@ class PXDesignTrainer:
         for prefix in prefixes:
             pooled = {key.removeprefix(prefix):torch.tensor(value) for key,value in sums.items() if key.startswith(prefix)}
             for key, value in summarize_metrics(pooled).items():
-                if key in ("symmetry_rmsd", "completeness", "bond_mae", "bad_bond_fraction", "chi_recovery", "rotamer_recovery"):
+                if (key in ("symmetry_rmsd", "completeness", "bond_mae", "bad_bond_fraction", "chi_recovery", "rotamer_recovery")
+                        or key.endswith(("20deg", "40deg"))):
                     means[prefix+key+"_pooled"] = float(value)
             for metric, denominator in (("symmetry_rmsd", "observed_atoms"), ("completeness", "chemical_atoms"),
                     ("bond_mae", "bond_count"), ("bad_bond_fraction", "bond_count"),
@@ -942,6 +958,29 @@ class PXDesignTrainer:
                     values = [row[prefix+metric] for row in per_protein if row.get(prefix+denominator, 0) > 0]
                     means[prefix+metric] = sum(values)/len(values) if values else 0.
                     means[prefix+metric+"_valid_proteins"] = float(len(values))
+        if getattr(self.configs.stage4, "phase", "") == "sc_geometry_repair":
+            # Geometry diagnostics publish numerators and eligibility counts.
+            # Aggregate those as set-wide quantities rather than per-protein
+            # means, while retaining the per-protein rows above.
+            for source in ("model", "native"):
+                for term in ("bond_sc", "bond_attach", "angle_sc", "angle_attach"):
+                    prefix = f"geometry/{source}/{term}/"
+                    n = sums.get(prefix + "count", 0.0)
+                    means[prefix + "eligible_constraints"] = n
+                    means[prefix + "signed_mean"] = sums.get(prefix + "signed_sum", 0.0) / max(1.0, n)
+                    means[prefix + "rms"] = (sums.get(prefix + "squared_sum", 0.0) / max(1.0, n)) ** 0.5
+                    for key, value in sums.items():
+                        if key.startswith(prefix + "outliers_"):
+                            means[key + "_count"] = value
+                            means[key + "_rate"] = value / max(1.0, n)
+            for key in ("repair_clash/eligible_pairs", "repair_clash/overlap_gt_0p4A_pairs", "repair_clash/generated_atoms"):
+                if key in sums:
+                    means[key + "_total"] = sums[key]
+            if "repair_clash/eligible_pairs" in sums:
+                means["repair_clash/overlap_gt_0p4A_rate"] = (
+                    sums.get("repair_clash/overlap_gt_0p4A_pairs", 0.0)
+                    / max(1.0, sums["repair_clash/eligible_pairs"])
+                )
         return means
 
     # ----- run loop -----
@@ -1296,6 +1335,9 @@ class PXDesignTrainer:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         if "integrated" in ckpt:
             from pxdesign_train.checkpoints import restore_model, restore_rng
+            if params_only and getattr(self.configs.training,"warm_start_weights","raw") == "ema" and "warm_start_weights" not in ckpt:
+                from pxdesign_train.checkpoints import materialize_starting_weights
+                ckpt = materialize_starting_weights(ckpt,weights="ema",expected_step=46000 if self.configs.stage4.phase=="sc_geometry_repair" else None)
             restore_model(self.raw_model, ckpt)
             if not params_only:
                 if ckpt["integrated"]["trainable_parameters"] != [n for n,p in self.raw_model.named_parameters() if p.requires_grad]:

@@ -19,8 +19,16 @@ def parser():
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument("--accepted-checkpoint")
     source.add_argument("--resume-checkpoint")
-    p.add_argument("--phase", choices=["sc_complex_adapt", "sc_adapt"])
+    p.add_argument("--phase", choices=["sc_geometry_repair", "sc_complex_adapt", "sc_adapt"])
     p.add_argument("--output-dir", required=True)
+    p.add_argument("--donor-weights", choices=["ema","raw"])
+    p.add_argument("--repair-arm", choices=["A","B","C"])
+    p.add_argument("--calibration-path")
+    p.add_argument("--final-test-index")
+    p.add_argument("--repair-acceptance")
+    p.add_argument("--geometry-ramp-steps", type=int)
+    for name in ("bond-sc","bond-attach","angle-sc","angle-attach"):
+        p.add_argument("--weight-"+name,type=float)
     p.add_argument("--dry-run", action="store_true", help="Resolve config, fingerprint/audit data; do not construct model")
     p.add_argument("--export-validation-inputs", action="store_true", help="Export audited native panels for separate full-sample caching")
     p.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
@@ -51,17 +59,31 @@ def resolve(options):
         recipe = dict(saved.training.sc_adaptation_recipe)
         for key, value in vars(options).items():
             if key not in ("output_dir", "dry_run", "export_validation_inputs", "device", "resume_checkpoint", "accepted_checkpoint") and value is not None:
+                if key == 'max_steps':
+                    if value <= int(checkpoint['step']):
+                        raise ValueError("Extended repair budget must exceed the resumed checkpoint step")
+                    recipe[key] = value
+                    continue
                 if recipe.get(key) != value:
                     raise ValueError(f"Exact resume cannot override {key}; start a new phase instead")
         config = saved
+        config.training.max_steps = recipe['max_steps']
         config.training.resume_checkpoint = str(Path(path).resolve())
         config.training.warm_start_checkpoint = ""
     else:
         if options.phase is None:
             raise ValueError("Warm start requires --phase")
-        previous = "sc_warmup" if options.phase == "sc_complex_adapt" else "sc_complex_adapt"
+        previous = {"sc_geometry_repair":"sc_warmup", "sc_complex_adapt":"sc_geometry_repair", "sc_adapt":"sc_complex_adapt"}[options.phase]
         if saved.stage4.phase != previous:
             raise ValueError(f"{options.phase} requires an accepted {previous} checkpoint, got {saved.stage4.phase}")
+        if options.phase == "sc_complex_adapt":
+            if not options.repair_acceptance:
+                raise ValueError("sc_complex_adapt requires --repair-acceptance from the fixed-panel selector")
+            acceptance = json.loads(Path(options.repair_acceptance).read_text())
+            if acceptance.get('schema') != 'sc_geometry_repair_acceptance_v1' or not acceptance.get('approved'):
+                raise ValueError("Repair acceptance artifact is missing approval")
+            if acceptance.get('selected', {}).get('checkpoint_sha256') != sha256_file(path):
+                raise ValueError("Repair acceptance selects a different checkpoint")
         if not saved.stage4.native_sc_augmentation:
             raise ValueError("Accepted donor must record native rigid augmentation")
         recipe = dict(phase=options.phase, seed=42, max_steps=1000, sc_lr=1e-5,
@@ -71,15 +93,48 @@ def resolve(options):
             native_fraction=1. if options.phase == "sc_complex_adapt" else .5,
             full_sample_fraction=0., eval_samples=64, eval_interval=1000, checkpoint_interval=500,
             reconstruction_sigmas="0.4,1,2,4", reconstruction_max_ca_error=3., reconstruction_max_bond_error=.3,
-            full_sample_train_cache="", full_sample_validation_cache="")
+            full_sample_train_cache="", full_sample_validation_cache="", donor_weights="raw",
+            repair_arm="C", calibration_path="", final_test_index="", geometry_ramp_steps=200,
+            weight_bond_sc=0., weight_bond_attach=0., weight_angle_sc=0., weight_angle_attach=0.)
+        if options.phase == "sc_geometry_repair":
+            recipe.update(seed=int(saved.seed), max_steps=2000, warmup_steps=100,
+                accumulation=int(saved.training.iters_to_accumulate), physical_weight=0.,
+                monomer_fraction=1.,native_fraction=1.,eval_samples=491,eval_interval=500,
+                donor_weights="ema")
+            if options.donor_weights != "ema":
+                raise ValueError("Repair requires explicit --donor-weights ema from step 46000")
+            if int(checkpoint['step']) != 46000:
+                raise ValueError("Initial repair requires the step 46000 donor")
         for key, value in vars(options).items():
             if key not in ("output_dir", "dry_run", "export_validation_inputs", "device", "resume_checkpoint", "accepted_checkpoint") and value is not None:
                 recipe[key] = value
-        if not 0 < recipe["monomer_fraction"] < 1:
+        if recipe["phase"] != "sc_geometry_repair" and not 0 < recipe["monomer_fraction"] < 1:
             raise ValueError("Adaptation recipes require both monomer and PINDER sources")
         if recipe["phase"] == "sc_complex_adapt" and (recipe["native_fraction"] != 1 or recipe["full_sample_fraction"]):
             raise ValueError("Native-complex adaptation cannot use reconstructed/full-sample inputs")
+        repair = recipe["phase"] == "sc_geometry_repair"
+        repair_overrides = {"weight_" + name: 0. for name in
+            ("bond_sc", "bond_attach", "angle_sc", "angle_attach")}
+        if repair:
+            from pxdesign_train.sidechain.repair_calibration import load_calibration
+            calibration_hash = sha256_file(recipe["calibration_path"])
+            calibration = load_calibration(str(Path(recipe["calibration_path"]).resolve()), calibration_hash)
+            if not recipe["final_test_index"]:
+                raise ValueError("Repair requires a separate frozen --final-test-index")
+            names = ("bond_sc","bond_attach","angle_sc","angle_attach")
+            if recipe["repair_arm"] in ("A","B"):
+                if any(recipe["weight_"+name] for name in names):
+                    raise ValueError("Control arms A/B require zero geometry weights")
+            elif any(recipe["weight_"+name] <= 0 for name in names):
+                raise ValueError("Arm C requires four explicitly calibrated positive weights")
+            repair_overrides = dict(symmetry_aware_coordinates=recipe["repair_arm"] != "A",
+                geometry_calibration_path=str(Path(recipe["calibration_path"]).resolve()),
+                geometry_calibration_sha256=calibration_hash,
+                chemistry_registry_sha256=calibration['chemistry_registry_sha256'],
+                geometry_ramp_steps=recipe["geometry_ramp_steps"],
+                **{"weight_"+name:recipe["weight_"+name] for name in names})
         config = transition_config(checkpoint, phase=recipe["phase"], stage4_overrides=dict(
+            **repair_overrides, monomer_fraction=recipe["monomer_fraction"],
             adaptation_protocol=PROTOCOL, train_rounds=0, inference_rounds=0,
             sc_to_aa=False, sc_to_bb=False, backbone_refinement_enabled=False,
             packing_enabled=True, initial_target_policy="joint", backbone_sampler="pxdesign_native",
@@ -95,8 +150,11 @@ def resolve(options):
             max_steps=recipe["max_steps"], lr=recipe["sc_lr"], warmup_steps=recipe["warmup_steps"],
             iters_to_accumulate=recipe["accumulation"], grad_clip_norm=1., crop_size=384,
             diffusion_batch_size=1, eval_interval=recipe["eval_interval"], checkpoint_interval=recipe["checkpoint_interval"],
-            num_workers=recipe["num_workers"], log_interval=50, ema_decay=0.,
-            accepted_parent=dict(path=str(Path(path).resolve()), sha256=sha256_file(path), phase=previous)))
+            num_workers=recipe["num_workers"], log_interval=50, ema_decay=float(saved.training.ema_decay) if repair else 0.,
+            accepted_parent=dict(path=str(Path(path).resolve()), sha256=sha256_file(path), phase=previous, weights=recipe["donor_weights"], step=int(checkpoint["step"]))))
+        config.training.warm_start_weights = recipe["donor_weights"]
+        if repair:
+            config.ema_mutable_param_keywords = ["sidechain_module."]
     validate_phase(config)
     for key in SC_LAYOUT_KEYS:
         if key not in checkpoint["sidechain_arch"] or bool(config.sidechain[key]) != bool(checkpoint["sidechain_arch"][key]):
@@ -119,7 +177,7 @@ def legacy_arguments(recipe, output_dir):
     args.training_stage = "stage4_fampnn"
     args.stage4_phase = recipe["phase"]
     args.output_dir = str(output_dir)
-    args.data_mode, args.complex_provider = "mixed_monomer_complex", "pinder"
+    args.data_mode, args.complex_provider = ("monomer" if recipe["phase"] == "sc_geometry_repair" else "mixed_monomer_complex"), "pinder"
     args.crop_size = args.max_n_token = 384
     args.complex_max_n_token = 640
     args.stage2_start_monomer_frac = args.stage2_end_monomer_frac = recipe["monomer_fraction"]
@@ -141,6 +199,8 @@ def build_data(config, recipe, output):
     from pxdesign_train.runner.sc_stream import fingerprint, SCStream, FullSampleCache, CoordinatePanel
     from pxdesign_train.runner.sc_partitions import prepare_partitions
     args = legacy_arguments(recipe, output)
+    if recipe["phase"] == "sc_geometry_repair":
+        return build_repair_data(config, recipe, output, args)
     for key, subdir in (("pinder_cif_cache", "pinder_cif_cache"), ("pinder_pdb_cache", "pinder_pdb_cache")):
         if key not in recipe:
             setattr(args, key, str(output/subdir))
@@ -210,6 +270,59 @@ def build_data(config, recipe, output):
     return components
 
 
+def build_repair_data(config, recipe, output, args):
+    """Monomer-only path: never construct, open or fingerprint a PINDER source."""
+    import pandas as pd
+    from pxdesign_train.runner.sc_stream import fingerprint, SCStream, CoordinatePanel, sha256_file
+    from pxdesign_train.checkpoints import plain_config
+    from pxdesign_train.sidechain.repair_calibration import load_calibration
+    cache = output/'cache'; cache.mkdir(parents=True,exist_ok=True)
+    source = Path(args.source_index) if args.source_index else base._source_index_path(Path(args.data_root))
+    validation = Path(args.eval_source_index) if args.eval_source_index else base._recent_index_path(Path(args.data_root))
+    final = Path(recipe['final_test_index'])
+    inputs = fingerprint([source,validation,final],dict(crop=384,min_tokens=args.min_n_token))
+    filtered = cache/'native_train.csv.gz'
+    base.build_monomer_index(source_index=source,output_index=filtered,min_n_token=args.min_n_token,
+        max_n_token=384,limit=0,rebuild=True)
+    train,val,test = pd.read_csv(filtered),pd.read_csv(validation),pd.read_csv(final)
+    val_ids,test_ids = set(val.pdb_id.str.lower()),set(test.pdb_id.str.lower())
+    if val_ids & test_ids: raise ValueError('Validation and final test overlap')
+    keep = ~train.pdb_id.str.lower().isin(val_ids|test_ids)
+    train = train[keep]
+    if train.empty: raise ValueError('No monomer training items after exclusions')
+    train.to_csv(filtered,index=False,compression=dict(method='gzip',mtime=0))
+    calibration = load_calibration(str(config.stage4.geometry_calibration_path),str(config.stage4.geometry_calibration_sha256))
+    if calibration['validation_manifest_sha256'] != sha256_file(validation) or calibration['final_test_manifest_sha256'] != sha256_file(final):
+        raise ValueError('Held-out manifests differ from frozen calibration provenance')
+    calibration_ids = set(calibration.get('pdb_ids',[]))
+    if not calibration_ids or not calibration_ids <= set(train.pdb_id.str.lower()):
+        raise ValueError('Calibration subset must belong to the audited training partition')
+    if calibration_ids & (val_ids|test_ids): raise ValueError('Calibration overlaps held-out data')
+    components,n_items = base.build_components(args,filtered)
+    loader,_,eval_index = base.build_eval_dataloader(args,output)
+    if loader is None: raise ValueError('Repair requires native validation')
+    recipe.update(source_index=str(source.resolve()),eval_source_index=str(validation.resolve()),data_root=str(args.data_root))
+    audit = dict(partition='native_monomer_only',train_items=n_items,validation_items=len(pd.read_csv(eval_index)),
+        final_test_items=len(test),excluded_training_items=int((~keep).sum()),
+        calibration_pdbs=len(calibration_ids),no_pdb_overlap=True,
+        donor_pretraining_independence=False,homology_independence=False)
+    data = fingerprint([filtered,Path(eval_index),final],dict(source_hashes=sorted(inputs['files'].values()),
+        recipe=recipe,audit=audit,calibration_sha256=config.stage4.geometry_calibration_sha256))
+    identity = dict(hashes=sorted(data['files'].values()),settings=data['settings'])
+    saved = getattr(config.training,'sc_data_identity',None)
+    if saved is not None and config.training.resume_checkpoint and plain_config(saved) != identity:
+        raise ValueError('Exact resume monomer dataset fingerprint differs')
+    config.training.sc_data_identity = identity
+    config.training.sc_adaptation_recipe = recipe
+    config.training.entrypoint_arguments = dict(recipe,entrypoint='train_sc_adaptation.py')
+    components.train_dataset = SCStream(components.train_dataset,components.schedule,config.stage4,
+        seed=config.seed,microsteps=config.training.max_steps*config.training.iters_to_accumulate)
+    components.eval_dataloader = None
+    components.named_eval_dataloaders = {'native/monomer_retention':CoordinatePanel(loader,'native',seed=1000003)}
+    (output/'data_audit.json').write_text(json.dumps(dict(identity=identity,counts=audit),indent=2,default=str))
+    return components
+
+
 def main():
     options = parser().parse_args()
     # Protenix resolves its CCD paths at import time. Establish the data root
@@ -250,6 +363,15 @@ def main():
         raise ValueError("sc_adapt launch requires a separate full-400-step validation cache")
     from pxdesign_train.runner.train import train_from_components
     import torch
+    if config.training.warm_start_checkpoint:
+        (output/'starting_weights.json').write_text(json.dumps(dict(
+            source_checkpoint=config.training.warm_start_checkpoint,
+            source_sha256=config.training.accepted_parent['sha256'],
+            source_step=config.training.accepted_parent['step'],
+            weights=recipe['donor_weights'],
+            optimizer='fresh', scheduler='fresh',
+            ema_shadow='initialized_after_weight_load',
+        ), indent=2))
     train_from_components(configs=config, components=components, device=torch.device(options.device),
         checkpoint_dir=str(output/"checkpoints"), max_steps=int(config.training.max_steps))
 

@@ -343,9 +343,16 @@ def test_gt_to_generated_transition_restores_input_routing_and_objectives():
     model.configs.sidechain.force_gt_type_logits=True
     model.configs.loss=SimpleNamespace(weight_bb_post=0.)
     ckpt={'integrated':integrated_record(model)}
-    native=transition_config(ckpt,phase='sc_complex_adapt')
+    with pytest.raises(ValueError, match='expected sc_geometry_repair'):
+        transition_config(ckpt,phase='sc_complex_adapt')
+    repair=transition_config(ckpt,phase='sc_geometry_repair')
+    repair_ckpt={'integrated':dict(integrated_record(model),
+        effective_config=repair.to_dict())}
+    native=transition_config(repair_ckpt,phase='sc_complex_adapt')
     assert not native.sidechain.predicted_frame and native.stage4.weight_aa_pre==0
-    generated=transition_config(ckpt,phase='sc_adapt',stage4_overrides={'weight_physical':0.02})
+    native_ckpt={'integrated':dict(integrated_record(model),
+        effective_config=native.to_dict())}
+    generated=transition_config(native_ckpt,phase='sc_adapt',stage4_overrides={'weight_physical':0.02})
     assert generated.sidechain.predicted_frame and generated.sidechain.predicted_mask
     assert not generated.sidechain.force_gt_type_logits
     assert generated.stage4.weight_aa_pre==generated.stage4.weight_aa_revision==1

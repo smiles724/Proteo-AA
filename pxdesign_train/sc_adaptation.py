@@ -12,7 +12,10 @@ PROTOCOL = "sc_only_v1"
 DEFAULTS = dict(adaptation_protocol="legacy", native_fraction=0.5,
     paired_fraction=0.5, full_sample_fraction=0.0,
     reconstruction_sigmas="0.4,1,2,4", reconstruction_max_ca_error=3.0,
-    reconstruction_max_bond_error=0.3)
+    reconstruction_max_bond_error=0.3, monomer_fraction=1.,
+    symmetry_aware_coordinates=False, geometry_calibration_path="", geometry_calibration_sha256="",
+    chemistry_registry_sha256="", geometry_ramp_steps=200,
+    weight_bond_sc=0., weight_bond_attach=0., weight_angle_sc=0., weight_angle_attach=0.)
 
 
 def configure_runtime(config):
@@ -28,7 +31,7 @@ def validate_phase(config):
     """Resolve the whole destination objective without changing SC architecture."""
     cfg = config.stage4
     phase = str(cfg.phase)
-    if phase not in ("sc_warmup", "sc_complex_adapt", "sc_adapt"):
+    if phase not in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt"):
         raise ValueError("SC-only recipes require an SC-only phase")
     for key, value in DEFAULTS.items():
         if key not in cfg:
@@ -43,6 +46,20 @@ def validate_phase(config):
         raise ValueError("Physical coefficient must be finite and nonnegative")
     if phase == "sc_warmup" and cfg.weight_physical:
         raise ValueError("sc_warmup forbids physical loss")
+    geometry_weights = [float(cfg["weight_"+name]) for name in ("bond_sc","bond_attach","angle_sc","angle_attach")]
+    if any(not math.isfinite(x) or x < 0 for x in geometry_weights):
+        raise ValueError("Geometry weights must be finite and nonnegative")
+    if phase != "sc_geometry_repair" and any(geometry_weights):
+        raise ValueError("Four-term geometry objective belongs only to sc_geometry_repair")
+    if phase == "sc_geometry_repair":
+        if cfg.weight_physical or cfg.monomer_fraction != 1 or cfg.native_fraction != 1 or cfg.paired_fraction or cfg.full_sample_fraction:
+            raise ValueError("Repair requires native-only monomers and disabled legacy physical/clash loss")
+        if cfg.geometry_ramp_steps < 0:
+            raise ValueError("Geometry ramp must be nonnegative")
+        from .sidechain.repair_calibration import load_calibration
+        calibration = load_calibration(str(cfg.geometry_calibration_path), str(cfg.geometry_calibration_sha256))
+        if cfg.chemistry_registry_sha256 != calibration['chemistry_registry_sha256']:
+            raise ValueError("Repair registry identity mismatch")
     if cfg.weight_aa_pre or cfg.weight_aa_revision:
         raise ValueError("SC-only phases require zero AA objective coefficients")
     for key in ("weight_mse", "weight_lddt", "weight_disto", "weight_bb_post", "weight_aa", "weight_aa_post"):

@@ -3,7 +3,7 @@
 set -euo pipefail
 REPO=${PROTEOAA_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 PYTHON_BIN=${PYTHON_BIN:-python}
-PHASE=${SC_PHASE:?Set SC_PHASE=sc_complex_adapt or sc_adapt}
+PHASE=${SC_PHASE:?Set SC_PHASE=sc_geometry_repair, sc_complex_adapt, or sc_adapt}
 OUTPUT_DIR=${OUTPUT_DIR:?Set a distinct OUTPUT_DIR}
 export PYTHONPATH="$REPO:$REPO/PXDesign:$REPO/Protenix:${FAMPNN_ROOT:-$REPO/../Protein Project/fampnn}${PYTHONPATH:+:$PYTHONPATH}"
 export PROTENIX_ROOT_DIR=${PROTENIX_ROOT_DIR:-/hai/scratch/yfsun/protenix_data}

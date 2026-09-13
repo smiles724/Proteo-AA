@@ -44,6 +44,8 @@ def sidechain_global_frame_aligned_loss(
     mask: torch.Tensor,         # [..., L, A] bool/float
     eps: float = 1e-6,
     row_weight: Optional[torch.Tensor] = None,   # [B] EDM lambda(sigma), or None
+    symmetry_aware: bool = False,
+    residue_types: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Masked MSE to GT local geometry attached to a stop-grad frame.
 
@@ -92,7 +94,12 @@ def sidechain_global_frame_aligned_loss(
         t = torch.where(frame_valid[..., None], t, 0.)
         clean_target = torch.where(mask[..., None], gt_local.float(), 0.)
         target = to_global(clean_target, R, t)
-        delta = torch.where(mask[..., None], pred_global.float() - target, 0.)
+        prediction = pred_global.float()
+        if symmetry_aware:
+            if residue_types is None:
+                raise ValueError("Symmetry-aware supervision requires residue identities")
+            prediction = symmetry_align_prediction(prediction, target, mask, residue_types)
+        delta = torch.where(mask[..., None], prediction - target, 0.)
         se = delta.square().sum(dim=-1)
     m = mask.to(se.dtype).expand_as(se)
     if row_weight is not None:
@@ -103,3 +110,34 @@ def sidechain_global_frame_aligned_loss(
         w = row_weight.to(se.dtype).view(-1, *([1] * (se.dim() - 1))).expand_as(se)
         m = m * w
     return (se * m).sum() / (m.sum() + eps)
+
+
+def symmetry_align_prediction(prediction, target, mask, residue_types):
+    """Select a whole-residue automorphism using the same observed target atoms.
+
+    Swaps of aromatic ring branches are coupled. Incomplete observations stay
+    attached to their target slots; both candidates score exactly that same set.
+    No nearest-atom matching and no changes to atom/residue/sample averaging.
+    """
+    from .instantiate import STD_AA_3, sidechain_atoms
+    from .metrics import SWAPS
+    best = prediction
+    error = torch.where(mask, (prediction-target).square().sum(-1), 0.).sum(-1)
+    for name, pairs in SWAPS.items():
+        permutation = list(range(prediction.shape[-2]))
+        names = sidechain_atoms(name)
+        representable = True
+        for first, second in pairs:
+            a,b = names.index(first), names.index(second)
+            if max(a, b) >= len(permutation):
+                representable = False
+                break
+            permutation[a],permutation[b] = permutation[b],permutation[a]
+        if not representable:
+            continue
+        alternate = prediction[...,permutation,:]
+        score = torch.where(mask, (alternate-target).square().sum(-1), 0.).sum(-1)
+        choose = (residue_types == STD_AA_3.index(name)) & (score < error)
+        best = torch.where(choose[...,None,None],alternate,best)
+        error = torch.where(choose,score,error)
+    return best

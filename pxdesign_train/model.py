@@ -1071,7 +1071,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                     input_feature_dict[key] = torch.where(valid, idx, -1)
                 input_feature_dict["packing_context_atom_mask"] = observed
         if (getattr(self, "aa_backend", "mlp") == "fampnn"
-                and (self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt")
+                and (self.configs.stage4.phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt")
                      or (sc_adaptation and source != "full_sample"))
                 and self.training and getattr(self.configs.stage4, "native_sc_augmentation", False)):
             from .sc_augmentation import augment_native_sc_inputs
@@ -1098,7 +1098,7 @@ class ProtenixDesignTrain(ProtenixDesign):
         if getattr(self, "aa_backend", "mlp") == "fampnn" and N_sample != 1:
             raise ValueError("FAMPNN pack/refine requires one diffusion sample; use gradient accumulation")
 
-        if getattr(self, "aa_backend", "mlp") == "fampnn" and self.configs.stage4.phase in ("sc_warmup", "sc_complex_adapt"):
+        if getattr(self, "aa_backend", "mlp") == "fampnn" and self.configs.stage4.phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt"):
             from pxdesign_train.stage4 import supervised_sc_forward
             return supervised_sc_forward(self,input_feature_dict,label_dict,s_inputs,s,z)
 
@@ -2120,6 +2120,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             if (
                 fR is not None and ft is not None and ctx_atoms is not None
                 and self.sc_mismatch_loss != "none"
+                and getattr(self.configs.stage4, "phase", "") != "sc_geometry_repair"
             ):
                 B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
                 ctx_xyz, ctx_m, ctx_g = ctx_atoms
@@ -2165,7 +2166,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             if (
                 fR is not None and ft is not None and ctx_atoms is not None
                 and (float(getattr(self, "sc_pack_weight", 0.0)) > 0.0
-                     or getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1")
+                     or (getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1"
+                         and getattr(self.configs.stage4, "phase", "") != "sc_geometry_repair"))
             ):
                 B_, L_, A_ = y_g.shape[0], y_g.shape[1], y_g.shape[2]
                 ctx_xyz, ctx_m, ctx_g = ctx_atoms

@@ -17,6 +17,11 @@ if [[ -n ${RESUME_CHECKPOINT:-} ]]; then
 else
   : "${ACCEPTED_CHECKPOINT:?Set the accepted preceding-phase integrated checkpoint}"
   CHECKPOINT_ARGS=(--accepted-checkpoint "$ACCEPTED_CHECKPOINT" --phase "$PHASE")
+  if [[ "$PHASE" == sc_complex_adapt ]]; then
+    : "${SC_REPAIR_ACCEPTANCE:?Set SC_REPAIR_ACCEPTANCE to the accepted repair decision}"
+    : "${SC_REPAIR_FINAL_TEST:?Set SC_REPAIR_FINAL_TEST to the completed post-selection final-test artifact}"
+    CHECKPOINT_ARGS+=(--repair-acceptance "$SC_REPAIR_ACCEPTANCE" --repair-final-test "$SC_REPAIR_FINAL_TEST")
+  fi
 fi
 exec "$PYTHON_BIN" "$REPO/scripts/training/train_sc_adaptation.py" \
   "${CHECKPOINT_ARGS[@]}" --output-dir "$OUTPUT_DIR" "$@"

@@ -1,0 +1,234 @@
+{
+  "partition": "train",
+  "items": [
+    {
+      "path": "native-0000.pt",
+      "sha256": "d81d5bed5846f7b67fcc89cf39caf6436b398646dcd6978673bb39a70e943025",
+      "sample_id": "1o06_1_A0",
+      "pdb_id": "1o06",
+      "seed": 910000
+    },
+    {
+      "path": "native-0001.pt",
+      "sha256": "f563b1f4695c1a49fc018dfda628255cca0542a82e5c9c1d038775a3445b2559",
+      "sample_id": "1o4y_1_A0",
+      "pdb_id": "1o4y",
+      "seed": 910001
+    },
+    {
+      "path": "native-0002.pt",
+      "sha256": "59c1f50f68765ad110b5e0e33d71dffe90fc4173556e7edff3683a8bfc150ba0",
+      "sample_id": "1spj_1_A0",
+      "pdb_id": "1spj",
+      "seed": 910002
+    },
+    {
+      "path": "native-0003.pt",
+      "sha256": "901d1afb04d1974caf0df30f64469659405056d25b83cb522eae63fcddb8e49d",
+      "sample_id": "2o2x_1_A0",
+      "pdb_id": "2o2x",
+      "seed": 910003
+    },
+    {
+      "path": "native-0004.pt",
+      "sha256": "9a6ee1d2807be3d44cad4381e71e4e50dedc09951499c0d6fa4326abe6a9352c",
+      "sample_id": "2oih_1_B0",
+      "pdb_id": "2oih",
+      "seed": 910004
+    },
+    {
+      "path": "native-0005.pt",
+      "sha256": "eab64a785d59961654732b814cfc7841638d7be6e46ffcb974de0e9df77c262a",
+      "sample_id": "2p4x_1_A0",
+      "pdb_id": "2p4x",
+      "seed": 910005
+    },
+    {
+      "path": "native-0006.pt",
+      "sha256": "e8f78a1dd63e7ee8d687e381ae7b9ae73bc6ca0b99158293eedd204cee2c21a3",
+      "sample_id": "2rjy_1_A0",
+      "pdb_id": "2rjy",
+      "seed": 910006
+    },
+    {
+      "path": "native-0007.pt",
+      "sha256": "8e81f466582cda086cb21a071abede3b88ce5c66a8828719b35f6cc89ec29a5c",
+      "sample_id": "2vxz_1_A0",
+      "pdb_id": "2vxz",
+      "seed": 910007
+    },
+    {
+      "path": "native-0008.pt",
+      "sha256": "9eccbdb1029eaee5efc6210f6e32f1b1dc5c3442ad7d307db9f2c97b1cf7d6ac",
+      "sample_id": "3d8p_1_A0",
+      "pdb_id": "3d8p",
+      "seed": 910008
+    },
+    {
+      "path": "native-0009.pt",
+      "sha256": "7d5e9eca6fb9e7663893fc604a5ab7dc6f0d31b3eda41a7a9ae91af04cabb079",
+      "sample_id": "3e85_1_A0",
+      "pdb_id": "3e85",
+      "seed": 910009
+    },
+    {
+      "path": "native-0010.pt",
+      "sha256": "4c10e3fde30ff753fe0904b1e0439a79a5dcfcd646c645df270dbcc79516db9c",
+      "sample_id": "3eek_1_A0",
+      "pdb_id": "3eek",
+      "seed": 910010
+    },
+    {
+      "path": "native-0011.pt",
+      "sha256": "2723e8d6ffaeb3b6fb225dc63425ab064c6847c12f9c134f1bc992b47f4a1b8f",
+      "sample_id": "3eko_1_A0",
+      "pdb_id": "3eko",
+      "seed": 910011
+    },
+    {
+      "path": "native-0012.pt",
+      "sha256": "9fb645cce67a1cbcff9a5db9da4ddd8b65e897f34172f15f3be349f05328b383",
+      "sample_id": "3ibn_1_A0",
+      "pdb_id": "3ibn",
+      "seed": 910012
+    },
+    {
+      "path": "native-0013.pt",
+      "sha256": "b2ba3ad61786a462e6ea70c6e326e932218002f5e69b5b23435a968fe58ca578",
+      "sample_id": "3iof_1_A0",
+      "pdb_id": "3iof",
+      "seed": 910013
+    },
+    {
+      "path": "native-0014.pt",
+      "sha256": "bb156e9e818545b44df03732f0e29c89818a742cd2b2bb89c665fd7f7920c0fe",
+      "sample_id": "3p76_1_A0",
+      "pdb_id": "3p76",
+      "seed": 910014
+    },
+    {
+      "path": "native-0015.pt",
+      "sha256": "5a69dfcf6d72ff080ad3257a6de4331fad64ee04e86efb4d24d4ca59754937e7",
+      "sample_id": "4jin_1_A0",
+      "pdb_id": "4jin",
+      "seed": 910015
+    },
+    {
+      "path": "native-0016.pt",
+      "sha256": "f9817a7c72020ae48af74605dfcdf6e0ef51eca64dded6211308eb7a1c25b26d",
+      "sample_id": "4nwy_1_A0",
+      "pdb_id": "4nwy",
+      "seed": 910016
+    },
+    {
+      "path": "native-0017.pt",
+      "sha256": "9c822e08c329d0dffc46afa05a94ad3b46dbaa373fb908585698063b351a6342",
+      "sample_id": "4wok_1_A0",
+      "pdb_id": "4wok",
+      "seed": 910017
+    },
+    {
+      "path": "native-0018.pt",
+      "sha256": "d738bb3fa7fc420ebb3ceccbbacedb7e29796db182e4f7bb8b6a1c6ec85052f9",
+      "sample_id": "5c6x_1_A0",
+      "pdb_id": "5c6x",
+      "seed": 910018
+    },
+    {
+      "path": "native-0019.pt",
+      "sha256": "44045851738078c2d3007de3093f3d38cc505008cc3ab3e80d47a06e96cc5dda",
+      "sample_id": "5ki1_1_A0",
+      "pdb_id": "5ki1",
+      "seed": 910019
+    },
+    {
+      "path": "native-0020.pt",
+      "sha256": "bb3bd098eb6c7e03f3d40386652a623af71c6b653be45700b50475f6d65dc7cb",
+      "sample_id": "5q8v_1_A0",
+      "pdb_id": "5q8v",
+      "seed": 910020
+    },
+    {
+      "path": "native-0021.pt",
+      "sha256": "4b093be5d7863e7a3a0f9c07069e756716c126dede5778185754927f649dd604",
+      "sample_id": "5rju_1_A0",
+      "pdb_id": "5rju",
+      "seed": 910021
+    },
+    {
+      "path": "native-0022.pt",
+      "sha256": "93cecab563f6ac5c0d2a6ed3da1569be4c3e1544820c411df1fcda9f2efc44bd",
+      "sample_id": "5rkn_1_A0",
+      "pdb_id": "5rkn",
+      "seed": 910022
+    },
+    {
+      "path": "native-0023.pt",
+      "sha256": "eb43ca06a12eff705ded1ee52c1a6e623e7dbb98493a315be3f2aada48e81887",
+      "sample_id": "6ez7_1_A0",
+      "pdb_id": "6ez7",
+      "seed": 910023
+    },
+    {
+      "path": "native-0024.pt",
+      "sha256": "6b7fc2a32542723d9e4fbbfe820efe6e5c51ed758864e9027c7afd6a3834f2d5",
+      "sample_id": "6kkf_1_A0",
+      "pdb_id": "6kkf",
+      "seed": 910024
+    },
+    {
+      "path": "native-0025.pt",
+      "sha256": "0049ce4219d32de8362872c639d7dfea9fe1e567b0562427902183fd72a3ffa3",
+      "sample_id": "6o36_1_A0",
+      "pdb_id": "6o36",
+      "seed": 910025
+    },
+    {
+      "path": "native-0026.pt",
+      "sha256": "6fb9c7f939255e65e23364d5866ca393cceb6f86ba0f2d0058a3b95eebb3ffa8",
+      "sample_id": "6qen_1_A0",
+      "pdb_id": "6qen",
+      "seed": 910026
+    },
+    {
+      "path": "native-0027.pt",
+      "sha256": "be6cda22b46192094c385343b50a416e0303cd54298c0a1a5e2ef4782715b53f",
+      "sample_id": "6x4o_1_A0",
+      "pdb_id": "6x4o",
+      "seed": 910027
+    },
+    {
+      "path": "native-0028.pt",
+      "sha256": "19fd38845f3992ca13091e2a6b1b5da30349c0cb17e2ee3134efa5f387561db3",
+      "sample_id": "6yiy_1_A0",
+      "pdb_id": "6yiy",
+      "seed": 910028
+    },
+    {
+      "path": "native-0029.pt",
+      "sha256": "fa9ac20ec80e46e9bd4a54c3d4ac2c57aefde62a490517585b96607868a41554",
+      "sample_id": "7e02_1_A0",
+      "pdb_id": "7e02",
+      "seed": 910029
+    },
+    {
+      "path": "native-0030.pt",
+      "sha256": "b518edaae9223c75f879e18a9b7a72b9b5b57d5e8abbc4d9327c2267e3a9282f",
+      "sample_id": "7kgx_1_A0",
+      "pdb_id": "7kgx",
+      "seed": 910030
+    },
+    {
+      "path": "native-0031.pt",
+      "sha256": "692d330cbf953c0043e9966cd686ac15db034946a68ed65bfdde4cabf920cc5c",
+      "sample_id": "7ndk_1_A0",
+      "pdb_id": "7ndk",
+      "seed": 910031
+    }
+  ],
+  "validation_manifest_sha256": "db942ffb83d2316d6f74157342a8944f178fe2a223ad160d3cb4bbcfc710f671",
+  "final_test_manifest_sha256": "1353f55619da7338fced29d500e33b97e356dfcad9d6a3db0df357823c5a1f31",
+  "train_manifest_sha256": "a86342988b820d22a7a58fa45d2821ac2e56c1f874b8d2919847096f5ce78d01",
+  "donor_pretraining_independence": false,
+  "final_test_origin": "PDB holdout from donor training; repair-only holdout"
+}

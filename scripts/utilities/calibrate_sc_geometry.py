@@ -19,7 +19,7 @@ from pxdesign_train.sidechain.frames import to_global
 from pxdesign_train.runner.sc_stream import sha256_file
 
 
-def calibrate(manifest):
+def calibrate(manifest, sample_root=None):
     manifest=Path(manifest)
     data=json.loads(manifest.read_text())
     if data.get('partition') != 'train' or not data['items']:
@@ -27,7 +27,7 @@ def calibrate(manifest):
     sums={name:[0,0.,0.] for name in TERM_CLASSES}
     ids=[]
     for item in data['items']:
-        path=manifest.parent/item['path']
+        path=(Path(sample_root).resolve() if sample_root else manifest.parent)/item['path']
         if sha256_file(path) != item['sha256']: raise ValueError('Calibration sample changed')
         batch=torch.load(path,map_location='cpu',weights_only=False)
         if batch['sample_id'] != item['sample_id']: raise ValueError('Calibration sample ID mismatch')
@@ -76,8 +76,9 @@ def reference_comparison():
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest',required=True);p.add_argument('--output',required=True)
+    p.add_argument('--sample-root', help='Directory containing the manifest native-*.pt cache')
     a=p.parse_args()
-    result=calibrate(a.manifest);result['legacy_reference_comparison']=reference_comparison()
+    result=calibrate(a.manifest,a.sample_root);result['legacy_reference_comparison']=reference_comparison()
     with open(a.output,'x') as f: yaml.safe_dump(result,f,sort_keys=False)
     print(yaml.safe_dump(result,sort_keys=False))
 

@@ -28,10 +28,8 @@ def geometry_values(coords, chemistry, kind, *, active=None):
         return (points[..., 0, :] - points[..., 1, :]).norm(dim=-1)
     u, v = points[..., 0, :] - points[..., 1, :], points[..., 2, :] - points[..., 1, :]
     nu, nv = u.norm(dim=-1), v.norm(dim=-1)
-    checked = chemistry.angle_valid if active is None else torch.broadcast_to(active, chemistry.angle_valid.shape)
-    if (checked & ((nu <= 1e-8) | (nv <= 1e-8))).any():
-        raise ValueError('angle has a zero-length arm')
-    return ((u*v).sum(-1) / (nu*nv).clamp_min(1e-16)).clamp(-1., 1.)
+    regular = ((u*v).sum(-1) / (nu*nv).clamp_min(1e-16)).clamp(-1., 1.)
+    return torch.where((nu > 1e-8) & (nv > 1e-8), regular, torch.zeros_like(regular))
 
 
 OBJECTIVE_VERSION = 'sc_geometry_v1'
@@ -139,7 +137,12 @@ def bond_violation_loss(coords,bond_idx,ideal_lengths,*,tolerance,scale,valid_ma
 
 def angle_violation_loss(coords,angle_idx,cos_min,cos_max,*,scale,valid_mask,subject_mask,group_id,
                          eps=1e-8,term_mask=None,return_counts=False):
-    """Supplied cosine-space helper; undefined active angles fail explicitly."""
+    """Cosine-space helper; collapsed arms remain scored with a finite safeguard.
+
+    A generated zero-length arm must not disappear from the denominator. Its
+    cosine is evaluated through the clamped denominator, while bond constraints
+    provide the direct restoring force for the collapsed atoms.
+    """
     eps = _scalar(eps,'eps',positive=True)
     with torch.autocast(device_type=coords.device.type,enabled=False):
         xyz = _inputs(coords,valid_mask,subject_mask,group_id)
@@ -150,8 +153,8 @@ def angle_violation_loss(coords,angle_idx,cos_min,cos_max,*,scale,valid_mask,sub
         unit = _table(scale,active,'angle scale',positive=True)
         u,v = points[...,0,:]-points[...,1,:],points[...,2,:]-points[...,1,:]
         nu,nv = u.norm(dim=-1),v.norm(dim=-1)
-        if (active & ((nu<=eps)|(nv<=eps))).any(): raise ValueError('angle has a zero-length arm')
-        cosine = ((u*v).sum(-1)/(nu*nv).clamp_min(eps*eps)).clamp(-1.,1.)
+        regular = ((u*v).sum(-1)/(nu*nv).clamp_min(eps*eps)).clamp(-1.,1.)
+        cosine = torch.where((nu > eps) & (nv > eps), regular, torch.zeros_like(regular))
         return _residue_mean(((torch.relu(low-cosine)+torch.relu(cosine-high))/unit).square(),active,owners,return_counts=return_counts)
 
 

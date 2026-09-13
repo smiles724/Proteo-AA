@@ -25,13 +25,19 @@ PDBs are held out as a repair-only final test set. This final set is separate
 from repair training/validation but is not independent of the warm-up donor's
 pretraining, as recorded by the manifest.
 
-After A/B/C finish, `scripts/utilities/select_sc_geometry_repair.py` compares C
-with symmetry-only arm B at matching updates and fixed stochastic inputs. It
-requires a substantial pooled 3x-native-RMS covalent-failure reduction while
-preserving the explicitly named 20-degree chi metrics, then writes an
-`sc_geometry_repair_acceptance_v1` record. `sc_complex_adapt` requires that
-record and verifies its selected checkpoint hash. The selector never reads the
-final-test manifest.
+Before A/B/C selection, `evaluate_sc_geometry_repair_baseline.py` evaluates the
+materialized 46k EMA on the same fixed 308-protein panel. The selector compares C
+with both that donor and symmetry-only arm B at matching updates and stochastic
+inputs. It requires a substantial pooled 3x-native-RMS covalent-failure reduction,
+strict improvement in internal SC bonds against both baselines, bounded regression
+in every other class, and preserved explicitly named pooled 20-degree chi metrics.
+The selector never reads the final-test manifest.
+
+After selection, `evaluate_sc_geometry_repair_final.py` evaluates the selected
+checkpoint once on the reserved 128-protein final test and writes an immutable
+`sc_geometry_repair_final_test_v1` report. `sc_complex_adapt` requires both that
+report and the `sc_geometry_repair_acceptance_v1` decision, and verifies their
+checkpoint, acceptance, and final-manifest hashes.
 
 The native RMS calibration from this registry is:
 
@@ -95,7 +101,23 @@ complex adaptation from that checkpoint.
 
 ```bash
 export PROTEOAA_REPO=/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases
-export ACCEPTED_CHECKPOINT=/path/to/accepted_rigid_sc_warmup.pt
+export SC_REPAIR_GATE_DIR=/path/to/passed/gate
+sbatch scripts/training/slurm_sc_geometry_repair_arms_hai.sh
+sbatch scripts/training/slurm_eval_sc_geometry_repair_baseline_hai.sh
+
+# Submit selection after all three arms and the donor baseline complete, then
+# evaluate the selected checkpoint once on the reserved final test.
+export SC_REPAIR_RUN_ROOT=/path/to/arms_run
+export SC_REPAIR_DONOR_BASELINE=/path/to/donor_baseline.json
+sbatch scripts/training/slurm_select_sc_geometry_repair_hai.sh
+sbatch scripts/training/slurm_eval_sc_geometry_repair_final_hai.sh
+
+# A 2k checkpoint may be extended to 5k without changing its data identity.
+sbatch scripts/training/slurm_extend_sc_geometry_repair_hai.sh
+
+export ACCEPTED_CHECKPOINT=/path/to/accepted_geometry_repair.pt
+export SC_REPAIR_ACCEPTANCE="$SC_REPAIR_RUN_ROOT/acceptance.json"
+export SC_REPAIR_FINAL_TEST="$SC_REPAIR_RUN_ROOT/final_test/final_test.json"
 bash scripts/training/slurm_sc_complex_adapt_hai.sh --dry-run
 sbatch scripts/training/slurm_sc_complex_adapt_hai.sh
 
@@ -117,8 +139,10 @@ sbatch scripts/training/slurm_sc_complex_adapt_hai.sh
 `FAMPNN_ROOT`, `SC_PHASE`, `OUTPUT_DIR` and `ACCEPTED_CHECKPOINT` (or
 `RESUME_CHECKPOINT`) under another scheduler. Data roots/caches, mixture fractions,
 LR, accumulation, seed, budgets and intervals have explicit CLI overrides; use
-`train_sc_adaptation.py --help`. Unknown overrides fail. Exact resume rejects
-changed recipe arguments; a phase transition resets optimizer/counters and
+`train_sc_adaptation.py --help`. Unknown overrides fail. Exact resume permits
+increasing only the runtime step budget. The data identity excludes runtime
+optimization and objective settings while retaining every input, partition,
+sampling, and seed setting. A phase transition resets optimizer/counters and
 preserves the recorded component architecture and weights. These initial scripts
 support one GPU with accumulation and explicitly reject distributed sampling.
 

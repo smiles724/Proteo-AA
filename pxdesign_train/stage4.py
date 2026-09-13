@@ -209,10 +209,22 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
         from .sidechain.repair_calibration import pack_native_geometry, load_calibration
         from .sidechain.packing_objective import native_geometry_repair_loss, geometry_diagnostics
         calibration = load_calibration(str(cfg.geometry_calibration_path), str(cfg.geometry_calibration_sha256))
-        coords, chemistry, native_observed = pack_native_geometry(feat, pack["sc_pred_global"], pack["sc_generation_mask"])
         requested = [name for name in ("bond_sc","bond_attach","angle_sc","angle_attach") if float(cfg["weight_"+name]) > 0]
-        repair_terms = native_geometry_repair_loss(coords, chemistry, calibration=calibration, terms=requested)
-        if not model.training:
+        eligible = sc_design & feat["sc_frame_valid"].bool()
+        # Coordinate-only arms do not need chemistry during training. A crop can
+        # also contain no canonical residue with a valid frame; keep that item in
+        # the coordinate reduction and report explicit zero geometry counts.
+        if eligible.any() and (requested or not model.training):
+            coords, chemistry, native_observed = pack_native_geometry(
+                feat, pack["sc_pred_global"], pack["sc_generation_mask"])
+            repair_terms = native_geometry_repair_loss(
+                coords, chemistry, calibration=calibration, terms=requested)
+        else:
+            zero = pack["sc_pred_global"].float().sum() * 0.
+            repair_terms = {name: zero for name in requested}
+            repair_terms["counts"] = {name: dict(constraints=zero.detach(),
+                residues=zero.detach(), items=zero.detach()) for name in requested}
+        if not model.training and eligible.any():
             from .sidechain.frames import to_global
             native_xyz = to_global(feat["sc_gt_local"].float(), feat["sc_frame_R"].float(), feat["sc_frame_t"].float())
             native_coords, _, native_observed = pack_native_geometry(feat, native_xyz, pack["sc_generation_mask"], native=True)

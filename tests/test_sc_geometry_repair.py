@@ -1,6 +1,8 @@
 """Repair objective contracts: chemistry, masks, reductions and warm starts."""
 from dataclasses import replace
 import math
+from pathlib import Path
+import sys
 from unittest.mock import patch
 import pytest
 import torch
@@ -104,11 +106,15 @@ def test_residue_then_item_reduction_and_term_mask():
     assert float(masked)==1.
 
 
-def test_zero_angle_arm_is_explicit_error():
-    coords=torch.zeros(1,3,3)
-    with pytest.raises(ValueError,match='zero-length'):
-        angle_violation_loss(coords,torch.tensor([[0,1,2]]),-.5,.5,scale=.1,
-            valid_mask=torch.ones(1,3,dtype=torch.bool),subject_mask=torch.ones(1,3,dtype=torch.bool),group_id=torch.zeros(1,3,dtype=torch.long))
+def test_zero_angle_arm_remains_in_denominator_with_finite_penalty():
+    coords=torch.zeros(1,3,3,requires_grad=True)
+    loss,counts=angle_violation_loss(coords,torch.tensor([[0,1,2]]),.5,1.,scale=.1,
+        valid_mask=torch.ones(1,3,dtype=torch.bool),subject_mask=torch.ones(1,3,dtype=torch.bool),
+        group_id=torch.zeros(1,3,dtype=torch.long),return_counts=True)
+    assert torch.isfinite(loss) and loss>0
+    assert int(counts['constraints'])==1
+    loss.backward()
+    assert torch.isfinite(coords.grad).all()
 
 
 def test_symmetry_couples_aromatic_branches_and_keeps_observed_denominator():
@@ -152,3 +158,31 @@ def test_all_donor_ema_weights_are_materialized():
     assert start['model']['aa_head.w']==torch.tensor([3.000001])
     assert 'optimizer' not in start and 'ema' not in start
     assert source['model']['sidechain_module.w']==2.
+
+
+def test_repair_data_identity_ignores_extension_budget_but_keeps_seed():
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'/'training'))
+    import train_sc_adaptation as driver
+    old=dict(hashes=['h'],settings=dict(recipe=dict(max_steps=2000,sc_lr=1e-5,
+        eval_interval=500,checkpoint_interval=500,seed=42,accumulation=8,
+        source_index='train.csv.gz')))
+    extended=dict(hashes=['h'],settings=dict(recipe=dict(max_steps=5000,sc_lr=1e-5,
+        eval_interval=500,checkpoint_interval=500,seed=42,accumulation=8,
+        source_index='train.csv.gz')))
+    assert driver.normalized_repair_data_identity(old)==driver.normalized_repair_data_identity(extended)
+    extended['settings']['recipe']['seed']=43
+    assert driver.normalized_repair_data_identity(old)!=driver.normalized_repair_data_identity(extended)
+
+
+def test_selector_requires_internal_bond_improvement_and_bounds_other_classes():
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'/'utilities'))
+    from select_sc_geometry_repair import TERMS,classwise_acceptance
+    donor={name:dict(rate=.20) for name in TERMS}
+    control={name:dict(rate=.25) for name in TERMS}
+    candidate={name:dict(rate=.19) for name in TERMS}
+    assert all(row['passed'] for row in classwise_acceptance(donor,control,candidate,.02).values())
+    candidate['bond_sc']['rate']=.21
+    assert not classwise_acceptance(donor,control,candidate,.02)['bond_sc']['passed']
+    candidate['bond_sc']['rate']=.19
+    candidate['angle_attach']['rate']=.221
+    assert not classwise_acceptance(donor,control,candidate,.02)['angle_attach']['passed']

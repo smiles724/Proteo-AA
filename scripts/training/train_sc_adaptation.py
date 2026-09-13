@@ -14,6 +14,30 @@ import sys
 import train_protenix_monomer as base
 
 
+_REPAIR_RUNTIME_RECIPE_KEYS = {
+    'max_steps', 'sc_lr', 'warmup_steps', 'num_workers', 'physical_weight',
+    'eval_interval', 'checkpoint_interval', 'donor_weights', 'repair_arm',
+    'geometry_ramp_steps', 'weight_bond_sc', 'weight_bond_attach',
+    'weight_angle_sc', 'weight_angle_attach',
+}
+
+
+def repair_data_recipe(recipe):
+    """Keep only settings that can change sampled train/evaluation examples."""
+    return {key: value for key, value in dict(recipe).items()
+            if key not in _REPAIR_RUNTIME_RECIPE_KEYS}
+
+
+def normalized_repair_data_identity(identity):
+    """Normalize identities written before runtime budgets were separated."""
+    from pxdesign_train.checkpoints import plain_config
+    value = plain_config(identity)
+    settings = value.get('settings', {})
+    if 'recipe' in settings:
+        settings['recipe'] = repair_data_recipe(settings['recipe'])
+    return value
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     source = p.add_mutually_exclusive_group(required=True)
@@ -26,6 +50,7 @@ def parser():
     p.add_argument("--calibration-path")
     p.add_argument("--final-test-index")
     p.add_argument("--repair-acceptance")
+    p.add_argument("--repair-final-test")
     p.add_argument("--geometry-ramp-steps", type=int)
     for name in ("bond-sc","bond-attach","angle-sc","angle-attach"):
         p.add_argument("--weight-"+name,type=float)
@@ -79,11 +104,25 @@ def resolve(options):
         if options.phase == "sc_complex_adapt":
             if not options.repair_acceptance:
                 raise ValueError("sc_complex_adapt requires --repair-acceptance from the fixed-panel selector")
+            if not options.repair_final_test:
+                raise ValueError("sc_complex_adapt requires --repair-final-test from post-selection evaluation")
             acceptance = json.loads(Path(options.repair_acceptance).read_text())
             if acceptance.get('schema') != 'sc_geometry_repair_acceptance_v1' or not acceptance.get('approved'):
                 raise ValueError("Repair acceptance artifact is missing approval")
             if acceptance.get('selected', {}).get('checkpoint_sha256') != sha256_file(path):
                 raise ValueError("Repair acceptance selects a different checkpoint")
+            final_test = json.loads(Path(options.repair_final_test).read_text())
+            if (final_test.get('schema') != 'sc_geometry_repair_final_test_v1'
+                    or not final_test.get('completed')):
+                raise ValueError("Repair final-test artifact is incomplete")
+            if final_test.get('selected_checkpoint_sha256') != sha256_file(path):
+                raise ValueError("Repair final-test artifact evaluated a different checkpoint")
+            if final_test.get('acceptance_sha256') != sha256_file(options.repair_acceptance):
+                raise ValueError("Repair final-test artifact belongs to a different acceptance decision")
+            selected_recipe = dict(saved.training.sc_adaptation_recipe)
+            if (final_test.get('final_test_manifest_sha256')
+                    != sha256_file(selected_recipe['final_test_index'])):
+                raise ValueError("Repair final-test manifest differs from the selected checkpoint")
         if not saved.stage4.native_sc_augmentation:
             raise ValueError("Accepted donor must record native rigid augmentation")
         recipe = dict(phase=options.phase, seed=42, max_steps=1000, sc_lr=1e-5,
@@ -274,7 +313,6 @@ def build_repair_data(config, recipe, output, args):
     """Monomer-only path: never construct, open or fingerprint a PINDER source."""
     import pandas as pd
     from pxdesign_train.runner.sc_stream import fingerprint, SCStream, CoordinatePanel, sha256_file
-    from pxdesign_train.checkpoints import plain_config
     from pxdesign_train.sidechain.repair_calibration import load_calibration
     cache = output/'cache'; cache.mkdir(parents=True,exist_ok=True)
     source = Path(args.source_index) if args.source_index else base._source_index_path(Path(args.data_root))
@@ -307,10 +345,11 @@ def build_repair_data(config, recipe, output, args):
         calibration_pdbs=len(calibration_ids),no_pdb_overlap=True,
         donor_pretraining_independence=False,homology_independence=False)
     data = fingerprint([filtered,Path(eval_index),final],dict(source_hashes=sorted(inputs['files'].values()),
-        recipe=recipe,audit=audit,calibration_sha256=config.stage4.geometry_calibration_sha256))
+        recipe=repair_data_recipe(recipe),audit=audit,calibration_sha256=config.stage4.geometry_calibration_sha256))
     identity = dict(hashes=sorted(data['files'].values()),settings=data['settings'])
     saved = getattr(config.training,'sc_data_identity',None)
-    if saved is not None and config.training.resume_checkpoint and plain_config(saved) != identity:
+    if (saved is not None and config.training.resume_checkpoint
+            and normalized_repair_data_identity(saved) != normalized_repair_data_identity(identity)):
         raise ValueError('Exact resume monomer dataset fingerprint differs')
     config.training.sc_data_identity = identity
     config.training.sc_adaptation_recipe = recipe

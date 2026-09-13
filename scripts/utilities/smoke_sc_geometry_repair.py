@@ -40,9 +40,11 @@ def verify_frozen_ema_start(model, checkpoint_path):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint',required=True);p.add_argument('--calibration-dir',required=True)
+    p.add_argument('--calibration-sample-dir',help='Directory containing frozen native-*.pt calibration batches')
     p.add_argument('--output',required=True);p.add_argument('--device',choices=['cpu','cuda'],default='cuda')
     a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
     cal=Path(a.calibration_dir).resolve()
+    samples=Path(a.calibration_sample_dir).resolve() if a.calibration_sample_dir else cal
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'training'))
     import train_sc_adaptation as driver
     from pxdesign_train.runner.trainer import PXDesignTrainer
@@ -60,7 +62,10 @@ def main():
     manifest=json.loads((cal/'manifest.json').read_text())
     batches=[]
     for item in manifest['items']:
-        batch=torch.load(cal/item['path'],map_location='cpu',weights_only=False)
+        sample_path=samples/item['path']
+        if sha256_file(sample_path) != item['sha256']:
+            raise ValueError(f'Calibration sample changed: {sample_path}')
+        batch=torch.load(sample_path,map_location='cpu',weights_only=False)
         if batch['input_feature_dict']['aa_clean'].numel() <= 160:
             batch['input_feature_dict'].update(backbone_source='native',input_seed=item['seed'])
             batches.append(batch)
@@ -100,10 +105,11 @@ def main():
         frozen_policy='ema_start_then_frozen',frozen_ema_parameters_verified=frozen_ema_parameters_verified,
         calibration_sha256=sha256_file(cal/'calibration.yaml'))
     (out/'gradient_weights.json').write_text(json.dumps(report,indent=2))
+    stream_batch=components.train_dataset[0]
     # Both disabled clash paths must be absent from the differentiable forward.
     with patch('pxdesign_train.sidechain.packing_objective.steric_clash_loss',side_effect=AssertionError('repair clash evaluated')), \
          patch('pxdesign_train.sidechain.physical.physical_loss',side_effect=AssertionError('legacy physical evaluated')):
-        loss=trainer.train_step(batches[0])
+        loss=trainer.train_step(stream_batch)
     assert trainer.step==1 and trainer.global_step==1 and not calls
     assert all(torch.isfinite(v) for v in loss.values())
     assert digest(model,True)!=sc_before and digest(model)==frozen
@@ -125,6 +131,7 @@ def main():
         if abs(value-repeated[key])>1e-6: raise AssertionError((key,value,repeated[key]))
     result=dict(passed=True,device=a.device,update={k:float(v) for k,v in loss.items()},
         validation=validation,frozen_sha256=frozen,checkpoint=path,weights=weights,
+        update_sample_id=stream_batch['sample_id'],
         frozen_ema_parameters_verified=frozen_ema_parameters_verified,
         finite_sc_gradients=True,no_fampnn_decoding=True,no_clash_objective=True,exact_validation_reload=True)
     (out/'gate.json').write_text(json.dumps(result,indent=2))

@@ -1,0 +1,67 @@
+chemistry_registry_sha256: f45bf3274d3a1137d18b4e3a42810658fe4806342fd96b20f2a73206ff789528
+calibration_manifest_sha256: c7fff465c3ae49c4677976b61e741d68f1e2ed022ed1cd99bbe09f59d5d744d3
+coordinate_units: angstrom
+angle_units: radians
+partition: train
+scale_definition: native_rms_deviation
+tolerance_multiplier: 3.0
+cosine_scale_floor: 0.0001
+pdb_ids:
+- 1o06
+- 1o4y
+- 1spj
+- 2o2x
+- 2oih
+- 2p4x
+- 2rjy
+- 2vxz
+- 3d8p
+- 3e85
+- 3eek
+- 3eko
+- 3ibn
+- 3iof
+- 3p76
+- 4jin
+- 4nwy
+- 4wok
+- 5c6x
+- 5ki1
+- 5q8v
+- 5rju
+- 5rkn
+- 6ez7
+- 6kkf
+- 6o36
+- 6qen
+- 6x4o
+- 6yiy
+- 7e02
+- 7kgx
+- 7ndk
+validation_manifest_sha256: db942ffb83d2316d6f74157342a8944f178fe2a223ad160d3cb4bbcfc710f671
+final_test_manifest_sha256: 1353f55619da7338fced29d500e33b97e356dfcad9d6a3db0df357823c5a1f31
+classes:
+  bond_sc:
+    count: 18537
+    signed_mean: -0.005438388284628797
+    rms: 0.03147227327487262
+  bond_attach:
+    count: 5871
+    signed_mean: 0.003300721530430241
+    rms: 0.01385594449250698
+  angle_sc:
+    count: 17462
+    signed_mean: 0.010601931995384855
+    rms: 0.0366892682331141
+  angle_attach:
+    count: 17963
+    signed_mean: 0.02531147960803427
+    rms: 0.04801422372392601
+legacy_reference_comparison:
+  bond:
+    max_abs_difference: 9.614215865716425e-05
+    rms_difference: 3.520371947787957e-05
+  angle:
+    max_abs_difference: 0.00010187183282894807
+    rms_difference: 3.319783579181626e-05

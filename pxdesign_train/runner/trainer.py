@@ -958,7 +958,7 @@ class PXDesignTrainer:
                     values = [row[prefix+metric] for row in per_protein if row.get(prefix+denominator, 0) > 0]
                     means[prefix+metric] = sum(values)/len(values) if values else 0.
                     means[prefix+metric+"_valid_proteins"] = float(len(values))
-        if getattr(self.configs.stage4, "phase", "") == "sc_geometry_repair":
+        if getattr(getattr(self.configs, "stage4", None), "phase", "") == "sc_geometry_repair":
             # Geometry diagnostics publish numerators and eligibility counts.
             # Aggregate those as set-wide quantities rather than per-protein
             # means, while retaining the per-protein rows above.

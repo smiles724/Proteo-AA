@@ -46,7 +46,7 @@ def parser():
     p.add_argument("--phase", choices=["sc_geometry_repair", "sc_complex_adapt", "sc_adapt"])
     p.add_argument("--output-dir", required=True)
     p.add_argument("--donor-weights", choices=["ema","raw"])
-    p.add_argument("--repair-arm", choices=["A","B","C","D","E"])
+    p.add_argument("--repair-arm", choices=["A","B","C","D","E","F"])
     p.add_argument("--calibration-path")
     p.add_argument("--final-test-index")
     p.add_argument("--repair-acceptance")

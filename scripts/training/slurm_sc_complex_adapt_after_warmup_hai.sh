@@ -14,6 +14,7 @@
 set -euo pipefail
 
 export PROTEOAA_REPO=${PROTEOAA_REPO:-/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases}
+export PYTHON_BIN=${PYTHON_BIN:-/hai/users/y/f/yfsun/miniconda3/envs/ml/bin/python}
 : "${WARMUP_JOB_ID:?Set WARMUP_JOB_ID to the completed sc_warmup Slurm job ID}"
 WARMUP_REPO=${WARMUP_REPO:-/hai/users/y/f/yfsun/Proteo-AA-sc-rigid-augmentation}
 WARMUP_LOG=${WARMUP_LOG:-$WARMUP_REPO/logs/training/official_pxdesign/sc-rigid-warmup-$WARMUP_JOB_ID.out}

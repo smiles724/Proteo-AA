@@ -212,6 +212,13 @@ def build_data(config, recipe, output):
 
 def main():
     options = parser().parse_args()
+    # Protenix resolves its CCD paths at import time. Establish the data root
+    # before checkpoint/config imports can transitively import Protenix.
+    bootstrap_data_root = options.data_root or os.environ.get(
+        "PROTENIX_ROOT_DIR", "/hai/scratch/yfsun/protenix_data"
+    )
+    os.environ.setdefault("PROTENIX_ROOT_DIR", bootstrap_data_root)
+    os.environ.setdefault("PROTENIX_DATA_ROOT_DIR", str(Path(bootstrap_data_root) / "common"))
     # Bootstrap imports only; do not construct data or a model before resolution.
     args = legacy_arguments(dict(phase=options.phase or "sc_adapt", monomer_fraction=.5, seed=42), options.output_dir)
     base._bootstrap_paths(args)
@@ -220,7 +227,6 @@ def main():
     config, recipe = resolve(options)
     from pxdesign_train.runner.sc_stream import seed_all
     seed_all(int(config.seed))
-    os.environ.setdefault("PROTENIX_ROOT_DIR", recipe.get("data_root", args.data_root))
     output = Path(options.output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     components = build_data(config, recipe, output)

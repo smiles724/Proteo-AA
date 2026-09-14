@@ -795,6 +795,12 @@ class PXDesignTrainer:
         # Same shapes either way -- SideChainEDM holds no parameters -- so
         # nothing about the weights reveals which objective produced them.
         "edm",
+        # Same argument again: template_sigma changes WHAT the module was trained
+        # to undo (a sampled perturbation of the template rather than a fixed
+        # one), adds no parameters, and leaves every tensor shape identical. A
+        # checkpoint from this arm warm-started into a fixed-sigma run would load
+        # cleanly and quietly mean something else.
+        "template_sigma",
     )
     SIDECHAIN_ADDITIVE_KEYS = ("a_bs_concat", "q_bs")
     SIDECHAIN_ARCH_KEYS = SIDECHAIN_LAYOUT_KEYS + SIDECHAIN_ADDITIVE_KEYS
@@ -809,12 +815,28 @@ class PXDesignTrainer:
         "edm_sigma_data", "edm_p_mean", "edm_p_std",
         "edm_sigma_min", "edm_sigma_max", "edm_infer_steps",
     )
+    TEMPLATE_SIGMA_HPARAM_KEYS = (
+        "template_sigma_p_mean", "template_sigma_p_std",
+        "template_sigma_min", "template_sigma_max", "template_sigma_infer",
+    )
 
     def _sidechain_edm_hparams(self) -> dict:
+        """Numeric ranges for whichever sampled-sigma arm is active.
+
+        Booleans alone cannot describe these arms: two runs that differ only in
+        sigma_max record identically under SIDECHAIN_ARCH_KEYS, and an evaluator
+        rebuilding the sampler from config defaults would score a checkpoint on a
+        range it never saw. Both arms get the same treatment for the same reason.
+        """
         sc = getattr(self.configs, "sidechain", None)
-        if sc is None or not getattr(sc, "edm", False):
+        if sc is None:
             return {}
-        return {k: float(getattr(sc, k)) for k in self.EDM_HPARAM_KEYS
+        keys = ()
+        if getattr(sc, "edm", False):
+            keys = self.EDM_HPARAM_KEYS
+        elif getattr(sc, "template_sigma", False):
+            keys = self.TEMPLATE_SIGMA_HPARAM_KEYS
+        return {k: float(getattr(sc, k)) for k in keys
                 if getattr(sc, k, None) is not None}
 
     def _check_sidechain_arch(self, ckpt: dict) -> None:

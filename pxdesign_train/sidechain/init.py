@@ -32,7 +32,7 @@ Two initializers live here:
   PREDICTED backbone, never on ground-truth side-chain coordinates, so the leakage
   rule holds.
 """
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -104,10 +104,36 @@ def templates_available() -> bool:
     return True
 
 
+def _broadcast_sigma(
+    sigma_T: Union[float, torch.Tensor], like: torch.Tensor
+) -> Union[float, torch.Tensor]:
+    """Shape a per-row sigma so it multiplies `like` [B, ..., A, 3] row-wise.
+
+    A float passes through untouched. A tensor must carry exactly one sigma per
+    ROW of `like` -- the same contract `edm.noise_sidechains` uses -- and is
+    reshaped to [B, 1, ..., 1] so every atom and coordinate of a row shares its
+    draw. Anything else is a caller bug rather than something to broadcast
+    creatively: silently pairing the wrong sigma with a row would corrupt both
+    the corruption scale and the time embedding that reports it.
+    """
+    if not torch.is_tensor(sigma_T):
+        return sigma_T
+    if sigma_T.numel() == 1:
+        return sigma_T.to(device=like.device, dtype=like.dtype).reshape(())
+    if sigma_T.numel() != like.shape[0]:
+        raise ValueError(
+            f"sigma_T has {sigma_T.numel()} entries but the template has "
+            f"{like.shape[0]} rows; expected one sigma per row"
+        )
+    return sigma_T.to(device=like.device, dtype=like.dtype).view(
+        -1, *([1] * (like.dim() - 1))
+    )
+
+
 def template_init_local(
     type_idx: torch.Tensor,
     mask: torch.Tensor,
-    sigma_T: float = DEFAULT_SIGMA_T,
+    sigma_T: Union[float, torch.Tensor] = DEFAULT_SIGMA_T,
     generator: Optional[torch.Generator] = None,
     backbone: Optional[torch.Tensor] = None,
     phi: Optional[torch.Tensor] = None,
@@ -126,10 +152,16 @@ def template_init_local(
             non-design tokens) are clamped and rely on `mask` being False there.
         mask: [..., A] bool valid-atom mask, A == MAX_SC. Leading dims must match
             `type_idx`.
-        sigma_T: template perturbation scale (Angstrom, per coordinate). Must stay
-            small relative to side-chain bond lengths: a large sigma_T washes out
-            the template's anisotropy, and with it the backbone-orientation signal
-            that F_hat y_T is supposed to carry.
+        sigma_T: template perturbation scale (Angstrom, per coordinate). A float
+            applies one scale to every row. A TENSOR whose numel matches the
+            leading (row) dimension of `mask` applies a per-row scale, which is
+            what `sidechain.template_sigma` uses to sample sigma per example --
+            see `_broadcast_sigma`. A large sigma_T washes out the template's
+            anisotropy, and with it the backbone-orientation signal that
+            F_hat y_T is supposed to carry, so a fixed value must stay small
+            relative to side-chain bond lengths; a SAMPLED sigma deliberately
+            visits large values too, and tells the model which it got via the
+            time embedding.
         generator: optional torch.Generator for reproducibility.
         phi, psi: [...] float radians from the PREDICTED backbone
             (`frames.backbone_phi_psi`), NaN where undefined. Shape must match
@@ -162,7 +194,7 @@ def template_init_local(
     noise = torch.randn(
         mu.shape, generator=generator, dtype=torch.float32, device=mu.device
     )
-    y = mu + sigma_T * noise
+    y = mu + _broadcast_sigma(sigma_T, mu) * noise
     # An atom is generated only if it is both requested by the caller's mask and
     # present in the residue's ideal template.
     valid = mask.to(torch.bool) & tmask

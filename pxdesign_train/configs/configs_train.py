@@ -331,6 +331,56 @@ training_configs["sidechain"] = {
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
     # template anisotropy that carries the orientation.
     "init_sigma_T": 0.3,
+    # ---- Template-centred SAMPLED sigma (the "A arm") ----
+    # Replaces the single fixed `init_sigma_T` with a per-example draw while
+    # keeping the corruption centred on the TEMPLATE. That is the one thing that
+    # distinguishes it from `edm`, which centres on the TARGET:
+    #
+    #     template_sigma :  S_phi(template + sigma*eps, sigma) -> GT
+    #     edm            :  S_phi(GT       + sigma*eps, sigma) -> GT
+    #
+    # Two consequences follow from that single difference.
+    #
+    # (1) Train and inference see the SAME distribution by construction -- both
+    #     perturb the same template -- so there is no sigma_max large enough /
+    #     small enough tension to tune. `edm` has that tension because it trains
+    #     around the target and deploys around the template, and closing it is
+    #     what `edm_sigma_max` is for.
+    #
+    # (2) EDM PRECONDITIONING MUST STAY OFF here. c_skip(sigma) -> 1 at small
+    #     sigma pins the denoiser to reproducing its own input; when that input
+    #     is the template -- ~2.18 A from the target however small sigma gets --
+    #     the model is structurally forbidden from being right, and
+    #     lambda(sigma) = 1/c_out^2 piles the loss weight onto exactly that
+    #     regime (32 at sigma=0.3 against 0.5 at sigma=2). That is the failure
+    #     `sidechain/edm.py` was written to escape, and re-entering it from the
+    #     other side would be the same mistake. So this arm runs the plain
+    #     x0-regression head and only borrows the sampled sigma.
+    #
+    # What it buys over the fixed 0.3: the time embedding stops being a dead
+    # constant, and the model sees corruptions spanning the real template error
+    # (~1.3 A local / 2.18 A measured) instead of one point 7x below it.
+    # Mutually exclusive with `edm` -- they are two different objectives, and
+    # running both would noise the template and then throw it away.
+    "template_sigma": False,
+    # Log-normal draw, EDM-style parameterisation but on the TEMPLATE offset
+    # scale rather than the data scale. exp(-0.693) = 0.5 A median, so +-1 sd
+    # spans roughly [0.18, 1.36] and +-2 sd reaches the clamp: the fixed 0.3
+    # this replaces sits just inside one sd, and the measured template error is
+    # inside two.
+    "template_sigma_p_mean": -0.693,
+    "template_sigma_p_std": 1.0,
+    "template_sigma_min": 0.05,
+    # Above ~3 A the template's anisotropy -- the orientation signal that
+    # motivated template init at all -- is gone, so draws past it buy nothing
+    # the Gaussian baseline does not already provide.
+    "template_sigma_max": 3.0,
+    # Deployment sigma for the single forward pass. This arm has no reverse
+    # trajectory to start, so inference picks ONE point on the range it trained
+    # over; the default reproduces the historical fixed-0.3 input exactly, which
+    # makes "same input, live time channel" the first comparison to run. Sweep
+    # it afterwards -- the model is valid across the whole range now.
+    "template_sigma_infer": 0.3,
     "trunk_grad_scale": 1.0,
     "detach_feedback": False,
     "route_by_type": False,

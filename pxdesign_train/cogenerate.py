@@ -437,10 +437,21 @@ def cogenerate(
                         )
                         sel = torch.as_tensor(committed)
                         phi_c, psi_c = _phi[sel], _psi[sel]
+                    # Deployment sigma, one value per arm -- see the training
+                    # block in model.py for why each is what it is. template_sigma
+                    # trained over a RANGE but still decodes in a single forward,
+                    # so inference has to pick one point on that range; the config
+                    # default reproduces the historical fixed input exactly.
+                    _sc_tmpl_sigma = (
+                        float(getattr(model, "sc_template_sigma_infer",
+                                      sc_init.DEFAULT_SIGMA_T))
+                        if getattr(model, "sc_template_sigma", False) else None
+                    )
                     noisy_local = sc_init.template_init_local(
                         a_hat.cpu(), m.cpu(),
                         sigma_T=(
                             0.0 if getattr(model, "sc_edm", False)
+                            else _sc_tmpl_sigma if _sc_tmpl_sigma is not None
                             else getattr(model, "sc_init_sigma_T", sc_init.DEFAULT_SIGMA_T)
                         ),
                         phi=phi_c, psi=psi_c,
@@ -464,7 +475,18 @@ def cogenerate(
                 # matching per-sigma training — not a constant.
                 # Honour sidechain.per_sigma: training feeds S_phi a CONSTANT t=1 whenever
                 # per_sigma is off (the Stage II-A warmup config), not the sigma embedding.
-                if getattr(model, "sc_per_sigma", True):
+                # template_sigma reports its OWN deployment sigma, exactly as
+                # training reports each row's draw -- the backbone's sigma would
+                # describe a different corruption than the one S_phi was handed.
+                if getattr(model, "sc_template_sigma", False):
+                    sc_t = (
+                        0.25 * torch.tensor(
+                            [max(float(getattr(model, "sc_template_sigma_infer",
+                                               sc_init.DEFAULT_SIGMA_T)), 1e-4)],
+                            device=device,
+                        ).log()
+                    )
+                elif getattr(model, "sc_per_sigma", True):
                     sc_t = (0.25 * sig_t.reshape(1).clamp_min(1e-4).log()).to(device)
                 else:
                     sc_t = torch.ones(1, device=device)

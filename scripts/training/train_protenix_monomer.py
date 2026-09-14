@@ -641,6 +641,18 @@ def build_configs(args: argparse.Namespace, device):
             configs.sidechain.pack_loss = float(args.sc_pack_loss)
         if args.sc_edm is not None:
             configs.sidechain.edm = bool(args.sc_edm)
+        if args.sc_template_sigma is not None:
+            configs.sidechain.template_sigma = bool(args.sc_template_sigma)
+        if args.sc_template_sigma_p_mean is not None:
+            configs.sidechain.template_sigma_p_mean = float(args.sc_template_sigma_p_mean)
+        if args.sc_template_sigma_p_std is not None:
+            configs.sidechain.template_sigma_p_std = float(args.sc_template_sigma_p_std)
+        if args.sc_template_sigma_min is not None:
+            configs.sidechain.template_sigma_min = float(args.sc_template_sigma_min)
+        if args.sc_template_sigma_max is not None:
+            configs.sidechain.template_sigma_max = float(args.sc_template_sigma_max)
+        if args.sc_template_sigma_infer is not None:
+            configs.sidechain.template_sigma_infer = float(args.sc_template_sigma_infer)
         if args.sc_edm_sigma_data is not None:
             configs.sidechain.edm_sigma_data = float(args.sc_edm_sigma_data)
         if args.sc_edm_p_mean is not None:
@@ -1197,6 +1209,23 @@ def parse_args() -> argparse.Namespace:
         help="EDM side-chain diffusion: sample sigma, precondition, and feed "
              "log(sigma) to the time embedding. Requires --sc-centre-coord-input "
              "and is incompatible with --sc-template-residual.",
+    )
+    p.add_argument(
+        "--sc-template-sigma", action=argparse.BooleanOptionalAction, default=None,
+        help="Template-centred sampled sigma: perturb the ideal template by a "
+             "SAMPLED sigma (instead of the fixed init_sigma_T) and feed that "
+             "sigma to the time embedding, still decoding in one forward pass. "
+             "Distinct from --sc-edm, which noises the TARGET and walks a reverse "
+             "trajectory; the two are mutually exclusive.",
+    )
+    p.add_argument("--sc-template-sigma-p-mean", type=float, default=None)
+    p.add_argument("--sc-template-sigma-p-std", type=float, default=None)
+    p.add_argument("--sc-template-sigma-min", type=float, default=None)
+    p.add_argument("--sc-template-sigma-max", type=float, default=None)
+    p.add_argument(
+        "--sc-template-sigma-infer", type=float, default=None,
+        help="Sigma used for the single forward pass at inference. The arm trains "
+             "over a range but deploys at one point on it.",
     )
     p.add_argument("--sc-edm-sigma-data", type=float, default=None)
     p.add_argument("--sc-edm-p-mean", type=float, default=None)

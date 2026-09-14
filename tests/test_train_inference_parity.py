@@ -74,6 +74,18 @@ TRAIN_ONLY = {
     "edm_sigma_min": "read at inference through model.sc_noise_sampler.schedule()",
     "edm_sigma_max": "read at inference through model.sc_noise_sampler.schedule()",
     "edm_infer_steps": "inference-only: reverse-loop length (sc_edm_infer_steps)",
+    # sidechain.template_sigma and template_sigma_infer ARE mirrored -- the
+    # sampler reads both to build its single perturbed template. What is left
+    # here is only the DISTRIBUTION the training draw comes from. Unlike the EDM
+    # range, which inference reuses because the reverse loop starts at sigma_max,
+    # this arm has no trajectory to start: it decodes once, at template_sigma_infer.
+    # So the distribution genuinely has no sampling counterpart.
+    "template_sigma_p_mean": "training-time sigma distribution; this arm decodes "
+                             "once at template_sigma_infer, which IS mirrored",
+    "template_sigma_p_std": "training-time sigma distribution; see template_sigma_p_mean",
+    "template_sigma_min": "clamp on the TRAIN-time draw; inference uses the single "
+                          "template_sigma_infer, not a range",
+    "template_sigma_max": "clamp on the TRAIN-time draw; see template_sigma_min",
     "context_radius": "loss-side only: bounds the clash/contact atom set, no loss at inference",
     "context_max_atoms": "loss-side only: memory cap on the clash/contact atom set",
     "a_bs_concat": "internal to SideChainModule.forward (pooled + h_proj); no new sampler input",

@@ -85,6 +85,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             c_token=768 head (params only; not yet wired into forward).
     """
 
+    @staticmethod
+    def sc_edm_requested(sc_cfg) -> bool:
+        """Whether sidechain.edm is on, readable before self.sc_edm is assigned."""
+        return bool(getattr(sc_cfg, "edm", False)) if sc_cfg is not None else False
+
     def __init__(self, configs) -> None:
         super().__init__(configs)
         ns_cfg = getattr(configs, "training_noise_sampler", None) or {
@@ -226,6 +231,40 @@ class ProtenixDesignTrain(ProtenixDesign):
                     "emit local offsets for the two to be commensurate"
                 )
             self.sc_init_sigma_T = float(getattr(sc_cfg, "init_sigma_T", DEFAULT_SIGMA_T)) if sc_cfg is not None else DEFAULT_SIGMA_T
+            # ---- Template-centred sampled sigma (sidechain.template_sigma) ----
+            # See configs_train.py for what this is and why preconditioning stays
+            # off. Here it only needs a draw: the SAME log-normal sampler the EDM
+            # arm uses, pointed at the template-offset scale instead of the data
+            # scale. Reusing it keeps one implementation of "sample a sigma and
+            # clamp it" rather than two that can drift apart.
+            self.sc_template_sigma = (
+                bool(getattr(sc_cfg, "template_sigma", False)) if sc_cfg is not None else False
+            )
+            if self.sc_template_sigma:
+                if self.sc_edm_requested(sc_cfg):
+                    raise ValueError(
+                        "sidechain.template_sigma and sidechain.edm are two "
+                        "different objectives -- template+sigma*eps -> GT versus "
+                        "GT+sigma*eps -> GT -- and enabling both would noise the "
+                        "template and then discard it. Pick one."
+                    )
+                if not getattr(self, "sc_template_init", False):
+                    raise ValueError(
+                        "sidechain.template_sigma perturbs the ideal template, so "
+                        "it requires sidechain.template_init=True; with the "
+                        "Gaussian baseline there is no template to centre on."
+                    )
+                from pxdesign_train.sidechain.edm import SideChainNoiseSampler
+
+                self.sc_template_noise_sampler = SideChainNoiseSampler(
+                    p_mean=float(getattr(sc_cfg, "template_sigma_p_mean", -0.693)),
+                    p_std=float(getattr(sc_cfg, "template_sigma_p_std", 1.0)),
+                    sigma_min=float(getattr(sc_cfg, "template_sigma_min", 0.05)),
+                    sigma_max=float(getattr(sc_cfg, "template_sigma_max", 3.0)),
+                )
+                self.sc_template_sigma_infer = float(
+                    getattr(sc_cfg, "template_sigma_infer", DEFAULT_SIGMA_T)
+                )
             # ---- EDM side-chain diffusion (sidechain.edm) ----
             self.sc_edm = bool(getattr(sc_cfg, "edm", False)) if sc_cfg is not None else False
             if self.sc_edm:
@@ -250,6 +289,18 @@ class ProtenixDesignTrain(ProtenixDesign):
                 self.sc_edm_sigma_data = float(getattr(sc_cfg, "edm_sigma_data", 2.0))
                 self.sc_edm_infer_steps = int(getattr(sc_cfg, "edm_infer_steps", 8))
             if self.sc_template_init and not templates_available():
+                if getattr(self, "sc_template_sigma", False):
+                    # Falling back here would leave template_sigma switched on but
+                    # inert: the Gaussian branch never calls template_init_local, so
+                    # the sampled sigma is never applied and the time channel never
+                    # sees it. The run would train the fixed-sigma objective under
+                    # the new arm's name. Refuse instead of degrading quietly.
+                    raise RuntimeError(
+                        "sidechain.template_sigma needs the ideal-template library, "
+                        "but pxdesign_train.sidechain.templates is not importable. "
+                        "Without it the Gaussian fallback silently ignores the "
+                        "sampled sigma."
+                    )
                 logging.getLogger(__name__).warning(
                     "sidechain.template_init=True but pxdesign_train.sidechain.templates "
                     "is not importable; falling back to isotropic Gaussian init."
@@ -1198,6 +1249,7 @@ class ProtenixDesignTrain(ProtenixDesign):
             # sc_mask are tiled to the SAME flattened [B*N_sample, ...] layout above,
             # so row r of the type table is row r of the atom mask (per item, not
             # item 0 broadcast), and each sigma row still draws its own eps.
+            tmpl_sigma = None
             use_template_init = getattr(self, "sc_template_init", False) and sc_type_idx is not None
             if use_template_init:
                 mask_cpu = sc_slot.detach().cpu()
@@ -1246,12 +1298,41 @@ class ProtenixDesignTrain(ProtenixDesign):
                         "predicted x_hat_0" if use_pred_bb else "GT backbone",
                         100.0 * cov,
                     )
+                if getattr(self, "sc_template_sigma", False):
+                    # One draw per ROW, matching the EDM arm's contract, so each
+                    # backbone noise draw gets its own template corruption rather
+                    # than sharing one. Kept on CPU because template_init_local
+                    # builds mu there; it moves with `noisy_init` below.
+                    if getattr(self, "sc_edm_eval", False):
+                        # EVAL PROTOCOL, same reasoning as the EDM arm: a random
+                        # draw per item makes the validation number a sample from a
+                        # distribution rather than a measurement, and incomparable
+                        # to an arm scored at a fixed sigma. Score at the sigma this
+                        # arm actually deploys at.
+                        tmpl_sigma = torch.full(
+                            (tix.shape[0],), self.sc_template_sigma_infer,
+                            dtype=torch.float32,
+                        )
+                    else:
+                        tmpl_sigma = self.sc_template_noise_sampler(
+                            (tix.shape[0],), device=torch.device("cpu"),
+                            dtype=torch.float32,
+                        )
                 noisy_init = template_init_local(
                     tix, mask_cpu,
-                    # Under EDM the perturbation is the SAMPLED sigma below, so the
-                    # template arrives clean; sigma_T's fixed 0.3 A would otherwise
-                    # sit underneath it as an unaccounted noise floor.
-                    sigma_T=(0.0 if getattr(self, "sc_edm", False) else self.sc_init_sigma_T),
+                    # Three arms, three scales:
+                    #   edm            -> 0.0; the SAMPLED sigma is applied below to
+                    #                    the TARGET, so the template must arrive
+                    #                    clean or 0.3 A sits under it as an
+                    #                    unaccounted noise floor.
+                    #   template_sigma -> a per-row draw; the corruption stays
+                    #                    centred here, on the template.
+                    #   neither        -> the historical fixed scale.
+                    sigma_T=(
+                        0.0 if getattr(self, "sc_edm", False)
+                        else tmpl_sigma if tmpl_sigma is not None
+                        else self.sc_init_sigma_T
+                    ),
                     phi=phi, psi=psi,
                 )
             else:
@@ -1339,7 +1420,15 @@ class ProtenixDesignTrain(ProtenixDesign):
             # Sigma-embedding for S_phi's time input: the REAL per-sample noise
             # level (EDM c_noise = 0.25*ln sigma) when per-sigma; a constant for
             # the reduced warmup baseline (no single sigma to attach).
-            if sigma_flat is not None:
+            #
+            # Under template_sigma the channel must report the sigma that actually
+            # corrupted this row's input -- its OWN draw -- not the backbone's noise
+            # level. Feeding the backbone's sigma would leave the model unable to
+            # tell a lightly-perturbed template from a washed-out one, which is the
+            # entire reason for sampling it.
+            if tmpl_sigma is not None:
+                t = 0.25 * tmpl_sigma.to(h_res.device).clamp_min(1e-4).log()
+            elif sigma_flat is not None:
                 t = 0.25 * sigma_flat.to(h_res.device).clamp_min(1e-4).log()
             else:
                 t = torch.ones(B, device=h_res.device)

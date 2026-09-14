@@ -173,6 +173,20 @@ class SideChainEDM:
                 "accounts for. EDM's c_skip already IS the template residual, with "
                 "the right sigma-dependent magnitude; turn template_residual off."
             )
+        if getattr(module, "chi_output", False):
+            # D = c_skip*x + c_out*F(...) is a linear blend of the noisy input
+            # with the network output, and a convex combination of two
+            # chemically valid structures is NOT chemically valid -- the blend is
+            # an average, so it reintroduces exactly the Jensen contraction that
+            # chi_output exists to remove. Diffusing in CHI space keeps both
+            # guarantees, because a blend of angles is still an angle and BuildSC
+            # runs after it; Cartesian EDM on top of a built structure does not.
+            raise ValueError(
+                "sidechain.edm and sidechain.chi_output cannot be combined: the "
+                "c_skip*x skip blends the built side chain with its noisy input, "
+                "which destroys the exact bond geometry chi_output guarantees. "
+                "Torsional (chi-space) diffusion is the composition that works."
+            )
         self.module = module
         self.sigma_data = float(sigma_data)
 

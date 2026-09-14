@@ -121,3 +121,12 @@ def test_builder_preserves_every_bond_under_arbitrary_torsions():
                     worst = max(worst, abs(float((xyz[iu] - xyz[iv]).norm()
                                                  - (ideal[iu] - ideal[iv]).norm())))
     assert worst < 1e-4
+
+
+def test_chi_output_refuses_cartesian_edm():
+    """A c_skip blend of two valid structures is not a valid structure."""
+    from pxdesign_train.sidechain.edm import SideChainEDM
+    module = SideChainModule(c_res=32, c_atom=32, c_time=16, n_type=20,
+                             n_blocks=2, n_heads=4, chi_output=True)
+    with pytest.raises(ValueError, match="chi-space"):
+        SideChainEDM(module)

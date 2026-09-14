@@ -14,7 +14,7 @@ SCHEMA_VERSION = 1
 BACKBONE_PREFIXES = ("design_condition_embedder.", "diffusion_module.")
 SC_PREFIXES = ("sidechain_module.",)
 FEEDBACK_PREFIXES = ("sidechain_feedback.", "hres_injector.", "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding")
-SC_LAYOUT_KEYS = ("bb_context", "centre_coord_input", "frame_aware_head", "template_residual", "type_logits_input", "edm", "a_bs_concat", "q_bs")
+SC_LAYOUT_KEYS = ("bb_context", "centre_coord_input", "frame_aware_head", "template_residual", "type_logits_input", "edm", "a_bs_concat", "q_bs", "chi_output")
 # Same one-step architecture as the validated donor, with no donor weights.
 SCRATCH_SC_LAYOUT = dict(bb_context=True, centre_coord_input=True, frame_aware_head=False,
     template_residual=False, type_logits_input=True, edm=False, a_bs_concat=True, q_bs=False)

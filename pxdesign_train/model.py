@@ -292,6 +292,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 )
             self.sc_centre_coord_input = bool(getattr(sc_cfg, "centre_coord_input", False)) if sc_cfg is not None else False
             self.sc_template_residual = bool(getattr(sc_cfg, "template_residual", False)) if sc_cfg is not None else False
+            self.sc_chi_output = bool(getattr(sc_cfg, "chi_output", False)) if sc_cfg is not None else False
             if self.sc_template_residual and not self.sc_frame_aware_head:
                 raise ValueError(
                     "sidechain.template_residual requires frame_aware_head=True: the "
@@ -440,6 +441,7 @@ class ProtenixDesignTrain(ProtenixDesign):
                 a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
                 cross_neighbors=self.sc_cross_neighbors,
                 template_residual=self.sc_template_residual,
+                chi_output=self.sc_chi_output,
                 centre_coord_input=self.sc_centre_coord_input,
             )
             if self.sc_edm:

@@ -345,6 +345,10 @@ training_configs["sidechain"] = {
     # zero-initialized, so a new S_phi starts as the template/noisy-input baseline.
     # Requires frame_aware_head=True.
     "template_residual": False,
+    # Predict the 4 torsions and place atoms on ideal geometry (BuildSC)
+    # instead of regressing free Cartesian offsets. Mutually exclusive with
+    # template_residual. See docs/sc_chi_output_zh.md.
+    "chi_output": False,
     # Template perturbation scale (Angstrom, per coordinate). Keep it small
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
     # template anisotropy that carries the orientation.

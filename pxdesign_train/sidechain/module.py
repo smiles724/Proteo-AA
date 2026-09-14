@@ -28,6 +28,8 @@ import torch
 import torch.nn as nn
 
 from pxdesign_train.sidechain.frames import to_global, to_local
+from pxdesign_train.sidechain.buildsc import build_sidechain_local, chi_from_local
+from pxdesign_train.sidechain.chi_constants import MAX_CHI
 import torch.nn.functional as F
 
 from pxdesign_train.heads import sinusoidal_time_embedding
@@ -181,6 +183,7 @@ class SideChainModule(nn.Module):
         c_q: int = 128,
         cross_neighbors: int = 16,
         template_residual: bool = False,
+        chi_output: bool = False,
         centre_coord_input: bool = False,
     ) -> None:
         super().__init__()
@@ -230,6 +233,31 @@ class SideChainModule(nn.Module):
         self.q_bs_fusion = QAtomBSFusion(c_atom, c_q) if self.q_bs else None
         self.out_ln = nn.LayerNorm(c_atom)
         self.out = nn.Linear(c_atom, 3)
+        # CHI OUTPUT (sidechain.chi_output). Instead of regressing 10x3 free
+        # Cartesian offsets, predict the 4 torsions and let BuildSC place the
+        # atoms on ideal geometry. This is not a regulariser -- it removes the
+        # failure mode. A Cartesian conditional mean contracts every bond whose
+        # direction varies across rotamers, because ||E[a-b]|| <= E[||a-b||]
+        # (Jensen); measured on the step46000 warmup donor, 92.7% of internal
+        # side-chain bonds came out short by a mean of 0.41 A, while CB-CA --
+        # pinned by the GT frame, so its direction cannot vary -- was clean.
+        # Under BuildSC the bond lengths are constants, so the inequality has
+        # nothing to act on: verified invariant to 1.2e-6 A over 584
+        # (residue, random chi, bond) combinations.
+        self.chi_output = bool(chi_output)
+        if self.chi_output:
+            if template_residual:
+                raise ValueError(
+                    "chi_output and template_residual are two different answers to "
+                    "the same question; enable exactly one"
+                )
+            self.chi_ln = nn.LayerNorm(c_atom)
+            self.chi_out = nn.Linear(c_atom, MAX_CHI * 2)
+            # Zero init + the (cos+1, sin) form below makes delta-chi exactly 0,
+            # so an untrained head reproduces the Dunbrack template rather than
+            # a random conformer.
+            nn.init.zeros_(self.chi_out.weight)
+            nn.init.zeros_(self.chi_out.bias)
         if self.template_residual:
             # Start from the high-quality template/noisy input and initially make
             # no learned correction. This also keeps the first optimizer update
@@ -437,6 +465,35 @@ class SideChainModule(nn.Module):
         #     orientation, because the head, not the init, is the bottleneck.
         #
         #   CA-anchored head (frame_R/frame_t None): legacy behaviour, kept for A/B.
+        if self.chi_output:
+            if frame_R is None or frame_t is None:
+                raise ValueError("chi_output requires a frame-aware head (frame_R/frame_t)")
+            with torch.autocast(device_type=atom_feats.device.type, enabled=False):
+                w = atom_mask.to(torch.float32)[..., None]
+                pooled = (atom_feats.float() * w).sum(-2) / w.sum(-2).clamp_min(1.)
+                raw = self.chi_out(self.chi_ln(pooled)).reshape(
+                    *pooled.shape[:-1], MAX_CHI, 2)
+                # (cos+1, sin): zero weights give atan2(0, 1) == 0 exactly, so an
+                # untrained head is the template and training learns a correction.
+                dchi = torch.atan2(raw[..., 1], raw[..., 0] + 1.)
+                # Residue identity: GT under force_gt_type_logits, otherwise the
+                # predicted type -- the same argmax that already instantiates the
+                # atom inventory, so this adds no new discrete dependence.
+                type_idx = restype_logits.float().argmax(-1)
+                local_init = to_local(noisy_coords.float(),
+                                      frame_R.float(), frame_t.float())
+                # NaN marks torsions the residue does not have or that are ring
+                # closed; it propagates through the sum and BuildSC then leaves
+                # those at their CCD ideal value.
+                chi = chi_from_local(type_idx, local_init) + dchi
+                local, _ = build_sidechain_local(type_idx, chi)
+                x0_global_f = to_global(local, frame_R.float(), frame_t.float())
+            x0_global = x0_global_f.to(atom_feats.dtype)
+            x0_global = torch.where(atom_mask.bool()[..., None], x0_global, 0.)
+            if bb_feats is None:
+                return x0_global, atom_feats
+            return x0_global, atom_feats, bb_feats
+
         y0 = self.out(self.out_ln(atom_feats))             # [B, L, A, 3]
         if self.template_residual:
             if frame_R is None or frame_t is None:

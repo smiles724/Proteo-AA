@@ -1203,6 +1203,10 @@ class PXDesignTrainer:
     SIDECHAIN_LAYOUT_KEYS = (
         "bb_context", "centre_coord_input", "frame_aware_head", "template_residual",
         "type_logits_input",
+        # Swaps the output parameterization: the same `out`/`chi_out` weights
+        # mean different things, and bond geometry is a constant under one
+        # and a free regression target under the other.
+        "chi_output",
         # Same shapes either way -- SideChainEDM holds no parameters -- so
         # nothing about the weights reveals which objective produced them.
         "edm",

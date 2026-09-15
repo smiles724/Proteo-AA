@@ -22,7 +22,15 @@
 #       sbatch scripts/slurm/design_fullatom.sh
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# sbatch copies this script to /var/lib/slurm/scripts, so BASH_SOURCE does NOT
+# point at the repo under SLURM. SLURM_SUBMIT_DIR is the submission cwd
+# (the repo root); fall back to BASH_SOURCE only for direct execution.
+if [ -n "${PXF_REPO:-}" ]; then ROOT="$PXF_REPO"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then ROOT="$SLURM_SUBMIT_DIR"
+else ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; fi
+if [ ! -f "$ROOT/pxf/provenance.py" ]; then
+    echo "ROOT=$ROOT is not the pxf repo; set PXF_REPO" >&2; exit 2
+fi
 OUT=${OUT:-/hai/scratch/yfsun/proteo_aa_runs/pxf_seqdes/${SLURM_JOB_ID}}
 CKPT_DIR=${CKPT_DIR:-/hai/users/y/f/yfsun/Proteo-AA old/Proteo-AA-official-pxdesign-fampnn/runs/component_donors}
 N_SAMPLE=${N_SAMPLE:-8}

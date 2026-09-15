@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Outputs never belong in the repo, and PXDesign's checkpoint is ~0.5 GB.
+# Keep run outputs on scratch, not a quota'd home.
+runs/
+designs/
+packed/
+output/
+release_data/

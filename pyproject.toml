@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pxf"
+version = "0.1.0"
+description = "Full-atom protein structures composing official PXDesign (backbone) with official FaMPNN (side-chain packing onto a supplied sequence). Neither component is reimplemented or re-hosted."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy",
+    "hydra-core",
+    "omegaconf",
+    "natsort",
+    "pandas",
+    "einops",
+]
+
+[tool.setuptools.packages.find]
+include = ["pxf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

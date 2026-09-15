@@ -1,0 +1,9 @@
+[submodule "PXDesign"]
+	path = PXDesign
+	url = https://github.com/bytedance/PXDesign.git
+[submodule "Protenix"]
+	path = Protenix
+	url = https://github.com/bytedance/Protenix.git
+[submodule "fampnn"]
+	path = fampnn
+	url = https://github.com/richardshuai/fampnn.git

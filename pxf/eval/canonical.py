@@ -41,6 +41,9 @@ def default_root():
             return candidate
     return CANDIDATE_ROOTS[0]
 MODULES = ("metrics", "lddt", "frames", "instantiate")
+# pxdesign_train.eval.uncond_metrics: the unconditional self-consistency harness
+# (Ca and all-atom scRMSD with residue pairing, sample_id conventions, fasta IO).
+UNCOND_MODULE = "eval.uncond_metrics"
 
 
 @dataclass
@@ -50,6 +53,7 @@ class CanonicalMetrics:
     lddt: object
     frames: object
     instantiate: object
+    uncond: object
     root: Path
     revision: str
 
@@ -67,7 +71,8 @@ class CanonicalMetrics:
 
     def record(self):
         return dict(source="proteo-aa/pxdesign_train.sidechain", root=str(self.root),
-                    revision=self.revision, modules=list(MODULES),
+                    revision=self.revision,
+                    modules=list(MODULES) + [UNCOND_MODULE],
                     reimplemented=False)
 
 
@@ -112,8 +117,12 @@ def load(root=None):
             stub.__path__ = [str(directory)]
             sys.modules[name] = stub
 
+    stub = types.ModuleType("pxdesign_train.eval")
+    stub.__path__ = [str(package / "eval")]
+    sys.modules.setdefault("pxdesign_train.eval", stub)
     loaded = {name: importlib.import_module(f"pxdesign_train.sidechain.{name}")
               for name in MODULES}
+    loaded["uncond"] = importlib.import_module("pxdesign_train.eval.uncond_metrics")
     try:
         revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"],
                                            text=True).strip()

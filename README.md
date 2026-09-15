@@ -71,6 +71,21 @@ Output is one PDB per structure (FaMPNN's per-side-chain-atom confidence `psce`
 in the B-factor column) plus a `manifest.json` recording the revision and
 SHA-256 of every weight and source tree that produced it.
 
+**Train, or continue training, the side-chain modules.** FaMPNN ships inference
+only ([upstream issue #9](https://github.com/richardshuai/fampnn/issues/9) is
+unanswered), so the objectives and loop are implemented here from the preprint:
+
+```bash
+python scripts/train.py --pdb-dir <dir> --out runs/ft \
+    --init-weights 0.0 --config configs/train_cath.yaml
+```
+
+`L_total = L_MLM + L_diff` unweighted (Appendix C.1), `t = sqrt(u)` masking, 8
+noise clones per example, teacher-forced sequence, and a confidence head on a
+stop-gradient rollout. See [`docs/training.md`](docs/training.md) for what the
+paper specifies, what it leaves unspecified (optimizer and learning rate — chosen
+here and recorded in every checkpoint), and the two upstream gaps it works around.
+
 ```bash
 PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn" python -m pytest tests/ -q
 ```
@@ -99,7 +114,8 @@ each is a loud failure here rather than a silent one:
   real kernel launch, not by trusting `torch.cuda.is_available()`.
 
 Packing is a sampler: repeated runs on one backbone give rotamers ~0.5 Å RMS
-apart. Pass a seed for bitwise reproducibility.
+apart. A seed makes a run reproducible -- bitwise on CPU or with deterministic
+algorithms; CUDA's default kernels leave about 1e-5 A of jitter.
 
 ## Attribution & license
 

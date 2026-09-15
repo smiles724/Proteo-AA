@@ -119,9 +119,14 @@ class FaMPNNSideChainPacker(nn.Module):
 
         Packing is a sampling procedure: repeated calls on one backbone yield
         different rotamers (order 0.5 A RMS apart), which is what makes several
-        packings per backbone worth generating. Pass ``seed`` for a bitwise
-        reproducible run; note that ``batch_size`` changes how noise is drawn, so
-        reproducing a run means fixing both.
+        packings per backbone worth generating.
+
+        ``seed`` makes a run reproducible, but *bitwise* equality only holds on
+        CPU or under ``torch.use_deterministic_algorithms(True)``. On CUDA the
+        default kernels leave about 1e-5 A of run-to-run jitter, which is
+        nondeterminism in the kernels, not in the sampling -- for scale, a
+        different seed moves atoms by several Angstrom. ``batch_size`` also
+        changes how noise is drawn, so reproducing a run means fixing both.
         """
         if seed is not None:
             torch.manual_seed(int(seed))

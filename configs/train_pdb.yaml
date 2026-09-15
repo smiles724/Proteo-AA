@@ -1,0 +1,26 @@
+# PDB preset, Appendix B.2: 4 H100s, batch 8 per GPU, 4 accumulation steps
+# (effective batch 128), fixed size 1024, 300k steps. batch_size here is
+# per-process, so a single-GPU run reproduces the effective batch with
+# grad_accum_steps: 16.
+data:
+  crop_size: 1024
+  noise: 0.3
+  noise_targets: true
+  spatial_crop_p: 0.5
+  batch_size: 8
+  num_workers: 8
+train:
+  max_steps: 300000
+  grad_accum_steps: 4
+  ema_relative_length: 0.01   # B.2 chose 1% for the 0.3 A model (post-hoc)
+  log_every: 50
+  checkpoint_every: 5000
+  snapshot_every: 5000
+  seed: 0
+  amp_dtype: bf16
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_steps: 1000
+  max_grad_norm: 1.0
+  schedule: constant

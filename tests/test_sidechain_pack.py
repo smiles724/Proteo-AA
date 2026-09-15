@@ -138,15 +138,25 @@ def test_packing_is_a_sampler_so_repeats_differ_but_stay_close(packer, native):
     assert spread < 2.0, f"same backbone and sequence should give similar packings, got {spread:.3f} A"
 
 
-def test_seeding_makes_packing_bitwise_reproducible(packer, native):
+def test_seeding_makes_packing_reproducible(packer, native):
+    """A seed pins the sampling; bitwise equality is a separate, stricter claim.
+
+    On CUDA the default kernels contribute ~1e-5 A of jitter between identical
+    runs, so reproducibility is asserted at float tolerance here and bitwise only
+    where the kernels are deterministic. The seed is clearly doing its job either
+    way: a different seed moves atoms by Angstroms, not microns.
+    """
     coords, mask = _backbone_only(native)
     kwargs = dict(coords_af2=coords, atom_mask=mask, aatype=native["aatype"],
                   residue_index=native["residue_index"], chain_index=native["chain_index"])
     first = packer(seed=7, **kwargs)["coords_af2"]
     second = packer(seed=7, **kwargs)["coords_af2"]
-    assert torch.equal(first, second)
+    assert torch.allclose(first, second, atol=1e-3)
+    if packer.device.type == "cpu":
+        assert torch.equal(first, second), "CPU kernels should be bitwise deterministic"
     third = packer(seed=8, **kwargs)["coords_af2"]
-    assert not torch.equal(first, third), "a different seed should give a different packing"
+    # Orders of magnitude larger than the kernel jitter, so the seed matters.
+    assert float((first - third).abs().max()) > 0.1
 
 
 def test_a_single_structure_may_omit_the_batch_axis(packer, native):

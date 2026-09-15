@@ -71,8 +71,10 @@ regardless and reports `backbone_shift_angstrom`, which is `0.0` in practice.
 ## Packing is a sampler
 
 Repacking one backbone twice gives different rotamers — around 0.5 Å RMS apart —
-which is why generating several packings per backbone is useful. Pass `seed` for
-a bitwise reproducible run. `batch_size` changes how noise is drawn, so
+which is why generating several packings per backbone is useful. `seed` makes a
+run reproducible; bitwise equality holds on CPU or with
+`torch.use_deterministic_algorithms(True)`, while CUDA's default kernels leave
+about 1e-5 A of jitter. `batch_size` changes how noise is drawn, so
 reproducing a run means fixing both; both are recorded in the manifest.
 
 ## Devices

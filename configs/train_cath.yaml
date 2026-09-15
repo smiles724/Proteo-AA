@@ -1,0 +1,24 @@
+# CATH preset, Appendix B.2: one H100, batch 64, fixed size 256, 100k steps.
+data:
+  crop_size: 256
+  noise: 0.0          # the two released models used 0.0 and 0.3 Angstrom (B.1)
+  noise_targets: true # B.1 reads as noising the whole example; see pxf/train/data.py
+  spatial_crop_p: 0.5
+  batch_size: 64
+  num_workers: 4
+train:
+  max_steps: 100000
+  grad_accum_steps: 1
+  ema_relative_length: 0.25   # B.2 chose 25% for the 0.0 A model (post-hoc)
+  log_every: 50
+  checkpoint_every: 5000
+  snapshot_every: 5000
+  seed: 0
+  amp_dtype: bf16
+# Not specified in the preprint -- chosen here, recorded in every checkpoint.
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_steps: 1000
+  max_grad_norm: 1.0
+  schedule: constant

@@ -741,7 +741,17 @@ def cogenerate(
                 # Frame-aware head (sidechain.frame_aware_head): hand S_phi the same
                 # rigid frame training gives it, so it regresses local offsets and the
                 # known transform maps them to global. Output space stays global.
-                _fa = getattr(model, "sc_frame_aware_head", False)
+                # Two modules need the frame unconditionally, because they predict
+                # TORSIONS and BuildSC's output is residue-local: `chi_output` (the
+                # Cartesian module's torsion head) and `torsion_packer` (the V0
+                # packer). Both raise when the frame is absent, so without this the
+                # sampler would crash on any checkpoint trained with
+                # frame_aware_head=False -- the training path applies the same rule.
+                _fa = (
+                    getattr(model, "sc_frame_aware_head", False)
+                    or getattr(model, "sc_chi_output", False)
+                    or getattr(model, "sc_torsion_packer", False)
+                )
                 # ATOM-level channel (sidechain.q_direct): hand S_phi the residue's 4
                 # backbone atoms (N, CA, C, O) in its own LOCAL frame — the SAME 14-slot
                 # axis training builds, from the SAME source (the predicted backbone

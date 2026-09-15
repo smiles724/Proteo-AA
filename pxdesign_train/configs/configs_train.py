@@ -349,6 +349,44 @@ training_configs["sidechain"] = {
     # instead of regressing free Cartesian offsets. Mutually exclusive with
     # template_residual. See docs/sc_chi_output_zh.md.
     "chi_output": False,
+    # ---- Stage 2 V0: APM-style one-step torsion packer ----
+    # Replaces S_phi entirely (not a head swap): a residue-level geometric
+    # transformer that reads BACKBONE + residue type + a_token and emits the four
+    # torsions, which BuildSC turns into coordinates. No x_t^SC, no schedule, no
+    # sampler -- see pxdesign_train/sidechain/packer.py and
+    # docs/sc_torsion_packer_apm_zh.md. Mutually exclusive with edm / chi_output /
+    # template_residual, all of which are properties of the coordinate module.
+    "torsion_packer": False,
+    # THE ablation this module exists to run. The channel is inserted exactly
+    # where APM inserts its PLM (projected to c_node, ADDED to the node
+    # embedding), so the four arms differ in information and in nothing else:
+    #   "none"     BB + res_type
+    #   "a_token"  + Stage 1's structure-aware token   (our question)
+    #   "plm"      + frozen ESM-2 650M                 (APM's setting)
+    #   "both"
+    "packer_seq_cond": "a_token",
+    "packer_plm_checkpoint": "",
+    # ---- sizes: APM `packing_model` block of apm/configs/model.yaml ----
+    "packer_c_node": 256,
+    "packer_c_pair": 128,
+    "packer_n_blocks": 6,
+    "packer_ipa_c_hidden": 16,
+    "packer_ipa_no_heads": 8,
+    "packer_no_qk_points": 8,
+    "packer_no_v_points": 12,
+    "packer_seq_tfmr_num_heads": 4,
+    "packer_seq_tfmr_num_layers": 4,
+    "packer_transformer_dropout": 0.2,
+    "packer_num_torsion_blocks": 4,
+    "packer_c_pos_emb": 128,
+    "packer_c_timestep_emb": 128,
+    "packer_edge_feat_dim": 64,
+    "packer_edge_num_bins": 22,
+    # ---- deliberate deviations from APM, each defaulting to APM's behaviour
+    # except the first. See packer.py's module docstring for the reasoning.
+    "packer_embed_aatype": True,        # APM packing config: False (it leans on the PLM)
+    "packer_embed_rotvecs": True,       # APM: True. Costs strict SE(3) invariance.
+    "packer_random_torsion_input": True,  # APM: True. Makes the packer stochastic.
     # Template perturbation scale (Angstrom, per coordinate). Keep it small
     # relative to side-chain bond lengths (~1.5 A): a large sigma_T destroys the
     # template anisotropy that carries the orientation.
@@ -587,6 +625,10 @@ training_configs["stage4"] = {
     "bb_trainable_prefixes": [""],  # parser needs a typed list; empty entries select nothing
     "weight_aa_pre": 1.0, "weight_aa_revision": 1.0,
     "weight_sc_aux": 1.0, "weight_physical": 0.1,
+    # L_chi (AF2 Alg. 27) weight for the torsion packer. Only has an effect when
+    # sidechain.torsion_packer=True -- no other module emits torsions, so this
+    # cannot change any existing run's objective.
+    "weight_sc_chi": 1.0,
     "monomer_fraction": 1., "symmetry_aware_coordinates": False,
     "geometry_calibration_path": "", "geometry_calibration_sha256": "", "chemistry_registry_sha256": "",
     "geometry_ramp_steps": 200,

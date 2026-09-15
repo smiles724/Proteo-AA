@@ -50,6 +50,12 @@ from pxdesign_train.sidechain.instantiate import MAX_SC, STD_AA_3
 from pxdesign_train.sidechain.templates import IDEAL_SC_LOCAL, IDEAL_SC_MASK
 
 
+# Four points in general position, used to keep the dihedral of an inactive row
+# away from atan2(0, 0). See the comment at its use site.
+_SAFE_TETRAD = torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+                             [0.0, 1.0, 0.0], [0.0, 1.0, 1.0]])
+
+
 def _rodrigues(v: torch.Tensor, axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
     """Rotate v [..., A, 3] about unit `axis` [..., 3] by `angle` [...] radians."""
     k = axis[..., None, :]                       # [..., 1, 3]
@@ -108,6 +114,17 @@ def build_sidechain_local(
         combined = torch.cat([bb, sc], dim=-2)                          # [..., 3+MAX_SC, 3]
         q = atom_idx[..., k, :]                                         # [..., 4]
         p = torch.gather(combined, -2, q[..., None].expand(*q.shape, 3))
+        # INACTIVE ROWS MUST NOT REACH THE DIHEDRAL. A residue without chi_k has
+        # CHI_ATOM_IDX all-zero there, so it indexes slot 0 four times and the
+        # four "atoms" coincide: `dihedral` then calls atan2(0, 0), whose VALUE
+        # is 0 and whose GRADIENT is NaN. `torch.where(active, ...)` below does
+        # not remove that -- NaN * 0 is NaN -- so the NaN reaches the parameters
+        # of whatever produced `chi`. It is invisible in a forward-only check and
+        # in any test whose loss happens to mask those rows; it surfaced as
+        # "Nonfinite gradient before optimizer update 0" on the first real batch.
+        # The substituted tetrad is in general position and its value is
+        # discarded (`delta` is zeroed and `moved` requires `active`).
+        p = torch.where(active[..., None, None], p, _SAFE_TETRAD.to(p))
         p0, p1, p2, p3 = p[..., 0, :], p[..., 1, :], p[..., 2, :], p[..., 3, :]
 
         cur = dihedral(p0, p1, p2, p3)                                  # [...]

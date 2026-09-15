@@ -15,6 +15,16 @@ BACKBONE_PREFIXES = ("design_condition_embedder.", "diffusion_module.")
 SC_PREFIXES = ("sidechain_module.",)
 FEEDBACK_PREFIXES = ("sidechain_feedback.", "hres_injector.", "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding")
 SC_LAYOUT_KEYS = ("bb_context", "centre_coord_input", "frame_aware_head", "template_residual", "type_logits_input", "edm", "a_bs_concat", "q_bs", "chi_output")
+# Added after the first SC donors were written, so they are compared against a
+# default instead of being required: a pre-existing donor legitimately has no
+# opinion about a module that did not exist. The defaults are the OFF settings,
+# which is what those donors are. A run that flips either of them is a different
+# module (different parameter names, different input contract), so a mismatch
+# still has to be refused -- that is why they are layout keys at all.
+SC_LAYOUT_KEYS_OPTIONAL = {"torsion_packer": False}
+# Same contract, but the value is a string (which arm's sequence conditioning),
+# so it cannot go through the bool() comparison above.
+SC_LAYOUT_KEYS_STR = {"packer_seq_cond": "a_token"}
 # Same one-step architecture as the validated donor, with no donor weights.
 SCRATCH_SC_LAYOUT = dict(bb_context=True, centre_coord_input=True, frame_aware_head=False,
     template_residual=False, type_logits_input=True, edm=False, a_bs_concat=True, q_bs=False)
@@ -99,9 +109,32 @@ def check_sc_layout(model, checkpoint):
         raise ValueError("SC donor requires edm=false and the global-coordinate frame convention")
     current = unwrap(model).configs.sidechain
     mismatched = [k for k in SC_LAYOUT_KEYS if bool(getattr(current, k, False)) != bool(saved[k])]
+    mismatched += [
+        k for k, default in SC_LAYOUT_KEYS_OPTIONAL.items()
+        if bool(getattr(current, k, default)) != bool(saved.get(k, default))
+    ]
+    mismatched += [
+        k for k, default in SC_LAYOUT_KEYS_STR.items()
+        if str(getattr(current, k, default)) != str(saved.get(k, default))
+    ]
     if mismatched:
         raise ValueError(f"SC donor architecture mismatch: {mismatched}")
     return dict(saved)
+
+
+def aa_head_identity(model):
+    """The AA head's provenance record, or an explicit statement that there is none.
+
+    `sc_only` runs (the supervised SC phases with no sequence decoding) build no
+    AA head at all, so there is no FaMPNN identity to record. Returning a marked
+    absence rather than omitting the field keeps every integrated checkpoint
+    self-describing: a reader can tell "no head" apart from "field not written".
+    """
+    head = getattr(unwrap(model), "aa_head", None)
+    if head is None:
+        return dict(backend="absent",
+                    reason="sc_only: the supervised SC phases never decode a sequence")
+    return dict(head.identity)
 
 
 def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None, sidechain_init="checkpoint"):
@@ -112,13 +145,16 @@ def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None,
         raise ValueError("Scratch SC initialization cannot also load an SC donor")
     if sidechain_init == "scratch" and not getattr(model, "enable_sidechain", False):
         raise ValueError("Scratch SC initialization requires an SC module")
-    if getattr(model, "aa_backend", None) != "fampnn":
-        raise ValueError("Component composition requires the strictly initialized FAMPNN adapter")
+    if getattr(model, "aa_backend", None) not in ("fampnn", "sc_only"):
+        raise ValueError(
+            "Component composition requires the strictly initialized FAMPNN adapter, "
+            "or aa_backend='sc_only' for a supervised SC phase that builds no AA head"
+        )
     # All validation precedes any writes; FAMPNN was strictly initialized by its adapter.
     backbone = read_checkpoint(backbone_checkpoint)
     state = component_state(model, backbone, BACKBONE_PREFIXES)
     sources = runtime_sources()
-    origins = dict(backbone=source_record(backbone_checkpoint, backbone), fampnn=dict(model.aa_head.identity), feedback=dict(origin="fresh"))
+    origins = dict(backbone=source_record(backbone_checkpoint, backbone), fampnn=aa_head_identity(model), feedback=dict(origin="fresh"))
     if sidechain_checkpoint:
         sidechain = read_checkpoint(sidechain_checkpoint)
         arch = check_sc_layout(model, sidechain)
@@ -127,6 +163,10 @@ def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None,
             atom_vocabulary="Proteo-AA-37-append-only", frame="global-input-CA-Gram-Schmidt", edm=False)
     elif sidechain_init == "scratch":
         arch = {key:bool(getattr(model.configs.sidechain,key)) for key in SC_LAYOUT_KEYS}
+        arch.update({key:bool(getattr(model.configs.sidechain,key,default))
+                     for key,default in SC_LAYOUT_KEYS_OPTIONAL.items()})
+        arch.update({key:str(getattr(model.configs.sidechain,key,default))
+                     for key,default in SC_LAYOUT_KEYS_STR.items()})
         if arch["edm"]:
             raise ValueError("Scratch SC initialization requires one-step packing (edm=false)")
         origins["sidechain"] = dict(origin="scratch", initialization="module_constructors", seed=int(torch.initial_seed()),
@@ -167,7 +207,7 @@ def integrated_record(model):
     from .stage4 import implementation_identity
     return dict(schema_version=SCHEMA_VERSION, effective_config=plain_config(model.configs),
         sc_mask_contract="chemical_model_observed_v1",
-        component_origins=model.component_origins, fampnn_identity=dict(model.aa_head.identity),
+        component_origins=model.component_origins, fampnn_identity=aa_head_identity(model),
         trainable_parameters=[n for n,p in model.named_parameters() if p.requires_grad],
         implementation=implementation_identity(), rng=rng_state())
 

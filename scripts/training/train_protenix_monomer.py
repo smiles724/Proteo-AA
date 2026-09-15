@@ -1010,7 +1010,53 @@ def build_configs(args: argparse.Namespace, device):
             from pxdesign_train.checkpoints import SCRATCH_SC_LAYOUT
             for key,value in SCRATCH_SC_LAYOUT.items():
                 setattr(configs.sidechain,key,value)
-        if not args.fampnn_checkpoint or not Path(args.fampnn_checkpoint).is_file():
+        # ---- Stage 2 V0 packer. AFTER the scratch layout, which describes the
+        # Cartesian module: those switches select how S_phi consumes a noisy
+        # side-chain input, and this module has none. Rather than leave them
+        # recorded-but-inert (a config that reads like a run it is not), force the
+        # S_phi-only ones off and keep only what the packer actually uses:
+        # bb_context (its entire geometric input) and type_logits_input.
+        if args.sc_torsion_packer:
+            configs.sidechain.torsion_packer = bool(args.sc_torsion_packer)
+            for key in ("centre_coord_input", "frame_aware_head", "template_residual",
+                        "a_bs_concat", "q_bs", "chi_output", "edm", "template_init"):
+                setattr(configs.sidechain, key, False)
+            configs.sidechain.bb_context = True
+            configs.sidechain.type_logits_input = True
+        if args.sc_packer_seq_cond is not None:
+            configs.sidechain.packer_seq_cond = str(args.sc_packer_seq_cond)
+        if args.sc_packer_plm_checkpoint is not None:
+            configs.sidechain.packer_plm_checkpoint = str(args.sc_packer_plm_checkpoint)
+        if configs.sidechain.packer_seq_cond in ("plm", "both") and not configs.sidechain.packer_plm_checkpoint:
+            raise ValueError(
+                "--sc-packer-seq-cond plm/both needs --sc-packer-plm-checkpoint; "
+                "without it the arm would train with one fewer input than its name says"
+            )
+        if args.sc_packer_c_node is not None:
+            configs.sidechain.packer_c_node = int(args.sc_packer_c_node)
+        if args.sc_packer_c_pair is not None:
+            configs.sidechain.packer_c_pair = int(args.sc_packer_c_pair)
+        if args.sc_packer_n_blocks is not None:
+            configs.sidechain.packer_n_blocks = int(args.sc_packer_n_blocks)
+        if args.stage4_weight_sc_chi is not None:
+            configs.stage4.weight_sc_chi = float(args.stage4_weight_sc_chi)
+        # AA backend. `sc_only` builds NO AA head: the supervised SC phases feed
+        # S_phi the native types and never decode a sequence, so FaMPNN is loaded,
+        # frozen and then never called there -- the requirement is the only thing
+        # requiring it. `model.py` refuses `sc_only` for any other phase.
+        sc_only_aa = str(args.aa_backend) == "sc_only"
+        if sc_only_aa:
+            from pxdesign_train.stage4 import SUPERVISED_SC_PHASES
+            if args.stage4_phase not in SUPERVISED_SC_PHASES:
+                raise ValueError(
+                    f"--aa-backend sc_only builds no AA head; phase {args.stage4_phase} "
+                    f"decodes a sequence. Valid phases: {SUPERVISED_SC_PHASES}"
+                )
+            if args.fampnn_checkpoint:
+                raise ValueError("--aa-backend sc_only and --fampnn-checkpoint contradict each other")
+            configs.residue_type.backend = "sc_only"
+            configs.enable_residue_type_head = False
+        elif not args.fampnn_checkpoint or not Path(args.fampnn_checkpoint).is_file():
             raise ValueError("Stage IV requires --fampnn-checkpoint with released pretrained weights")
         if args.load_aa_head_from:
             raise ValueError("Stage IV replaces the old AA head; --load-aa-head-from is incompatible")
@@ -1018,8 +1064,9 @@ def build_configs(args: argparse.Namespace, device):
             raise ValueError("Stage IV requires a one-step donor (sidechain.edm=false)")
         if args.allow_binder_sidechain_leakage:
             raise ValueError("Stage IV requires strict inference-safe binder featurization")
-        configs.residue_type.backend = "fampnn"
-        configs.residue_type.fampnn_checkpoint = str(Path(args.fampnn_checkpoint).resolve())
+        if not sc_only_aa:
+            configs.residue_type.backend = "fampnn"
+            configs.residue_type.fampnn_checkpoint = str(Path(args.fampnn_checkpoint).resolve())
         configs.training.train_mode = "joint"
         configs.loss.aa_time_weighting = False
         configs.sidechain.detach_feedback = False
@@ -1688,6 +1735,34 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage4-sc-lr", type=float, default=1e-5)
     p.add_argument("--stage4-bb-lr", type=float, default=1e-6)
     p.add_argument("--stage4-weight-physical", type=float, default=0.1)
+    p.add_argument("--detect-anomaly", action="store_true",
+                   help="torch.autograd.set_detect_anomaly: names the op that "
+                        "produced a nonfinite gradient. Slow; debugging only.")
+    p.add_argument(
+        "--aa-backend", choices=["fampnn", "sc_only"], default="fampnn",
+        help="sc_only builds NO AA head. Valid only for the supervised SC phases, "
+             "which supervise side chains against native residue types and decode "
+             "no sequence; it removes the FaMPNN weight requirement for those runs.",
+    )
+    # ---- Stage 2 V0: APM-style one-step torsion packer (docs/sc_torsion_packer_apm_zh.md) ----
+    p.add_argument(
+        "--sc-torsion-packer", action=argparse.BooleanOptionalAction, default=None,
+        help="Replace S_phi with the residue-level torsion packer: BB + res_type + "
+             "a_token -> chi_1..4 -> BuildSC. Reads no noisy side-chain coordinate.",
+    )
+    p.add_argument(
+        "--sc-packer-seq-cond", choices=["none", "a_token", "plm", "both"], default=None,
+        help="THE ablation. Which sequence channel is added to the node embedding, "
+             "at exactly the point APM adds its PLM: none / a_token (Stage 1's "
+             "token) / plm (frozen ESM-2 650M, APM's setting) / both.",
+    )
+    p.add_argument("--sc-packer-plm-checkpoint", default=None,
+                   help="fair-esm ESM-2 650M weights; required by the plm/both arms.")
+    p.add_argument("--sc-packer-c-node", type=int, default=None)
+    p.add_argument("--sc-packer-c-pair", type=int, default=None)
+    p.add_argument("--sc-packer-n-blocks", type=int, default=None)
+    p.add_argument("--stage4-weight-sc-chi", type=float, default=None,
+                   help="Weight of L_chi (AF2 Alg. 27) for the torsion packer.")
     parsed = p.parse_args()
     supplied = {token.split("=", 1)[0] for token in sys.argv[1:]}
     parsed._explicit_args = [action.dest for action in p._actions if supplied.intersection(action.option_strings)]
@@ -1931,6 +2006,20 @@ def main() -> None:
             configs.stage4.phase, components.schedule.weights_at(0), configs.training.sidechain_init,
             configs.sidechain.predicted_frame, configs.sidechain.predicted_mask, configs.sidechain.force_gt_type_logits)
     logging.info("Output dir: %s", output_dir)
+    # Seed EVERY generator before the model is constructed. `--seed` used to
+    # reach only the data sampler, so two runs differing by one architecture flag
+    # also differed by their random initialization -- which is precisely the
+    # confound an A/B over that flag cannot tolerate. It also matters that numpy
+    # is included: the AF2-style `Linear(init=...)` initializers draw through
+    # scipy's truncnorm, i.e. numpy's global RNG, not torch's.
+    # `train_sc_adaptation.py` already did this; this entry point did not.
+    from pxdesign_train.runner.sc_stream import seed_all
+    seed_all(int(configs.seed))
+    if args.detect_anomaly:
+        torch.autograd.set_detect_anomaly(True)
+        logging.warning("autograd anomaly detection ON: slow, debugging only")
+    logging.info("Seeded python/numpy/torch with seed=%d before model construction",
+                 int(configs.seed))
     train_from_components(
         configs=configs,
         components=components,

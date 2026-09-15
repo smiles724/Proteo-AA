@@ -11,6 +11,11 @@ from .sidechain.frames import gather_backbone
 from .sidechain.instantiate import instantiate_from_type_indices
 from .sidechain.losses import sidechain_global_frame_aligned_loss
 
+# Phases that supervise side chains against NATIVE residue types and decode no
+# sequence. These are exactly the phases `supervised_sc_forward` serves, and
+# exactly the phases `aa_backend="sc_only"` is allowed to run.
+SUPERVISED_SC_PHASES = ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt")
+
 
 def cycle_config(model, rounds=None, temperature=None):
     config = model.configs.stage4
@@ -203,6 +208,12 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
         pack["sc_frame_R"].float(),pack["sc_frame_t"].float(),mask)
     symmetry_mse = sidechain_global_frame_aligned_loss(pack["sc_pred_global"].float(), feat["sc_gt_local"].float(),
         pack["sc_frame_R"].float(), pack["sc_frame_t"].float(), mask, symmetry_aware=True, residue_types=native)
+    # L_chi (AF2 Alg. 27), the other half of APM's L_Packing. Present only when the
+    # torsion packer produced torsions; the Cartesian module has none to supervise.
+    chi_loss, chi_metrics = pack["sc_pred_global"].float().sum()*0., {}
+    if "sc_pred_chi_raw" in pack:
+        from .sidechain.torsion_loss import packing_chi_loss
+        chi_loss, chi_metrics = packing_chi_loss(feat, pack, native, mask)
     repair_terms = {}
     repair_metrics = {}
     if cfg.phase == "sc_geometry_repair":
@@ -236,12 +247,20 @@ def supervised_sc_forward(model, feat, labels, s_inputs, s_trunk, z_trunk):
     if float(getattr(cfg, "weight_physical", 0.)) > 0 and "sc_pack_val" not in pack:
         raise RuntimeError("Native physical objective requested but packer did not compute it")
     metrics = {}
-    if not getattr(model, "training", True) and getattr(cfg, "adaptation_protocol", "legacy") == "sc_only_v1":
+    # Packing diagnostics on every supervised SC evaluation, not only under the
+    # sc_only_v1 protocol. They are the numbers the acceptance criteria are
+    # written in -- bond violation rate, chi recovery, rotamer recovery,
+    # symmetry RMSD -- so gating them on a protocol flag that the scratch
+    # warm-up does not set means a 24 h run reports a loss and nothing it can be
+    # judged by. This is eval-only and under no_grad: it adds logged numbers and
+    # changes no objective, no gradient and no checkpoint.
+    if not getattr(model, "training", True):
         from .sidechain.metrics import diagnose_packing
         metrics = diagnose_packing(feat, pack, native, xyz, observed=mask)
     return dict(supervised_sc=True,sc_gt_mse=mse,sc_observed_atoms=mask.sum(),
         sc_symmetry_mse=symmetry_mse, sc_geometry=repair_terms,
-        packing_metrics=dict(metrics, **repair_metrics),
+        sc_chi=chi_loss if "sc_pred_chi_raw" in pack else None,
+        packing_metrics=dict(metrics, **repair_metrics, **chi_metrics),
         sc_physical=physical, sc_clash=pack.get("sc_pack_clash", physical.detach()),
         sc_skipped_noncanonical=(design&~canonical).sum(),
         sc_invalid_native_frames=(design&~feat["sc_frame_valid"].bool()).sum(),
@@ -388,7 +407,8 @@ def implementation_identity():
 
 def checkpoint_identity(model):
     cfg = model.configs.stage4
-    return dict(**model.aa_head.identity, **implementation_identity(), phase=str(cfg.phase),
+    from .checkpoints import aa_head_identity
+    return dict(**aa_head_identity(model), **implementation_identity(), phase=str(cfg.phase),
         sc_mask_contract="chemical_model_observed_v1",
         cycle=asdict(cycle_config(model)), inference_rounds=int(cfg.inference_rounds),
         mask_policy="query-X-hide-SC-before-encoding-v1", sidechain_edm=False,

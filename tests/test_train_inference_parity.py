@@ -88,6 +88,40 @@ TRAIN_ONLY = {
                           "its predecessor (local_coord_input) needed and what let the "
                           "two paths drift. It only recentres the per-atom embedding; "
                           "the coordinates crossing the interface are global either way.",
+    # ---- TorsionPacker (sidechain.torsion_packer), ported from APM ----
+    # The switch itself IS mirrored: the sampler's `_fa` reads sc_torsion_packer,
+    # because the packer needs the frame unconditionally. Everything below is a
+    # constructor argument of that module. They are baked into the instance the
+    # sampler calls, exactly like edm_sigma_data, so there is nothing for the
+    # sampler to mirror -- a mismatch is impossible rather than silent.
+    "packer_seq_cond": "selects which sequence channel is ADDED to the node "
+                       "embedding, decided at construction; both paths call the "
+                       "same instance. Recorded as a checkpoint layout key, so a "
+                       "donor from another arm is refused at load time.",
+    "packer_plm_checkpoint": "path to the frozen ESM-2 weights the instance already holds",
+    "packer_c_node": "constructor width of the shared TorsionPacker instance",
+    "packer_c_pair": "constructor width of the shared TorsionPacker instance",
+    "packer_n_blocks": "constructor depth of the shared TorsionPacker instance",
+    "packer_ipa_c_hidden": "IPA constructor dimension of the shared instance",
+    "packer_ipa_no_heads": "IPA constructor dimension of the shared instance",
+    "packer_no_qk_points": "IPA constructor dimension of the shared instance",
+    "packer_no_v_points": "IPA constructor dimension of the shared instance",
+    "packer_seq_tfmr_num_heads": "sequence-transformer constructor dimension",
+    "packer_seq_tfmr_num_layers": "sequence-transformer constructor dimension",
+    "packer_transformer_dropout": "dropout is a training-time regulariser; the "
+                                  "sampler runs the same instance under eval()",
+    "packer_num_torsion_blocks": "AngleResnet depth, fixed at construction",
+    "packer_c_pos_emb": "node feature width, fixed at construction",
+    "packer_c_timestep_emb": "node feature width, fixed at construction",
+    "packer_edge_feat_dim": "edge feature width, fixed at construction",
+    "packer_edge_num_bins": "distogram bin count, fixed at construction",
+    "packer_embed_aatype": "node feature switch, fixed at construction",
+    "packer_embed_rotvecs": "node feature switch, fixed at construction",
+    "packer_random_torsion_input": "APM feeds a uniform random torsion as a dummy "
+                                   "input; it is drawn inside forward(), so both "
+                                   "paths behave identically by construction. It "
+                                   "does make sampling stochastic -- that is APM's "
+                                   "behaviour, documented in packer.py.",
 }
 
 

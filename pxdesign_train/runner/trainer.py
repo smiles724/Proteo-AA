@@ -284,14 +284,14 @@ class PXDesignTrainer:
                 sidechain_init=getattr(self.configs.training, "sidechain_init", "checkpoint"))
             self._log("Loaded components: " + ", ".join(f"{name}={record.get('sha256', record.get('checkpoint_sha256', record.get('origin')))}" for name,record in origins.items()))
         self._apply_trainable_filter()
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if getattr(self.raw_model, "packing_stack", False):
             from pxdesign_train.stage4 import apply_phase
             apply_phase(self.raw_model)
         if self.use_ddp:
             self.model = DDP(
                 self.raw_model,
                 device_ids=[self.rank] if self.device.type == "cuda" else None,
-                find_unused_parameters=getattr(self.raw_model, "aa_backend", "mlp") == "fampnn",
+                find_unused_parameters=getattr(self.raw_model, "packing_stack", False),
                 static_graph=False,
             )
         else:
@@ -374,9 +374,9 @@ class PXDesignTrainer:
     def _init_optimizer(self) -> None:
         cfg = self.configs.training
         self.train_mode = str(getattr(cfg, "train_mode", "joint"))
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if getattr(self.raw_model, "packing_stack", False):
             if self.train_mode != "joint":
-                raise ValueError("FaMPNN Stage IV requires joint backward with AA/SC/BB parameter groups")
+                raise ValueError("Stage IV pack/refine requires joint backward with AA/SC/BB parameter groups")
         warmup = int(getattr(cfg, "warmup_steps", 0))
 
         # Stage III uses a much smaller LR for the coordinate/side-chain modules
@@ -490,12 +490,12 @@ class PXDesignTrainer:
                 )
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
-            if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+            if getattr(self.raw_model, "packing_stack", False):
                 from pxdesign_train.stage4 import optimizer_groups
                 params = optimizer_groups(self.raw_model)
             if not params:
                 raise ValueError("No trainable parameters")
-            self.optimizer = _make_adam(params, split_aa_head=getattr(self.raw_model, "aa_backend", "mlp") != "fampnn")
+            self.optimizer = _make_adam(params, split_aa_head=not getattr(self.raw_model, "packing_stack", False))
             self.lr_scheduler = _make_sched(self.optimizer)
             self._optimizers = [self.optimizer]
             self._schedulers = [self.lr_scheduler]
@@ -626,6 +626,13 @@ class PXDesignTrainer:
             coord = symmetry if getattr(cfg,"symmetry_aware_coordinates",False) else mse
             total = float(cfg.weight_sc_aux)*coord + float(cfg.weight_physical)*physical
             extra = dict(sc_symmetry_mse=symmetry.detach(), sc_symmetry_rmsd=symmetry.detach().sqrt())
+            # APM's L_Packing = L_chi + L_FAPE. The coordinate half is `coord`
+            # above; this is L_chi, and it is only present when the module that
+            # emits torsions is the one running.
+            chi = out.get("sc_chi")
+            if chi is not None:
+                total = total + float(getattr(cfg, "weight_sc_chi", 1.0))*chi.float()
+                extra["sc_chi"] = chi.detach()
             if cfg.phase == "sc_geometry_repair":
                 ramp = min(1., (self.step+1)/max(1,int(cfg.geometry_ramp_steps))) if self.model.training else 1.
                 extra["geometry_ramp"] = mse.new_tensor(ramp)
@@ -703,7 +710,7 @@ class PXDesignTrainer:
     def train_step(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Single training step. Returns the loss-component dict for logging."""
         self.model.train()
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if getattr(self.raw_model, "packing_stack", False):
             from pxdesign_train.stage4 import apply_phase
             apply_phase(self.raw_model)
         dtype = self._train_precision()
@@ -1138,7 +1145,7 @@ class PXDesignTrainer:
             # never saw. Recorded separately so an evaluator can reconstruct it.
             "sidechain_edm_hparams": self._sidechain_edm_hparams(),
         }
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if getattr(self.raw_model, "packing_stack", False):
             from pxdesign_train.stage4 import checkpoint_identity
             state["stage4_identity"] = checkpoint_identity(self.raw_model)
             from pathlib import Path
@@ -1354,7 +1361,7 @@ class PXDesignTrainer:
                     self.ema_wrapper.shadow = ckpt["ema"]["shadow"]
                 restore_rng(ckpt["integrated"]["rng"])
             return
-        if getattr(self.raw_model, "aa_backend", "mlp") == "fampnn":
+        if getattr(self.raw_model, "packing_stack", False):
             from pxdesign_train.stage4 import checkpoint_identity
             recorded = ckpt.get("stage4_identity")
             expected = checkpoint_identity(self.raw_model)

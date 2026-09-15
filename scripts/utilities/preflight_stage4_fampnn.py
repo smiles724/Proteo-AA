@@ -44,8 +44,10 @@ def main():
         from pxdesign_train.checkpoints import restore_model
         restore_model(model,read_checkpoint(a.warm_start_checkpoint or a.resume_checkpoint))
     else:
-        if not a.backbone_checkpoint or not a.fampnn_checkpoint:
-            raise ValueError('Composition requires official backbone and pretrained FAMPNN checkpoints')
+        sc_only = str(getattr(config.residue_type, 'backend', '')) == 'sc_only'
+        if not a.backbone_checkpoint or (not a.fampnn_checkpoint and not sc_only):
+            raise ValueError('Composition requires the official backbone checkpoint, and pretrained '
+                             'FAMPNN unless --aa-backend sc_only (which builds no AA head)')
         compose_components(model,backbone_checkpoint=a.backbone_checkpoint,sidechain_checkpoint=a.sidechain_checkpoint or None,
             sidechain_init=getattr(config.training,"sidechain_init","checkpoint"))
         for path,prefixes in ((a.backbone_checkpoint,BACKBONE_PREFIXES),(a.sidechain_checkpoint,SC_PREFIXES)):

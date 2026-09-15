@@ -215,7 +215,22 @@ class ProtenixDesignTrain(ProtenixDesign):
                 if c_in is None:
                     c_in = getattr(getattr(configs, "model", object()), "c_s_inputs", 449)
             self.aa_backend = str(getattr(res_cfg, "backend", "mlp"))
-            if self.aa_backend == "fampnn":
+            # `sc_only`: the Stage IV pack/refine FORWARD with NO AA head at all.
+            #
+            # The supervised SC phases (sc_warmup / sc_geometry_repair /
+            # sc_complex_adapt) feed S_phi the NATIVE residue types as hard logits
+            # and never decode a sequence -- `supervised_sc_forward` builds its
+            # type logits from `aa_clean` and the AA objective coefficients are
+            # pinned to zero. FaMPNN is loaded, frozen and then never called. So
+            # the only thing requiring it in those phases is the requirement
+            # itself, and that requirement makes the phase unrunnable for anyone
+            # without the released weights.
+            #
+            # This is NOT "FaMPNN but skipped": there is no head, `aa_head`
+            # does not exist, the checkpoint records `backend="absent"`, and the
+            # phase check below refuses any phase that would need to decode.
+            self.packing_stack = self.aa_backend in ("fampnn", "sc_only")
+            if self.packing_stack:
                 self.aa_input_source = "diffusion_internal"
                 c_in = self.diffusion_module.c_token
             if self.aa_backend == "mlp" and self.enable_residue_type_head:
@@ -225,6 +240,22 @@ class ProtenixDesignTrain(ProtenixDesign):
             elif self.aa_backend == "fampnn":
                 from pxdesign_train.aa.fampnn_head import FaMPNNHead
                 self.aa_head = FaMPNNHead(res_cfg.fampnn_checkpoint, identity=getattr(res_cfg, "fampnn_identity", None))
+            elif self.aa_backend == "sc_only":
+                from pxdesign_train.stage4 import SUPERVISED_SC_PHASES
+
+                phase = str(getattr(getattr(configs, "stage4", object()), "phase", ""))
+                if phase not in SUPERVISED_SC_PHASES:
+                    raise ValueError(
+                        f"aa_backend='sc_only' builds no AA head, so phase {phase!r} "
+                        f"cannot run; it is only valid for {SUPERVISED_SC_PHASES}, which "
+                        "supervise side chains against native types and decode nothing."
+                    )
+                if self.enable_residue_type_head:
+                    raise ValueError(
+                        "aa_backend='sc_only' and enable_residue_type_head are "
+                        "contradictory: one says there is no sequence head, the other "
+                        "builds one that nothing in these phases reads."
+                    )
             elif self.aa_backend != "mlp":
                 raise ValueError(f"Unknown AA backend {self.aa_backend!r}")
         # Capture (and, under sidechain.a_direct, REPLACE) the internal per-token
@@ -293,6 +324,28 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_centre_coord_input = bool(getattr(sc_cfg, "centre_coord_input", False)) if sc_cfg is not None else False
             self.sc_template_residual = bool(getattr(sc_cfg, "template_residual", False)) if sc_cfg is not None else False
             self.sc_chi_output = bool(getattr(sc_cfg, "chi_output", False)) if sc_cfg is not None else False
+            # ---- Stage 2 V0 packer (sidechain.torsion_packer) ----
+            # A DIFFERENT MODULE, not a head switch: it reads no x_t^SC, so every
+            # coordinate-module setting below is meaningless for it and silently
+            # accepting them would produce a run whose config describes something
+            # it is not doing. Refuse instead.
+            self.sc_torsion_packer = bool(getattr(sc_cfg, "torsion_packer", False)) if sc_cfg is not None else False
+            if self.sc_torsion_packer:
+                conflicts = [
+                    name for name, value in (
+                        ("edm", getattr(sc_cfg, "edm", False)),
+                        ("chi_output", self.sc_chi_output),
+                        ("template_residual", self.sc_template_residual),
+                    ) if value
+                ]
+                if conflicts:
+                    raise ValueError(
+                        "sidechain.torsion_packer replaces S_phi, so it cannot be "
+                        f"combined with {conflicts}: those describe how the Cartesian "
+                        "module consumes its noisy side-chain input, and this module "
+                        "has no such input."
+                    )
+                self.sc_packer_seq_cond = str(getattr(sc_cfg, "packer_seq_cond", "a_token"))
             if self.sc_template_residual and not self.sc_frame_aware_head:
                 raise ValueError(
                     "sidechain.template_residual requires frame_aware_head=True: the "
@@ -434,16 +487,54 @@ class ProtenixDesignTrain(ProtenixDesign):
             self.sc_cross_neighbors = (
                 int(getattr(sc_cfg, "cross_neighbors", 16)) if sc_cfg is not None else 16
             )
-            self.sidechain_module = SideChainModule(
-                c_res=self.sc_c_res, c_atom=c_atom, n_type=vocab_size,
-                n_blocks=n_blocks, n_heads=n_heads, n_cross_blocks=n_cross_blocks,
-                ff_mult=ff_mult, trunk_grad_scale=sc_grad_scale,
-                a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
-                cross_neighbors=self.sc_cross_neighbors,
-                template_residual=self.sc_template_residual,
-                chi_output=self.sc_chi_output,
-                centre_coord_input=self.sc_centre_coord_input,
-            )
+            if self.sc_torsion_packer:
+                from pxdesign_train.sidechain.packer import TorsionPacker
+
+                # The packer is residue-level, so its per-atom features are its own
+                # node width. EVERY downstream consumer of `c_atom` (HResFeedback
+                # below, ATokenFusion / QAtomBSFusion further down) is constructed
+                # from this variable, so rebinding it here keeps the whole feedback
+                # contract shape-consistent instead of projecting to a width that
+                # only exists because the Cartesian module happened to use it.
+                # Every switch is read with a literal key, not through a helper:
+                # `tests/test_train_inference_parity.py` scrapes this file for
+                # `getattr(sc_cfg, "<key>"` to prove no side-chain switch can
+                # change training behaviour invisibly. A lambda would hide them.
+                c_atom = int(getattr(sc_cfg, "packer_c_node", 256))
+                self.sidechain_module = TorsionPacker(
+                    c_res=self.sc_c_res, c_node=c_atom, n_type=vocab_size,
+                    c_pair=int(getattr(sc_cfg, "packer_c_pair", 128)),
+                    n_blocks=int(getattr(sc_cfg, "packer_n_blocks", 6)),
+                    ipa_c_hidden=int(getattr(sc_cfg, "packer_ipa_c_hidden", 16)),
+                    ipa_no_heads=int(getattr(sc_cfg, "packer_ipa_no_heads", 8)),
+                    no_qk_points=int(getattr(sc_cfg, "packer_no_qk_points", 8)),
+                    no_v_points=int(getattr(sc_cfg, "packer_no_v_points", 12)),
+                    seq_tfmr_num_heads=int(getattr(sc_cfg, "packer_seq_tfmr_num_heads", 4)),
+                    seq_tfmr_num_layers=int(getattr(sc_cfg, "packer_seq_tfmr_num_layers", 4)),
+                    transformer_dropout=float(getattr(sc_cfg, "packer_transformer_dropout", 0.2)),
+                    num_torsion_blocks=int(getattr(sc_cfg, "packer_num_torsion_blocks", 4)),
+                    c_pos_emb=int(getattr(sc_cfg, "packer_c_pos_emb", 128)),
+                    c_timestep_emb=int(getattr(sc_cfg, "packer_c_timestep_emb", 128)),
+                    edge_feat_dim=int(getattr(sc_cfg, "packer_edge_feat_dim", 64)),
+                    edge_num_bins=int(getattr(sc_cfg, "packer_edge_num_bins", 22)),
+                    seq_cond=self.sc_packer_seq_cond,
+                    embed_aatype=bool(getattr(sc_cfg, "packer_embed_aatype", True)),
+                    embed_rotvecs=bool(getattr(sc_cfg, "packer_embed_rotvecs", True)),
+                    random_torsion_input=bool(getattr(sc_cfg, "packer_random_torsion_input", True)),
+                    plm_checkpoint=str(getattr(sc_cfg, "packer_plm_checkpoint", "")),
+                    trunk_grad_scale=sc_grad_scale,
+                )
+            else:
+                self.sidechain_module = SideChainModule(
+                    c_res=self.sc_c_res, c_atom=c_atom, n_type=vocab_size,
+                    n_blocks=n_blocks, n_heads=n_heads, n_cross_blocks=n_cross_blocks,
+                    ff_mult=ff_mult, trunk_grad_scale=sc_grad_scale,
+                    a_bs_concat=self.sc_a_bs_concat, q_bs=self.sc_q_bs, c_q=c_q,
+                    cross_neighbors=self.sc_cross_neighbors,
+                    template_residual=self.sc_template_residual,
+                    chi_output=self.sc_chi_output,
+                    centre_coord_input=self.sc_centre_coord_input,
+                )
             if self.sc_edm:
                 from pxdesign_train.sidechain.edm import SideChainEDM
 
@@ -1057,6 +1148,8 @@ class ProtenixDesignTrain(ProtenixDesign):
         self._q_bb_idx_cache = None
         self._q_direct_active = False
 
+        from pxdesign_train.stage4 import SUPERVISED_SC_PHASES
+
         sc_adaptation = (getattr(self, "aa_backend", "mlp") == "fampnn"
             and getattr(self.configs.stage4, "adaptation_protocol", "legacy") == "sc_only_v1"
             and self.configs.stage4.phase == "sc_adapt")
@@ -1072,8 +1165,8 @@ class ProtenixDesignTrain(ProtenixDesign):
                     valid = (idx >= 0) & observed[idx.clamp_min(0)]
                     input_feature_dict[key] = torch.where(valid, idx, -1)
                 input_feature_dict["packing_context_atom_mask"] = observed
-        if (getattr(self, "aa_backend", "mlp") == "fampnn"
-                and (self.configs.stage4.phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt")
+        if (getattr(self, "packing_stack", False)
+                and (self.configs.stage4.phase in SUPERVISED_SC_PHASES
                      or (sc_adaptation and source != "full_sample"))
                 and self.training and getattr(self.configs.stage4, "native_sc_augmentation", False)):
             from .sc_augmentation import augment_native_sc_inputs
@@ -1097,10 +1190,10 @@ class ProtenixDesignTrain(ProtenixDesign):
         if policy not in ("joint", "fixed_context"):
             raise ValueError(f"Unknown initial target policy {policy}")
         input_feature_dict = dict(input_feature_dict, stage4_fixed_context=policy == "fixed_context")
-        if getattr(self, "aa_backend", "mlp") == "fampnn" and N_sample != 1:
-            raise ValueError("FAMPNN pack/refine requires one diffusion sample; use gradient accumulation")
+        if getattr(self, "packing_stack", False) and N_sample != 1:
+            raise ValueError("Stage IV pack/refine requires one diffusion sample; use gradient accumulation")
 
-        if getattr(self, "aa_backend", "mlp") == "fampnn" and self.configs.stage4.phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt"):
+        if getattr(self, "packing_stack", False) and self.configs.stage4.phase in SUPERVISED_SC_PHASES:
             from pxdesign_train.stage4 import supervised_sc_forward
             return supervised_sc_forward(self,input_feature_dict,label_dict,s_inputs,s,z)
 
@@ -1776,7 +1869,16 @@ class ProtenixDesignTrain(ProtenixDesign):
             # Frame-aware head (sidechain.frame_aware_head): hand S_phi the SAME stop-grad
             # rigid frame the target is built on, so it regresses rotation-invariant local
             # offsets and the known transform does the rotating. Output stays global.
-            _fa = getattr(self, "sc_frame_aware_head", False) and fR is not None and ft is not None
+            # The torsion packer is frame-aware by construction, not by option: it
+            # predicts torsions in the residue frame and BuildSC's output has to be
+            # mapped out with that same frame. So it always receives F_hat,
+            # independently of the `frame_aware_head` switch (which is an A/B knob
+            # for the Cartesian head's output parameterisation and means nothing
+            # here). It raises if the frames are missing rather than falling back.
+            _fa = (
+                getattr(self, "sc_frame_aware_head", False)
+                or getattr(self, "sc_torsion_packer", False)
+            ) and fR is not None and ft is not None
 
             # ---- ATOM-level (q) feedback: give S_phi its 4 backbone context slots ----
             # 14-slot context: S_phi attends over ATOM14 = (N, CA, C, O) +
@@ -1891,6 +1993,22 @@ class ProtenixDesignTrain(ProtenixDesign):
                     sc_kwargs["bb_atom_mask"] = bb_model_mask
             if bb_q is not None:
                 sc_kwargs["bb_q"] = bb_q
+            if getattr(self, "sc_torsion_packer", False):
+                # APM's packer has a residue-index positional embedding on the
+                # node side and a relative-position term on the edge side. Both
+                # need the author numbering, which no other S_phi consumer asked
+                # for -- hence a packer-only kwarg rather than a signature change.
+                ridx = input_feature_dict.get("residue_index")
+                if ridx is not None:
+                    ridx = ridx.to(h_res.device).long()
+                    if use_per_sigma:
+                        ridx = _tile_per_sigma(ridx, trailing_ndim=1)
+                    else:
+                        if ridx.dim() == 1:
+                            ridx = ridx.unsqueeze(0)
+                        if ridx.shape[0] != h_res.shape[0]:
+                            ridx = ridx.expand(h_res.shape[0], -1)
+                    sc_kwargs["residue_index"] = ridx
             if sc_sigma is not None and ca_for_module is None:
                 # Refuse rather than fall through. A silent fallback here would run
                 # the one-step path while every log line, checkpoint record and
@@ -1956,6 +2074,22 @@ class ProtenixDesignTrain(ProtenixDesign):
                 y0_global, atom_feats, bb_feats = sc_out
             else:
                 y0_global, atom_feats = sc_out
+            # Torsions travel beside the coordinates, not instead of them: the
+            # coordinate contract (`sc_pred_global` and every mask around it) is
+            # unchanged, and L_chi is an ADDITIONAL term the caller may weight.
+            # Read immediately after the call, the same forward-scoped handoff
+            # `_a_token_cache` uses.
+            if getattr(self, "sc_torsion_packer", False):
+                torsions = getattr(self.sidechain_module, "last_torsions", None)
+                if torsions is None:
+                    raise RuntimeError(
+                        "sidechain.torsion_packer is on but the packer recorded no "
+                        "torsions; the coordinates would then be supervised while "
+                        "L_chi silently vanished."
+                    )
+                out["sc_pred_chi_raw"] = torsions["raw"]
+                out["sc_pred_chi"] = torsions["chi"]
+                out["sc_pred_chi_mask"] = torsions["chi_mask"]
             h_res_prime = self.sidechain_feedback(
                 atom_feats, sc_slot, h_res, detach=self.sc_detach_feedback,
             )

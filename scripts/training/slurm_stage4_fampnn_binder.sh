@@ -26,7 +26,14 @@ elif [[ -n ${WARM_START_CHECKPOINT:-} ]]; then
   COMPONENT_ARGS=(--warm-start-checkpoint "$WARM_START_CHECKPOINT")
 else
   : "${BACKBONE_CHECKPOINT:?Set BACKBONE_CHECKPOINT to official PXDesign weights}"
-  COMPONENT_ARGS=(--backbone-checkpoint "$BACKBONE_CHECKPOINT" --fampnn-checkpoint "$FAMPNN_CHECKPOINT")
+  COMPONENT_ARGS=(--backbone-checkpoint "$BACKBONE_CHECKPOINT")
+  # AA_BACKEND=sc_only builds no AA head, so there is no FaMPNN checkpoint to
+  # name. Only the supervised SC phases accept it; the driver refuses any other.
+  if [[ ${AA_BACKEND:-fampnn} == sc_only ]]; then
+    COMPONENT_ARGS+=(--aa-backend sc_only)
+  else
+    COMPONENT_ARGS+=(--fampnn-checkpoint "$FAMPNN_CHECKPOINT")
+  fi
   if [[ ${SC_INIT:-checkpoint} == scratch ]]; then
     COMPONENT_ARGS+=(--sidechain-init scratch)
   else
@@ -44,7 +51,15 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 export PYTHONUNBUFFERED=1
 PROTENIX_CODE_DIR=${PROTENIX_CODE_DIR:-$PROTEO_REPO/Protenix}
 PXDESIGN_CODE_DIR=${PXDESIGN_CODE_DIR:-$PROTEO_REPO/PXDesign}
-export PYTHONPATH="$PROTEO_REPO:$PROTENIX_CODE_DIR:$PXDESIGN_CODE_DIR:$FAMPNN_ROOT"
+if [[ ${AA_BACKEND:-fampnn} == sc_only ]]; then
+  # No AA head: fampnn is neither imported nor loaded. Leaving its directory on
+  # PYTHONPATH is NOT harmless -- `pip freeze` below walks sys.path, and an
+  # unreadable entry raises PermissionError. That is how the first sc_only
+  # dry-run died, AFTER the component preflight had already passed.
+  export PYTHONPATH="$PROTEO_REPO:$PROTENIX_CODE_DIR:$PXDESIGN_CODE_DIR"
+else
+  export PYTHONPATH="$PROTEO_REPO:$PROTENIX_CODE_DIR:$PXDESIGN_CODE_DIR:$FAMPNN_ROOT"
+fi
 export PROTENIX_DATA_ROOT_DIR="$PROTENIX_ROOT_DIR/common"
 cd "$PROTEO_REPO"
 mkdir -p "$OUTPUT_DIR"

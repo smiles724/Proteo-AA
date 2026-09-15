@@ -1,0 +1,25 @@
+# Phase 2: A_SB on L_BB with the packing detached; A_BS frozen
+#
+# Only the adapters train; PXDesign and FaMPNN stay frozen, so any gain is
+# attributable to the coupling rather than to fine-tuning a component.
+# No data source is configured here on purpose -- pass it on the command line.
+couple:
+  phase: sc_to_bb
+  max_steps: 20000
+  grad_accum_steps: 1
+  pack_steps: 10          # side-chain rollout inside the cycle; 50 at eval time
+  sigma_data_backbone: 16.0
+  log_every: 25
+  checkpoint_every: 1000
+  ema_relative_length: 0.25
+  seed: 0
+adapters:
+  d_hidden: 256
+  d_noise: 64
+# Not specified by the plan -- chosen here and recorded in every checkpoint.
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_steps: 500
+  max_grad_norm: 1.0
+  schedule: constant

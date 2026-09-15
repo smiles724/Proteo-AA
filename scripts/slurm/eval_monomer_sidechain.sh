@@ -21,7 +21,10 @@
 #       sbatch scripts/slurm/eval_monomer_sidechain.sh
 set -euo pipefail
 
-ROOT=/hai/users/y/f/yfsun/Proteo-AA-pxdesign-fampnn-pack
+# Derived from this script's location so the repo can be moved or renamed
+# (it already has been, into ~/"Proteo-AA old"/). Quote it everywhere: the
+# current path contains a space.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT=/hai/scratch/yfsun/proteo_aa_runs/pxf_sc_monomer/${SLURM_JOB_ID}
 mkdir -p "$OUT"
 cd "$ROOT"

@@ -15,9 +15,18 @@ def test_fampnn_source_is_pristine():
     assert provenance.component_record("fampnn")["patched"] is False
 
 
-def test_only_pxdesign_may_carry_a_patch():
-    assert set(provenance.ALLOWED_PATCH) == {"pxdesign"}
-    assert (provenance.repo_root() / provenance.ALLOWED_PATCH["pxdesign"]).is_file()
+def test_only_pxdesign_may_carry_patches():
+    assert set(provenance.ALLOWED_PATCHES) == {"pxdesign"}
+    for patch in provenance.ALLOWED_PATCHES["pxdesign"]:
+        assert (provenance.repo_root() / patch).is_file(), patch
+
+
+def test_patch_set_is_validated_by_reverse_apply():
+    """Proves the tree is HEAD + exactly the recorded patches, not merely similar."""
+    root = provenance.repo_root() / "PXDesign"
+    assert provenance._is_exactly_patched(root, provenance.ALLOWED_PATCHES["pxdesign"])
+    # A missing patch file must fail closed rather than pass.
+    assert not provenance._is_exactly_patched(root, ("patches/does-not-exist.patch",))
 
 
 def test_unknown_component_is_rejected():

@@ -21,9 +21,25 @@ import subprocess
 import sys
 import types
 
-# The Proteo-AA checkout holding the metric implementations.
-DEFAULT_ROOT = Path("/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases")
+# Proteo-AA checkouts that may hold the metric implementations. Searched in
+# order, because these worktrees get reorganized -- they have already moved once,
+# from ~/ into ~/"Proteo-AA old"/ -- and a single hardcoded path silently breaks.
 ENV_VAR = "PROTEOAA_METRICS_ROOT"
+CANDIDATE_ROOTS = (
+    Path("/hai/users/y/f/yfsun/Proteo-AA old/Proteo-AA-sc-adaptation-phases"),
+    Path("/hai/users/y/f/yfsun/Proteo-AA-sc-adaptation-phases"),
+    Path("/hai/users/y/f/yfsun/Proteo-AA old/Proteo-AA-sc-repair-arm-f"),
+    Path("/hai/users/y/f/yfsun/Proteo-AA"),
+)
+METRICS_RELATIVE = Path("pxdesign_train/sidechain/metrics.py")
+
+
+def default_root():
+    """First candidate that actually carries the metric implementations."""
+    for candidate in CANDIDATE_ROOTS:
+        if (candidate / METRICS_RELATIVE).is_file():
+            return candidate
+    return CANDIDATE_ROOTS[0]
 MODULES = ("metrics", "lddt", "frames", "instantiate")
 
 
@@ -56,7 +72,7 @@ class CanonicalMetrics:
 
 
 def resolve_root(root=None):
-    return Path(root or os.environ.get(ENV_VAR) or DEFAULT_ROOT).resolve()
+    return Path(root or os.environ.get(ENV_VAR) or default_root()).resolve()
 
 
 def load(root=None):
@@ -67,9 +83,25 @@ def load(root=None):
         raise ValueError(
             f"No Proteo-AA side-chain metrics under {package}. Point {ENV_VAR} at a "
             "Proteo-AA checkout containing pxdesign_train/sidechain/metrics.py.")
-    # protenix.data.constants is the metrics' only external dependency.
-    for path in (root, Path(__file__).resolve().parents[2] / "Protenix"):
-        if str(path) not in sys.path:
+    # The metrics need protenix.data.constants.ATOM14, which exists in the
+    # Protenix that Proteo-AA pins (c3bfc36) but NOT in v0.5.0+pxd, the revision
+    # PXDesign requires and this repo therefore vendors. So the metrics are given
+    # Proteo-AA's own Protenix, which is also the more correct provenance: they
+    # are Proteo-AA's code and should run against Proteo-AA's dependency.
+    #
+    # The two revisions must never share a process. They do not: the metrics path
+    # (eval) and the PXDesign path (design) are separate entry points. Guard
+    # anyway, because a silent version mix would be very hard to diagnose.
+    if "protenix" in sys.modules:
+        loaded = getattr(sys.modules["protenix"], "__file__", "") or ""
+        if str(root) not in loaded:
+            raise ValueError(
+                "A different 'protenix' is already imported "
+                f"({loaded}). The side-chain metrics need the revision Proteo-AA "
+                f"pins, under {root}; PXDesign needs v0.5.0+pxd. Run metrics and "
+                "backbone generation in separate processes.")
+    for path in (root, root / "Protenix"):
+        if path.is_dir() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
 
     for name, directory in (("pxdesign_train", package),

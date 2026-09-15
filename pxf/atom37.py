@@ -49,13 +49,20 @@ def assert_upstream_mapping(rc=None):
     return rc
 
 
-def aatype_from_sequence(sequence, *, device=None):
-    """Encode a one-letter sequence into the shared residue indices."""
+def aatype_from_sequence(sequence, *, device=None, allow_unknown=False):
+    """Encode a one-letter sequence into the shared residue indices.
+
+    ``allow_unknown`` maps anything non-canonical (notably ``X``, which is how a
+    PXDesign design token with no identity arrives) to
+    :data:`UNKNOWN_AA_INDEX` instead of raising -- needed when the sequence is
+    what the side-chain module is about to design.
+    """
     order = {letter: i for i, letter in enumerate(AA_ORDER)}
     unknown = [letter for letter in sequence if letter not in order]
-    if unknown:
+    if unknown and not allow_unknown:
         raise ValueError(f"Sequence contains non-canonical residues: {sorted(set(unknown))}")
-    return torch.tensor([order[letter] for letter in sequence], dtype=torch.long, device=device)
+    return torch.tensor([order.get(letter, UNKNOWN_AA_INDEX) for letter in sequence],
+                        dtype=torch.long, device=device)
 
 
 def sequence_from_aatype(aatype):

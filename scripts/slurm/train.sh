@@ -22,7 +22,10 @@
 #       PDB_DIR=<dir> sbatch scripts/slurm/train.sh
 set -euo pipefail
 
-ROOT=/hai/users/y/f/yfsun/Proteo-AA-pxdesign-fampnn-pack
+# Derived from this script's location so the repo can be moved or renamed
+# (it already has been, into ~/"Proteo-AA old"/). Quote it everywhere: the
+# current path contains a space.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT=${OUT:-/hai/scratch/yfsun/proteo_aa_runs/pxf_train/${SLURM_JOB_ID}}
 PDB_DIR=${PDB_DIR:?set PDB_DIR to a directory of training PDBs}
 CONFIG=${CONFIG:-$ROOT/configs/train_cath.yaml}

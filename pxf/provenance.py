@@ -15,6 +15,15 @@ import subprocess
 
 PINNED = {
     "pxdesign": "f788441313c84c3074fe9596ac2433f96b15c763",
+    # Protenix c3bfc36 (v2.0.0-11). NOTE: PXDesign's own install.sh pins
+    # v0.5.0+pxd (d18aa1d), and PXDesign's *official inference runner* only works
+    # against that one -- later revisions reorganize protenix.data and add
+    # required cache args to DiffusionModule.forward. This repo pins c3bfc36
+    # instead because it is the revision Proteo-AA's pxdesign_train and the
+    # side-chain metrics require, and because PXDesign's inference API cannot
+    # express monomer backbone generation anyway (it designs a binder against a
+    # target). The consequence is that the backbone is driven through
+    # pxdesign_train, not through pxdesign.runner.inference. See docs/backbone.md.
     "protenix": "c3bfc365b3e1341a11935eddfe7bfdc308092147",
     "fampnn": "aaf788b1502ad95d5c5a84455cfc53f2544f3b45",
 }
@@ -23,7 +32,11 @@ LAYOUT = {
     "protenix": ("Protenix", "protenix"),
     "fampnn": ("fampnn", "fampnn"),
 }
-ALLOWED_PATCH = {"pxdesign": "patches/pxdesign-embedders-protenix-2.0.patch"}
+# One recorded patch: PXDesign @ f788441 calls AtomAttentionEncoder with a
+# feature dict, which Protenix c3bfc36 changed to positional arguments. Pure
+# call-site adaptation, no behaviour change. (It is unnecessary against
+# Protenix v0.5.0+pxd, which is why it disappears if that pin is ever adopted.)
+ALLOWED_PATCHES = {"pxdesign": ("patches/pxdesign-embedders-protenix-2.0.patch",)}
 
 # FaMPNN's published checkpoints, which ship inside the submodule under weights/.
 # 0.0 Angstrom noise is what upstream's own packing example uses; the 0.3 variants
@@ -50,6 +63,21 @@ def _git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
 
 
+def _is_exactly_patched(root, patches):
+    """True when reverse-applying every recorded patch leaves the subtree clean.
+
+    Stronger and less brittle than comparing diff text: it proves the working
+    tree is HEAD plus exactly this patch set, regardless of how git happens to
+    order or format a combined diff.
+    """
+    paths = [str(repo_root() / patch) for patch in patches]
+    if any(not Path(path).is_file() for path in paths):
+        return False
+    result = subprocess.run(["git", "-C", str(root), "apply", "--reverse", "--check",
+                             *paths], capture_output=True)
+    return result.returncode == 0
+
+
 def component_record(name, *, strict=True):
     """Revision, patch digest and path for one upstream; raises when drifted."""
     if name not in LAYOUT:
@@ -63,12 +91,13 @@ def component_record(name, *, strict=True):
         raise ValueError(f"{name} is at {revision}, not the validated {PINNED[name]}")
     diff = subprocess.check_output(["git", "-C", str(root), "diff", "HEAD", "--", subtree])
     if diff.strip():
-        allowed = ALLOWED_PATCH.get(name)
-        expected = (repo_root() / allowed).read_bytes().strip() if allowed else b""
-        if not allowed or diff.strip() != expected:
+        allowed = ALLOWED_PATCHES.get(name, ())
+        if not allowed or not _is_exactly_patched(root, allowed):
             raise ValueError(
-                f"Unrecorded modifications to {name} source. Only the checked-in "
-                f"{allowed or '<none>'} is permitted.")
+                f"Unrecorded modifications to {name} source. The working tree must be "
+                f"HEAD plus exactly {list(allowed) or '<no patches>'}; keep upstream "
+                "otherwise pristine and put compatibility fixes in pxf.compat-style "
+                "runtime shims where possible.")
     return dict(component=name, revision=revision, path=str(root),
                 patch_sha256=hashlib.sha256(diff).hexdigest(), patched=bool(diff.strip()))
 

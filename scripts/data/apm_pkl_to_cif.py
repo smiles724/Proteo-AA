@@ -57,6 +57,13 @@ from openfold.np.residue_constants import (atom_types, restype_1to3,  # noqa: E4
 
 ELEMENT = {"C": "C", "N": "N", "O": "O", "S": "S"}
 
+# Protenix's RelativePositionEncoding clips |delta residue_index| at r_max = 32
+# (Protenix/configs/configs_base.py:258), so padding a gap beyond that changes
+# no model input. One padded residue already defeats the adjacency test in
+# Filter.remove_polymer_chains_with_consecutive_c_alpha_too_far_away; 32 keeps
+# the encoding exact everywhere it is representable.
+MAX_GAP_PAD = 32
+
 
 def build_structure(d, name):
     """atom37 arrays -> a gemmi Structure over APM's residue span.
@@ -130,7 +137,13 @@ def build_structure(d, name):
         # aatype 20 is UNK; openfold has no atom set for it, so write it as the
         # unknown residue and let it be a token with no coordinates.
         rname = restype_1to3[restypes[t]] if 0 <= t < len(restypes) else "UNK"
+        # Capped at MAX_GAP_PAD. Protenix clips the relative-residue offset to
+        # +/-r_max=32 (embedders.py:168), so a gap of 32 and a gap of 1013 are
+        # encoded by the SAME one-hot bin -- padding past the clip is invisible
+        # to the model and only costs tokens. Uncapped, 1914 came to 2081 tokens
+        # and was rejected by the crop.
         gap = 0 if prev_ri[cid] is None else max(int(res_idx[i]) - prev_ri[cid] - 1, 0)
+        gap = min(gap, MAX_GAP_PAD)
         for _ in range(gap):
             full_seq[cid].append("UNK")
             seq_no[cid] += 1

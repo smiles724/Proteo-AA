@@ -114,3 +114,35 @@ def test_bad_overrides_are_rejected():
 def test_token_with_no_atoms_is_rejected():
     with pytest.raises(ValueError, match="no atoms"):
         bridge.token_reduce(["ALA"], [0], 2, how="first")
+
+
+def test_token_reduce_any_is_an_or_over_each_tokens_atoms():
+    """Pinned as an OR rather than as a particular scatter call.
+
+    The reduction is written as an int64 count followed by ``> 0``, not as
+    ``scatter_reduce_(amax)`` on a bool tensor: the latter works on the CPU and
+    raises ``"cuda_scatter_gather_base_kernel_func" not implemented for 'Bool'``
+    on CUDA, so no CPU-only run can reach the failure. This test fixes the
+    semantics so the implementation stays free to use a portable op.
+    """
+    tokens = [0, 0, 0, 1, 1, 2, 2, 2, 2]
+    cases = {
+        (False, False, False, True, False, False, False, False, False): [
+            False,
+            True,
+            False,
+        ],
+        (True, False, False, False, False, False, False, False, True): [True, False, True],
+        (False,) * 9: [False, False, False],
+        (True,) * 9: [True, True, True],
+    }
+    for flags, expected in cases.items():
+        out = bridge.token_reduce(list(flags), tokens, 3, how="any")
+        assert out.dtype == torch.bool
+        assert out.tolist() == expected
+
+
+def test_token_reduce_any_handles_a_token_with_many_true_atoms():
+    """A count-based OR must not overflow or saturate into the wrong answer."""
+    out = bridge.token_reduce([True] * 500, [0] * 500, 1, how="any")
+    assert out.dtype == torch.bool and out.tolist() == [True]

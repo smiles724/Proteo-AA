@@ -252,10 +252,13 @@ class PXFaRepresentationConverter:
         atom37 vocabulary keep whatever the caller had (they were never densified).
         """
         lookup = {name: slot for slot, name in enumerate(atom37.ATOM37)}
+        device = coords_af2.device
         slots = torch.tensor(
-            [lookup.get(str(name), -1) for name in atom_names], dtype=torch.long
+            [lookup.get(str(name), -1) for name in atom_names],
+            dtype=torch.long,
+            device=device,
         )
-        token = torch.as_tensor(atom_to_token_idx, dtype=torch.long).reshape(-1)
+        token = torch.as_tensor(atom_to_token_idx, dtype=torch.long).reshape(-1).to(device)
         if slots.numel() != token.numel():
             raise ValueError(f"{slots.numel()} atom names for {token.numel()} atoms")
         valid = slots >= 0

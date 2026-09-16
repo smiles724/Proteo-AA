@@ -133,12 +133,17 @@ def token_reduce(per_atom, atom_to_token_idx, num_tokens, *, how="first"):
     token = torch.as_tensor(atom_to_token_idx, dtype=torch.long).reshape(-1)
     device = token.device
     if how == "any":
+        # Counting and then testing > 0 is the same as an OR, and scatter_add_
+        # on int64 is implemented on every backend. scatter_reduce_(amax) on a
+        # bool tensor is not: it works on the CPU and raises
+        # `"cuda_scatter_gather_base_kernel_func" not implemented for 'Bool'`
+        # on CUDA, which no CPU-only test run can reach.
         flags = torch.as_tensor(
             [bool(x) for x in per_atom], dtype=torch.bool, device=device
         )
-        out = torch.zeros(num_tokens, dtype=torch.bool, device=device)
-        out.scatter_reduce_(0, token, flags, reduce="amax")
-        return out
+        counts = torch.zeros(num_tokens, dtype=torch.long, device=device)
+        counts.scatter_add_(0, token, flags.long())
+        return counts > 0
     if how != "first":
         raise ValueError(f"Unknown reduction {how!r}")
     seen, values = {}, [None] * num_tokens

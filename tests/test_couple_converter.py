@@ -189,3 +189,16 @@ def test_the_design_mask_reduction_survives_a_cpu_index():
     _, tokens, res_names, _ = _two_residues()
     mask = bridge.design_mask_from_res_names(res_names, torch.as_tensor(tokens).cuda(), 2)
     assert mask.is_cuda and mask.tolist() == [False, True]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a second device")
+def test_the_write_out_path_also_follows_the_coordinates(converter):
+    """``scatter_to_px_atoms`` is phase 2/3's route back to PXDesign's atom axis."""
+    names, tokens, res_names, coords = _two_residues()
+    inputs = converter.px_backbone_to_fampnn(
+        coords.cuda(), names, torch.as_tensor(tokens), 2, res_names=res_names
+    )
+    flat, valid = converter.scatter_to_px_atoms(
+        inputs.coords_af2[0], names, torch.as_tensor(tokens)
+    )
+    assert flat.is_cuda and valid.is_cuda

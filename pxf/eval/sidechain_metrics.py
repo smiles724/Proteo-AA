@@ -119,10 +119,18 @@ def score(
         for key, value in counts.items()
     }
     for key in LDDT_KEYS:
-        counts[f"{key}_pairs"] = torch.tensor(float(lddt[f"n_pairs_{key[5:]}"]))
-        counts[f"{key}_sum"] = torch.tensor(
-            float(lddt[key]) * float(lddt[f"n_pairs_{key[5:]}"])
-        )
+        pairs = float(lddt[f"n_pairs_{key[5:]}"])
+        # A target with no scored pairs -- a single supervised residue has no
+        # side-chain neighbour to form one -- gets lDDT 0/0 = nan. Its weighted
+        # contribution is nan * 0, which is nan rather than 0, and summing that
+        # across the dataset turns the aggregate into nan no matter how many
+        # good targets there are. On the recentPDB eval split exactly 10 of
+        # 1,582 targets do this, and they took `lddt_sc_sc` -- a headline
+        # metric, so a regression check on it silently compares nan to nan.
+        # Contributing zero of zero pairs is the arithmetically correct answer:
+        # the target simply does not participate in a pair-weighted mean.
+        counts[f"{key}_pairs"] = torch.tensor(pairs)
+        counts[f"{key}_sum"] = torch.tensor(float(lddt[key]) * pairs if pairs else 0.0)
     summary = {
         key: float(value)
         for key, value in canonical.summarize_metrics(
@@ -152,5 +160,11 @@ def aggregate(per_target, *, canonical=None):
         pairs = float(totals.get(f"{key}_pairs", torch.tensor(0.0)))
         summary[key] = float(totals[f"{key}_sum"]) / pairs if pairs else float("nan")
         summary[f"n_pairs_{key[5:]}"] = pairs
+        # How many targets were too small to contribute a pair. Reported rather
+        # than inferred, so a shrinking denominator is visible instead of being
+        # read as a dataset-wide score.
+        summary[f"n_targets_without_pairs_{key[5:]}"] = sum(
+            1 for counts in per_target if float(counts.get(f"{key}_pairs", 0.0)) == 0.0
+        )
     summary["n_targets"] = len(per_target)
     return summary

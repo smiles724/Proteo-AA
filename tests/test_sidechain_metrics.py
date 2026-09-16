@@ -173,3 +173,63 @@ def test_aggregate_pools_lddt_by_pair_count(native, canonical):
 def test_aggregate_needs_at_least_one_target(canonical):
     with pytest.raises(ValueError, match="No targets"):
         aggregate([], canonical=canonical)
+
+
+# --- lDDT aggregation over degenerate targets -------------------------------
+
+
+def _lddt_counts(pairs_sc, lddt_sc):
+    """One target's lDDT contribution, in the form ``score`` emits."""
+    import torch
+
+    from pxf.eval.sidechain_metrics import LDDT_KEYS
+
+    # summarize_metrics needs the reference-free block; the optional
+    # observed_atoms branch is left out because these tests are about lDDT.
+    counts = {
+        "generated_atoms": torch.tensor(10.0),
+        "chemical_atoms": torch.tensor(10.0),
+        "bond_abs_error_sum": torch.tensor(0.0),
+        "bond_count": torch.tensor(10.0),
+        "bad_bond_count": torch.tensor(0.0),
+    }
+    for key in LDDT_KEYS:
+        counts[f"{key}_pairs"] = torch.tensor(float(pairs_sc))
+        counts[f"{key}_sum"] = torch.tensor(
+            float(lddt_sc) * float(pairs_sc) if pairs_sc else 0.0
+        )
+    return counts
+
+
+def test_a_target_with_no_pairs_does_not_nan_the_dataset_lddt():
+    """One degenerate target must not destroy a headline metric for all of them.
+
+    A single supervised residue has no side-chain neighbour, so its lDDT is
+    0/0 = nan. Weighted by its zero pair count that is nan, not 0, and summing
+    it turns the dataset figure into nan. On recentPDB 10 of 1,582 targets did
+    exactly this and took `lddt_sc_sc` with them.
+    """
+    import math
+
+    from pxf.eval.sidechain_metrics import aggregate
+
+    canonical = pytest.importorskip("pxf.eval.canonical").load()
+    good = [_lddt_counts(1000, 0.90), _lddt_counts(1000, 0.80)]
+    degenerate = _lddt_counts(0, float("nan"))
+    summary = aggregate(good + [degenerate], canonical=canonical)
+    assert not math.isnan(summary["lddt_sc_sc"])
+    assert summary["lddt_sc_sc"] == pytest.approx(0.85, abs=1e-6)
+    assert summary["n_pairs_sc_sc"] == 2000.0
+    assert summary["n_targets_without_pairs_sc_sc"] == 1
+
+
+def test_pair_weighting_is_by_pair_count_not_target_count():
+    from pxf.eval.sidechain_metrics import aggregate
+
+    canonical = pytest.importorskip("pxf.eval.canonical").load()
+    summary = aggregate(
+        [_lddt_counts(3000, 0.90), _lddt_counts(1000, 0.50)], canonical=canonical
+    )
+    # (3000*0.90 + 1000*0.50) / 4000 = 0.80 weighted;
+    # 0.70 would be the unweighted per-target mean.
+    assert summary["lddt_sc_sc"] == pytest.approx(0.80, abs=1e-6)

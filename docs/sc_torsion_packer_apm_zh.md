@@ -417,15 +417,87 @@ trunk 吃的是 Protenix 的 feature dict，APM 的 pkl 只有裸数组。走
 `APM pkl → mmCIF → CifFileProvider → DesignSourceDataset` 是因为这条路
 CASP benchmark 和 design run 已经在用，命名/顺序/entity 的约定都被跑过了。
 
-一个必须处理的细节：`_process_csv_row_FAESM` 切的是
-`modeled_idx.min() .. .max()` 这个**连续区间**，不是 `modeled_idx` 本身。
-抽样 300 条，11% 的链区间里有没有坐标的残基（占残基总数 0.19%）。
-只写有坐标的残基会让 a_token 比其它张量短几行，并且每个 gap 之后整条链错位一格。
-所以这些残基通过 `entity.full_sequence` 进 `_entity_poly_seq`，被 Protenix
-tokenise 成 unresolved —— 它们本来就是 unresolved，`res_mask` 也已经这么说了。
-
 坐标先过 APM 的 `parse_chain_feats`（CA 质心平移、未观测原子置零），
 让 trunk 读到的数和 packer 建 frame 用的数是同一份，而不是它的一个平移。
+
+### 一致性验证抓到的四件事，其中三件不报错
+
+这一节记录的是**检查跑出来的东西**，不是设计意图。四件里只有第二件会抛异常。
+
+**1. σ=0.4 确实是重度污染（150–186%）。** 这是最初的问题。量下来：
+regime A（坐标零噪声 + σ=4e-4）与 regime B（带噪声 + σ=0.4）的 a_token
+`max|A−B|` ≈ 11–13，而 a_token 自身幅度 `|a|max` ≈ 7。也就是说上一轮
+a_token 臂条件化的东西和干净结构下的 a_token 基本不是同一个特征。
+
+**2. 插入码把两个残基压成一个（会报错，但报在很远的地方）。**
+APM 的 pkl 把插入码压平了，`residue_index` 不唯一——102l 的 40 号位上同时
+有一个 ASN 和一个 ALA。拿它当 CIF 的 seqid，gemmi 会把两个残基合并成一个
+16 原子的"残基"，然后在对称置换表里断言失败
+（`Number of atoms in residue (16) does not match the number of permutations (8)`）。
+
+**3. a_token 对刚体增广不不变，幅度和噪声相当（不报错）。**
+`centre_random_augmentation` 里的随机旋转来自 scipy 的 `Rotation.random`，
+走 **numpy 全局 RNG**，`torch.manual_seed` 管不到。第一版检查里
+`repeat=6.73` 看着像"网络不确定"，其实量的是旋转敏感度。把 numpy 一起
+seed 之后分离出来：`repeat ≈ 3e-5`（bf16 量级），`rot-aug ≈ 10.4`——
+**和 σ=0.4 噪声的 ~11 同量级。**
+
+a_token 是 AF3 diffusion 的中间量，对坐标是等变的，所以带全局取向是预期
+行为而不是 bug。但它有两个后果：
+
+- **上一轮 a_token 臂每一步重抽一次旋转**，所以它训练时的输入里同时有
+  两个同量级的污染源（噪声 + 随机取向），不是一个。那一臂反而输给 none 臂
+  （1.532 vs 1.352）很可能与此有关。
+- 缓存单一朝向 = 把一个任意全局取向冻进特征。
+
+处理：把 `centre_only` 从 `centre_random_augmentation` 接到
+`sample_diffusion_training` 再接到模型（默认 False，训练路径行为不变），
+cache 侧打开。之后 `rot-aug` 掉到 ~3e-5，和 `repeat` 相等。
+
+**4. 顺序编号会抹掉晶体学 gap，静默污染 32% 的链（不报错）。**
+修第 2 件时我把残基改成顺序编号 1..N，这引入了一个更糟的问题。
+Protenix 丢链的判据是（`filter.py:146`）：
+
+```python
+invalid = (dist_square > 10.0**2) & (seq_ids[:-1] + 1 == seq_ids[1:])
+```
+
+**只有当 `label_seq_id` 声称两个残基相邻时才检查距离。** 原编号里的跳号是
+"这中间缺了一段"的唯一记录；抹掉之后，相隔 27.7 Å 的两个残基变成了相邻残基。
+实测训练集：每一处 >10 Å 的 Cα 断裂都恰好对应一个跳号（16vp: 349→395,
+27.7 Å；1a06: 163→182, 19.0 Å；1abn: 216→230, 15.3 Å），没有假阳性。
+
+| 后果 | 比例 | 可见性 |
+|---|---|---|
+| 整条链被丢弃 | 7.25% | 报错 |
+| 链保留，但 trunk 的相对位置编码把 gap 合上了 | 32% 有 gap 的链 | **静默** |
+
+处理：缺失位置补成 `full_sequence` 里的 UNK（真实 mmCIF 就是这么做的），
+并用 `keep_index` 把补齐的行从 a_token 里摘掉。补齐规模（600 条抽样）：
+中位 0、p95 29、最大 1013；crop 默认提到 1536 保证不裁；`keep_index`
+超出返回 token 数时直接报错而不是存一个错位的张量。
+
+在旧编号下建的那份 partial cache 整个删掉重建，没有复用。
+
+### 验证结果
+
+```
+101m  L_apm=154 L_atoken=154  restype 154/154  repeat=0.0e+00  rot-aug=0.0e+00  |A-B|=10.85 (151%)
+102l  L_apm=163 L_atoken=163  restype 163/163  repeat=2.7e-05  rot-aug=2.5e-05  |A-B|=11.79 (168%)
+102m  L_apm=154 L_atoken=154  restype 154/154  repeat=2.7e-05  rot-aug=0.0e+00  |A-B|=11.13 (156%)
+103l  L_apm=159 L_atoken=159  restype 159/159  repeat=3.5e-05  rot-aug=2.8e-05  |A-B|=11.98 (166%)
+103m  L_apm=154 L_atoken=154  restype 154/154  repeat=2.6e-05  rot-aug=3.0e-05  |A-B|=11.18 (156%)
+104m  L_apm=153 L_atoken=153  restype 153/153  repeat=3.2e-05  rot-aug=3.3e-05  |A-B|=11.94 (186%)
+16vp  L_apm=311 L_atoken=311  restype 311/311  repeat=4.9e-05  rot-aug=5.6e-05  |A-B|=12.45 (144%)   <- 带 45 残基 gap
+1a06  L_apm=279 L_atoken=279  restype 279/279  repeat=0.0e+00  rot-aug=0.0e+00  |A-B|=11.88 (165%)   <- 带 28 残基 gap
+VERDICT: bridge aligned, sequence-carrying and deterministic
+```
+
+### 这让新 a_token 臂不再是"只改噪声"的对照
+
+相比上一轮，新臂去掉了**三样**东西：0.4 噪声、随机全局取向、被抹掉的 gap。
+我认为这是更干净的输入，但它改变了解读：如果新臂赢了 none，不能直接归因于
+"去掉噪声"。要保留与上一轮的严格可比性，`--keep-random-rotation` 开关留着。
 
 ## 现在的状态
 

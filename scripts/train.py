@@ -37,6 +37,28 @@ def parse_args(argv=None):
     src.add_argument(
         "--cluster-csv", help="cluster_id,path rows; one sample per cluster per epoch"
     )
+    src.add_argument(
+        "--protenix-index",
+        help=(
+            "Protenix index CSV (.csv or .csv.gz) naming the entries to train on, "
+            "read from mmCIF with the per-residue side-chain supervision masks "
+            "applied. Use the before-2021-09-30 weighted index; the recentPDB "
+            "eval split is deliberately disjoint from it"
+        ),
+    )
+    p.add_argument(
+        "--protenix-mask-root",
+        default=None,
+        help="mask set for --protenix-index (default: the out_fampnn_strictB set)",
+    )
+    p.add_argument(
+        "--no-supervision-mask",
+        action="store_true",
+        help=(
+            "ablation: train on FaMPNN's per-atom mask alone, without the "
+            "per-residue crystallographic veto"
+        ),
+    )
     p.add_argument("--out", required=True)
     p.add_argument("--config", default=None, help="YAML preset (configs/train_*.yaml)")
     p.add_argument(
@@ -116,7 +138,54 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
 
     # ---- data ----
-    if args.cluster_csv:
+    protenix_masks = None
+    if args.protenix_index:
+        from pxf.train import protenix as P
+
+        mask_root = args.protenix_mask_root or P.DEFAULT_MASK_ROOT
+        protenix_masks = None if args.no_supervision_mask else P.SideChainMaskSet(mask_root)
+        wanted = P.ids_from_index(args.protenix_index)
+        if protenix_masks is not None:
+            ids = [p for p in wanted if p in protenix_masks]
+            logger.info(
+                "%d of %d entries from %s have a mask in %s",
+                len(ids),
+                len(wanted),
+                args.protenix_index,
+                protenix_masks.root,
+            )
+            if not ids:
+                raise SystemExit(
+                    f"no entry from {args.protenix_index} has a mask in {mask_root}. "
+                    "The shipped mask set covers the before-2021-09-30 weighted "
+                    "index only; build another split's with `process.py --ids-file`."
+                )
+        else:
+            ids = wanted
+            logger.info("%d entries, no supervision mask (ablation)", len(ids))
+        dataset = P.ProtenixSideChainDataset(
+            ids,
+            masks=protenix_masks,
+            crop_size=int(data_cfg.get("crop_size", 256)),
+            noise=float(data_cfg.get("noise", 0.0)),
+            noise_targets=bool(data_cfg.get("noise_targets", True)),
+            spatial_crop_p=float(data_cfg.get("spatial_crop_p", 0.5)),
+            seed=int(train_cfg.get("seed", 0)),
+            apply_supervision=not args.no_supervision_mask,
+        )
+        from torch.utils.data import DataLoader
+
+        from pxf.train.data import collate
+
+        loader = DataLoader(
+            dataset,
+            batch_size=int(data_cfg.get("batch_size", 1)),
+            shuffle=True,
+            num_workers=int(data_cfg.get("num_workers", 0)),
+            collate_fn=collate,
+            drop_last=False,
+        )
+    elif args.cluster_csv:
         index = ClusterIndex.from_csv(args.cluster_csv)
         paths = index.sample()
         logger.info("%d clusters; sampling one member each per epoch", len(index))
@@ -125,19 +194,19 @@ def main(argv=None):
             str(p) for p in natsorted(str(p) for p in Path(args.pdb_dir).glob("*.pdb"))
         ]
         logger.info("%d structures from %s", len(paths), args.pdb_dir)
-    if not paths:
-        raise SystemExit("no training structures found")
-
-    dataset, loader = build_loader(
-        paths,
-        batch_size=int(data_cfg.get("batch_size", 1)),
-        crop_size=int(data_cfg.get("crop_size", 256)),
-        noise=float(data_cfg.get("noise", 0.0)),
-        noise_targets=bool(data_cfg.get("noise_targets", True)),
-        spatial_crop_p=float(data_cfg.get("spatial_crop_p", 0.5)),
-        seed=int(train_cfg.get("seed", 0)),
-        num_workers=int(data_cfg.get("num_workers", 0)),
-    )
+    if not args.protenix_index:
+        if not paths:
+            raise SystemExit("no training structures found")
+        dataset, loader = build_loader(
+            paths,
+            batch_size=int(data_cfg.get("batch_size", 1)),
+            crop_size=int(data_cfg.get("crop_size", 256)),
+            noise=float(data_cfg.get("noise", 0.0)),
+            noise_targets=bool(data_cfg.get("noise_targets", True)),
+            spatial_crop_p=float(data_cfg.get("spatial_crop_p", 0.5)),
+            seed=int(train_cfg.get("seed", 0)),
+            num_workers=int(data_cfg.get("num_workers", 0)),
+        )
 
     # ---- model ----
     if args.init_weights == "scratch":
@@ -192,8 +261,19 @@ def main(argv=None):
                 optim=optim_cfg,
                 init_weights=str(source),
                 resume=args.resume,
-                n_structures=len(paths),
+                n_structures=len(dataset),
                 device=str(device),
+                data_source=(
+                    dict(
+                        kind="protenix",
+                        index=args.protenix_index,
+                        supervision_mask=(
+                            None if protenix_masks is None else protenix_masks.identity()
+                        ),
+                    )
+                    if args.protenix_index
+                    else dict(kind="paths", n=len(paths))
+                ),
                 trainable=args.trainable,
                 upstream=provenance.runtime_sources(components=("fampnn",)),
                 paper="bioRxiv 2025.02.13.637498",

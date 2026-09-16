@@ -1,0 +1,38 @@
+# Fine-tune preset for Protenix entries with the crystallographic supervision masks
+#
+# Not a paper preset. Appendix B.2's PDB settings are the starting point (size
+# 1024, effective batch 128), scaled to one GPU by accumulation, and the step
+# count is cut because this continues from released weights rather than training
+# from scratch.
+#
+# The data source is not configured here -- pass --protenix-index. The default in
+# scripts/slurm/train_protenix.sh is the weighted before-2021-09-30 index, which
+# is disjoint from the recentPDB eval split.
+data:
+  crop_size: 384        # B.2 used 1024; 384 fits alongside the 8 noise clones
+  noise: 0.0            # the 0.0 A released model is the donor, so match it
+  noise_targets: true
+  spatial_crop_p: 0.5
+  batch_size: 1
+  num_workers: 4
+train:
+  max_steps: 20000
+  grad_accum_steps: 16  # effective batch 16; B.2's 128 needs DDP, not implemented
+  ema_relative_length: 0.25   # B.2's choice for the 0.0 A model
+  log_every: 50
+  checkpoint_every: 2000
+  snapshot_every: 2000
+  seed: 0
+  amp_dtype: bf16
+  # per_residue: every residue contributes once, so Trp does not outweigh Ala.
+  sidechain_reduction: per_residue
+# Not specified in the preprint -- chosen here, recorded in every checkpoint.
+# lr is 10x below the from-scratch default because this is a fine-tune and the
+# failure mode being guarded against is degrading the donor's packing.
+optim:
+  lr: 1.0e-5
+  weight_decay: 0.0
+  warmup_steps: 500
+  max_grad_norm: 1.0
+  schedule: cosine
+  min_lr_ratio: 0.1

@@ -181,32 +181,62 @@ def main():
                               checkpoint_dir=None,
                               load_checkpoint_path=str(Path(args.checkpoint).resolve()),
                               checkpoint_params_only=True)
-    trainer.model.eval()
+    # `trainer.model` may be a DDP wrapper; the flags below are read off the
+    # module itself, so setting them on a wrapper would do nothing and the
+    # noise would quietly stay on. Always go through raw_model.
+    net = trainer.raw_model
+    net.eval()
+
+    # Pinning sigma only works if the sampler is the forced variant, and that
+    # is only built when `residue_type.forced_sigmas` was non-empty at model
+    # construction. If it is the plain EDM sampler, assigning `.forced_sigmas`
+    # silently does nothing: every chain would be cached at a RANDOM training
+    # sigma with clean coordinates -- wrong, and invisible in the output.
+    from pxdesign_train.model import ForcedSigmaNoiseSampler
+    if not isinstance(net.training_noise_sampler, ForcedSigmaNoiseSampler):
+        raise SystemExit(
+            "training_noise_sampler is "
+            f"{type(net.training_noise_sampler).__name__}, not "
+            "ForcedSigmaNoiseSampler -- residue_type.forced_sigmas did not "
+            "reach model construction, so the conditioning sigma is not pinned."
+        )
+    if not net.aa_clean_coordinate_input:
+        raise SystemExit("aa_clean_coordinate_input is False after construction: "
+                         "coordinates would be perturbed.")
+    print("verified: clean_coordinate_input=True and sigma is pinned "
+          f"({type(net.training_noise_sampler).__name__})", flush=True)
 
     def a_token_for(cif, chain, sigma=None, clean=True, seed=0):
-        """One forward; returns (a_token [L, C] cpu float32, restype [L] cpu).
+        """One forward; returns (a_token [L, C], restype [L], sigma actually used).
 
         `clean=True` is the zero-coordinate-noise mode this cache is for.
         `clean=False` restores the Gaussian perturbation, which is what the
-        earlier runs did -- the check uses it to measure what the difference
-        between the two settings actually is instead of asserting it is small.
+        earlier runs did -- the check uses it to measure the difference between
+        the two settings instead of asserting it is small.
+
+        The third return value is read back out of the forward (`out["sigma"]`),
+        not echoed from the argument: it is what the network was conditioned on,
+        which is the only version of this number worth reporting.
         """
         if sigma is not None:
-            trainer.model.training_noise_sampler.forced_sigmas = (float(sigma),)
-        trainer.model.aa_clean_coordinate_input = bool(clean)
+            net.training_noise_sampler.forced_sigmas = (float(sigma),)
+        net.aa_clean_coordinate_input = bool(clean)
         ds = make_dataset(cif, chain, args.crop_size)
         batch = trainer._maybe_add_batch_dim(trainer._to_device(_identity_collate([ds[0]])))
-        # The coordinate augmentation inside sample_diffusion_training draws a
-        # random rotation. Seeding makes a repeat forward comparable, so the
-        # determinism check measures the network rather than the draw.
+        # The coordinate augmentation is a random rotation + translation of the
+        # GT -- a rigid motion, not noise, but it does make the trunk's input
+        # differ run to run. Seeding separates "is the network deterministic"
+        # from "is a_token invariant to the augmentation"; the check measures
+        # both, under seeds that are equal and unequal respectively.
         torch.manual_seed(seed)
         with torch.no_grad():
-            o = trainer.model(input_feature_dict=batch["input_feature_dict"],
-                              label_dict=batch["label_dict"], mode="train")
+            o = net(input_feature_dict=batch["input_feature_dict"],
+                    label_dict=batch["label_dict"], mode="train")
         a = o["h_res_candidate"]
         rt = batch["input_feature_dict"]["restype"]
         rt = rt.reshape(-1, rt.shape[-1]).argmax(-1).cpu()
-        return a.reshape(-1, a.shape[-1]).float().cpu(), rt
+        used = o["sigma"].reshape(-1).float().cpu()
+        return a.reshape(-1, a.shape[-1]).float().cpu(), rt, used
 
     if args.check:
         run_check(args, files, cif_dir, convert, featurise, a_token_for, torch)
@@ -218,7 +248,10 @@ def main():
     for f in files:
         try:
             rec = convert(f, cif_dir)
-            a, _rt = a_token_for(rec["cif"], rec["chain"])
+            a, _rt, used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor)
+            if abs(float(used.max()) - args.sigma_floor) > 1e-9:
+                raise RuntimeError(f"forward ran at sigma {float(used.max()):g}, "
+                                   f"not the pinned {args.sigma_floor:g}")
             np.save(out / f"{rec['target']}.npy", a.numpy().astype(np.float16))
             manifest["chains"].append({"name": rec["target"], "L": int(a.shape[0]),
                                        "C": int(a.shape[1]),
@@ -268,14 +301,19 @@ def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
         apm_aat = feats["aatypes_1"].cpu()
         n_apm = int(apm_aat.shape[0])
 
-        a, rt = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
-                            clean=True, seed=0)
-        a2, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
-                            clean=True, seed=0)
-        a_rot, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
-                               clean=True, seed=7)
-        a_hi, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.compare_sigma,
-                              clean=False, seed=0)
+        a, rt, s_used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
+                                    clean=True, seed=0)
+        a2, _, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
+                               clean=True, seed=0)
+        a_rot, _, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
+                                  clean=True, seed=7)
+        a_hi, _, s_hi = a_token_for(rec["cif"], rec["chain"], sigma=args.compare_sigma,
+                                    clean=False, seed=0)
+        # Read back, not echoed: proves the pin took effect on this forward.
+        if abs(float(s_used.max()) - args.sigma_floor) > 1e-9:
+            print(f"  {rec['target']}: SIGMA NOT PINNED -- forward ran at "
+                  f"{float(s_used.max()):g}")
+            ok = False
 
         len_ok = a.shape[0] == n_apm
         det = (a - a2).abs().max().item()
@@ -293,6 +331,7 @@ def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
               f"{'len OK ' if len_ok else 'LEN MISMATCH'}  "
               f"restype {same}/{n} {'OK' if align_ok else 'MISALIGNED'}  "
               f"repeat={det:.2e}  rot-aug={rot:.2e}  "
+              f"sigma_used A={float(s_used.max()):.2e} B={float(s_hi.max()):.3g}  "
               f"|A-B|max={d_sigma:.4f} ({100*d_sigma/scale:.1f}% of |a|max={scale:.3f})",
               flush=True)
     print("VERDICT:", "bridge aligned and deterministic" if ok

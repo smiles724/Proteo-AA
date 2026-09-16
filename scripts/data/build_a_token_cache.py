@@ -126,7 +126,14 @@ def main():
     sys.path.insert(0, str(REPO))
     import torch
 
-    from scripts.data.apm_pkl_to_cif import convert
+    # By path: `scripts` resolves to Protenix's package whenever Protenix is on
+    # PYTHONPATH, so a plain `from scripts.data...` import raises here.
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        "_apm_pkl_to_cif", str(REPO / "scripts" / "data" / "apm_pkl_to_cif.py"))
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    convert = _mod.convert
     from pxdesign_train.sidechain.apm_dataset import featurise
 
     files = [Path(p) for p in args.pkl]

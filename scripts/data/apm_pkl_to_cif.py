@@ -32,7 +32,24 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from scripts.evaluation.casp_natives_to_cif import structure_to_cif  # noqa: E402
+
+def _sibling(rel, name):
+    """Import a module from this repo by PATH, not through a `scripts` package.
+
+    `Protenix/scripts/__init__.py` makes `scripts` a regular package, and a
+    regular package beats this repo's namespace one -- so `from scripts.x
+    import y` resolves against Protenix and raises ModuleNotFoundError as soon
+    as Protenix is on PYTHONPATH, which it is in every GPU job.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, str(REPO / rel))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+structure_to_cif = _sibling(
+    "scripts/evaluation/casp_natives_to_cif.py", "_casp_cif").structure_to_cif
 
 # openfold atom37 ordering and restype table, imported rather than retyped.
 from openfold.np.residue_constants import (atom_types, restype_1to3,  # noqa: E402

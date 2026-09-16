@@ -124,11 +124,19 @@ def token_reduce(per_atom, atom_to_token_idx, num_tokens, *, how="first"):
 
     ``how="first"`` takes each token's first atom, which is what per-residue
     annotations need; ``how="any"`` ORs booleans, which is what design flags need.
+
+    ``per_atom`` is a Python sequence, so the tensors built from it follow
+    ``atom_to_token_idx``'s device rather than defaulting to the CPU: once the
+    topology travels with the batch, a CPU scatter index against a CUDA topology
+    is a device mismatch.
     """
     token = torch.as_tensor(atom_to_token_idx, dtype=torch.long).reshape(-1)
+    device = token.device
     if how == "any":
-        flags = torch.as_tensor([bool(x) for x in per_atom], dtype=torch.bool)
-        out = torch.zeros(num_tokens, dtype=torch.bool)
+        flags = torch.as_tensor(
+            [bool(x) for x in per_atom], dtype=torch.bool, device=device
+        )
+        out = torch.zeros(num_tokens, dtype=torch.bool, device=device)
         out.scatter_reduce_(0, token, flags, reduce="amax")
         return out
     if how != "first":
@@ -164,7 +172,8 @@ def native_sequence(res_names, atom_to_token_idx, num_tokens):
         letter = THREE_TO_ONE.get(str(name).upper())
         letters.append(letter if letter is not None else "X")
         known.append(letter is not None)
-    return "".join(letters), torch.tensor(known, dtype=torch.bool)
+    device = getattr(atom_to_token_idx, "device", None)
+    return "".join(letters), torch.tensor(known, dtype=torch.bool, device=device)
 
 
 def apply_sequence_overrides(sequence, known, overrides):

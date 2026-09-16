@@ -121,3 +121,71 @@ def test_fampnn_kwargs_cover_the_module_signature(converter):
         "residue_index",
         "chain_index",
     }
+
+
+# ---- device consistency ----------------------------------------------------
+#
+# The coupling path crossed devices in three places before this was pinned, and
+# each one surfaced somewhere unhelpful: the featurizer's CPU tensors blew up in
+# the condition embedder's first F.linear, the topology's CPU index blew up in a
+# scatter_reduce, and the per-token annotations blew up later still. They all
+# have the same shape -- a tensor built from a Python list, on a path whose
+# coordinates live on the accelerator.
+#
+# The invariant is: every tensor the converter returns is on the *coordinates'*
+# device. On a CPU-only machine the assertion is trivially satisfied, so the
+# CUDA-gated test below is the one that can actually fail; the ungated one exists
+# to state the contract where it is read.
+
+TENSOR_FIELDS = (
+    "coords_af2",
+    "atom_mask",
+    "aatype",
+    "seq_mask",
+    "missing_atom_mask",
+    "residue_index",
+    "chain_index",
+    "design_mask",
+    "sequence_known",
+)
+
+
+def test_every_output_is_on_the_coordinates_device(converter):
+    names, tokens, res_names, coords = _two_residues()
+    inputs = converter.px_backbone_to_fampnn(coords, names, tokens, 2, res_names=res_names)
+    for field in TENSOR_FIELDS:
+        value = getattr(inputs, field)
+        assert torch.is_tensor(value), field
+        assert value.device == inputs.coords_af2.device, field
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a second device")
+def test_a_cpu_topology_does_not_leak_into_cuda_outputs(converter):
+    """The real case: coordinates on the GPU, topology and res_names on the CPU.
+
+    ``pxdesign_train``'s featurizer always emits CPU tensors, so this is the
+    normal state of affairs rather than an unusual one.
+    """
+    names, tokens, res_names, coords = _two_residues()
+    inputs = converter.px_backbone_to_fampnn(
+        coords.cuda(),  # coordinates on the accelerator
+        names,  # atom names: a Python list
+        torch.as_tensor(tokens),  # topology index: deliberately left on the CPU
+        2,
+        res_names=res_names,
+        residue_index=torch.arange(2),
+        chain_index=torch.zeros(2, dtype=torch.long),
+    )
+    assert inputs.coords_af2.is_cuda
+    for field in TENSOR_FIELDS:
+        assert getattr(inputs, field).is_cuda, field
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a second device")
+def test_the_design_mask_reduction_survives_a_cpu_index():
+    """``scatter_reduce_`` refuses a CPU index against a CUDA output."""
+    from pxf import bridge
+
+    _, tokens, res_names, _ = _two_residues()
+    mask = bridge.design_mask_from_res_names(res_names, torch.as_tensor(tokens).cuda(), 2)
+    assert mask.is_cuda and mask.tolist() == [False, True]

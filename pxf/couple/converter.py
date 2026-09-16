@@ -142,10 +142,21 @@ class PXFaRepresentationConverter:
             num_tokens, residue_index=residue_index, chain_index=chain_index
         )
 
+        # One device normalization at the boundary rather than a device= on every
+        # constructor above. The per-token annotations are all derived from Python
+        # lists or from the topology, so several of them land on the CPU whatever
+        # the coordinates are on; `dense` is authoritative because it came from
+        # the backbone module's own output.
+        device = dense.device
+        design, known = design.to(device), known.to(device)
+        aatype = aatype.to(device)
+        residue_index = residue_index.to(device)
+        chain_index = chain_index.to(device)
+
         def expand(tensor):
             return tensor.reshape(1, num_tokens).expand(batch, num_tokens).contiguous()
 
-        seq_mask = torch.ones(batch, num_tokens, device=dense.device)
+        seq_mask = torch.ones(batch, num_tokens, device=device)
         return CoupledInputs(
             coords_af2=dense,
             atom_mask=mask,
@@ -177,6 +188,10 @@ class PXFaRepresentationConverter:
         PXDesign's ``asym_id`` may be non-contiguous after cropping; FaMPNN only
         needs chains to be distinguishable, so ids are compacted to 0..n-1 while
         preserving grouping and order.
+
+        Device-agnostic on purpose: the chain compaction round-trips through a
+        Python dict, so the result is a CPU tensor regardless of the input.
+        ``px_backbone_to_fampnn`` moves it onto the coordinates' device.
         """
         if residue_index is None:
             residue = torch.arange(num_tokens, dtype=torch.long)

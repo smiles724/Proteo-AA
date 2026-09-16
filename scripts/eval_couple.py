@@ -180,6 +180,15 @@ def parse_args(argv=None):
         help="sampling temperature for the predicted sequence; 0.0 is argmax "
         "(only read with --codesign)",
     )
+    p.add_argument(
+        "--shuffle-a-token",
+        action="store_true",
+        help="information-content control: feed A_BS another protein's token "
+        "features at the same sigma, leaving the backbone, the encoder and the "
+        "uncoupled arm untouched. If the coupled gain survives this, the "
+        "adapter is acting as a generic regularizer on h_V rather than using "
+        "sample-specific information from PXDesign",
+    )
     p.add_argument("--fail-on-regression", action="store_true")
     p.add_argument("--allow-unpinned-sources", action="store_true")
     return p.parse_args(argv)
@@ -289,7 +298,6 @@ def report(record):
     return len(hurt)
 
 
-
 def _with_sequence_recovery(summary):
     """Add ``sequence_recovery`` to an aggregate that carries the seq counts.
 
@@ -397,9 +405,7 @@ def run_native(args):
                     a_token=None,
                     sidechains=sidechains,
                 )
-                pred37, pred_mask = ev.predicted_atom37(
-                    assembled, s_hat.reshape(-1), rc
-                )
+                pred37, pred_mask = ev.predicted_atom37(assembled, s_hat.reshape(-1), rc)
                 pred37, pred_mask = pred37.cpu(), pred_mask.cpu()
                 residue_mask, seq_counts = codesign.sequence_recovery(s_hat, aatype)
                 residue_mask = residue_mask.cpu()
@@ -430,9 +436,7 @@ def run_native(args):
         if seq_counts is not None:
             target_counts = dict(target_counts)
             target_counts["seq_residues"] = torch.tensor(float(seq_counts["residues"]))
-            target_counts["seq_recovered"] = torch.tensor(
-                float(seq_counts["recovered"])
-            )
+            target_counts["seq_recovered"] = torch.tensor(float(seq_counts["recovered"]))
             summary = dict(summary)
             summary["sequence_recovery"] = seq_counts["sequence_recovery"]
         counts.append(target_counts)
@@ -622,6 +626,8 @@ def main(argv=None):
             strict_sources=not args.allow_unpinned_sources,
         ).to(device)
 
+    # None = control off. {} = on but no donor seen yet (the first target).
+    donor_bank = {} if args.shuffle_a_token else None
     counts = {(arm, i): [] for arm in ev.ARMS for i in range(len(sigmas))}
     backbone_rmsds = {(arm, i): [] for arm in ev.ARMS for i in range(len(sigmas))}
     pooled_counts = {arm: [] for arm in ev.ARMS}
@@ -665,6 +671,13 @@ def main(argv=None):
                 )
             )
 
+        # Shuffled control: this target's own a_token becomes the next target's
+        # donor, so the donor is always a *different* protein at the same sigma.
+        # The first target has no donor yet, so it only seeds the bank and is
+        # not scored -- hence n is one lower than an unshuffled run.
+        own_a_token = {}
+        score_this_target = donor_bank is None or bool(donor_bank)
+
         for si, sigma_value in enumerate(sigmas):
             seed = ev.target_seed(args.seed, sample_id, si)
             sigma = torch.full((1,), float(sigma_value), device=device)
@@ -695,13 +708,31 @@ def main(argv=None):
                         )
                     else:
                         s_hat = None
+                        # The shuffled control substitutes a donor protein's
+                        # token features into A_BS. Only the coupled arm is
+                        # touched: the uncoupled arm has no residual to
+                        # substitute into, and its packing must stay the shared
+                        # baseline both runs are measured against.
+                        override = None
+                        if enabled and donor_bank:
+                            override = ev.donor_a_token(
+                                donor_bank[si], int(aatype.shape[0])
+                            )
                         cycle = controller.forward(
                             structure.topology,
                             x_noisy,
                             sigma,
                             aatype,
                             run_feedback=args.run_feedback and enabled,
+                            a_token_override=override,
                         )
+                        # cycle.a_token is this structure's own even when the
+                        # residual read a donor, so caching it here is correct
+                        # whichever arm ran first.
+                        if donor_bank is not None:
+                            own_a_token.setdefault(si, cycle.a_token.detach())
+                if not score_this_target:
+                    continue
                 # The packed atom set belongs to whatever sequence was packed
                 # for, so atom37 assembly must use s_hat in codesign mode.
                 scored_aatype = aatype if s_hat is None else s_hat.reshape(-1)
@@ -721,9 +752,7 @@ def main(argv=None):
                 # atom set and rotamer recovery has no referent.
                 residue_mask, seq_counts = (None, None)
                 if s_hat is not None:
-                    residue_mask, seq_counts = codesign.sequence_recovery(
-                        s_hat, aatype
-                    )
+                    residue_mask, seq_counts = codesign.sequence_recovery(s_hat, aatype)
                     residue_mask = residue_mask.cpu()
                 target_counts, summary = score(
                     placed,
@@ -763,6 +792,12 @@ def main(argv=None):
                 )
                 backbone_rmsds[(arm, si)].append(bb_rmsd)
 
+        if donor_bank is not None and own_a_token:
+            # Rotate: the next target's donor is this one. A cyclic shift by one
+            # is a derangement for any n > 1, so no target ever donates to
+            # itself.
+            donor_bank = own_a_token
+
         if index % 10 == 0 or index == len(featurized) - 1:
             logger.info(
                 "%d/%d targets, %.1fs elapsed",
@@ -788,14 +823,13 @@ def main(argv=None):
         sigma_schedule=sigma_schedule.identity(),
         pack_steps=args.pack_steps,
         run_feedback=bool(args.run_feedback),
+        a_token_source="shuffled-donor" if args.shuffle_a_token else "own",
         codesign=bool(args.codesign),
         seq_decode=(codesign.DECODE_SINGLE_PASS if args.codesign else None),
         seq_temperature=(args.seq_temperature if args.codesign else None),
         ema=bool(args.ema and args.checkpoint),
         pooled={
-            arm: _with_sequence_recovery(
-                aggregate(pooled_counts[arm], canonical=canonical)
-            )
+            arm: _with_sequence_recovery(aggregate(pooled_counts[arm], canonical=canonical))
             for arm in ev.ARMS
         },
         per_sigma=[

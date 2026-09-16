@@ -296,3 +296,29 @@ def improvements(arms, *, headline=HEADLINE, tolerance=REGRESSION_TOLERANCE):
         for key, (lo, hi, _delta, better) in table.items()
         if better > abs(tolerance)
     ]
+
+
+def donor_a_token(source, length):
+    """Reshape another protein's ``a_token`` to this one's residue count.
+
+    The shuffled control needs a donor from a *different* structure, and
+    structures differ in length, so the donor has to be made to fit. Cropping
+    when it is longer and tiling when it is shorter keeps the per-residue
+    feature distribution intact -- the magnitudes and channel statistics the
+    adapter sees are still real ``a_token`` values -- while destroying any
+    correspondence to the recipient's residues, which is the whole point.
+
+    What this cannot control for is that a tiled donor is periodic. Where the
+    donor is much shorter than the recipient that periodicity is an artefact of
+    the control rather than of the model, so pair donors of similar length when
+    the comparison matters.
+    """
+    if source.dim() != 3:
+        raise ValueError(f"a_token must be [B, L, C], got {tuple(source.shape)}")
+    have = source.shape[-2]
+    if have == length:
+        return source
+    if have > length:
+        return source[..., :length, :]
+    repeats = -(-length // have)  # ceil
+    return source.repeat(1, repeats, 1)[..., :length, :]

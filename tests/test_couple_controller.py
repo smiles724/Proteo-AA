@@ -215,3 +215,49 @@ def test_identity_is_serializable(fampnn, case):
 
     controller, _, _ = build(fampnn, case)
     json.loads(json.dumps(controller.identity()))
+
+
+# --- the shuffled-a_token control -------------------------------------------
+
+
+def test_an_a_token_override_changes_the_residual_but_not_the_record(fampnn, case):
+    """The information-content control must alter one thing and log honestly.
+
+    Substituting a donor protein's token features has to reach ``delta_h`` --
+    otherwise the control is inert and would fake a null result -- while
+    ``out.a_token`` keeps this structure's own features, so a shuffled run
+    cannot be mistaken for a real one by reading the cycle output.
+    """
+    controller, adapters, _record = build(fampnn, case, phase="bb_to_sc")
+    # A trained adapter: zero-initialized weights would make every residual zero
+    # and the comparison vacuous.
+    with torch.no_grad():
+        for parameter in adapters.bb_to_sc.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.05)
+
+    args = (case["topology"], case["flat"], torch.tensor([1.0]), case["aatype"])
+    torch.manual_seed(0)
+    plain = controller.forward(*args, run_feedback=False)
+    donor = torch.randn_like(plain.a_token)
+    torch.manual_seed(0)
+    swapped = controller.forward(*args, run_feedback=False, a_token_override=donor)
+
+    assert not torch.allclose(plain.delta_h, swapped.delta_h), (
+        "the override never reached A_BS, so the control cannot detect anything"
+    )
+    assert torch.allclose(plain.a_token, swapped.a_token), (
+        "out.a_token was overwritten; a shuffled run would look like a real one"
+    )
+    # The backbone proposal is the recipient's own either way, so the arms stay
+    # comparable -- only the residual moved.
+    assert torch.allclose(plain.bb0_flat, swapped.bb0_flat)
+
+
+def test_no_override_is_identical_to_passing_none(fampnn, case):
+    controller, _adapters, _record = build(fampnn, case, phase="bb_to_sc")
+    args = (case["topology"], case["flat"], torch.tensor([1.0]), case["aatype"])
+    torch.manual_seed(0)
+    a = controller.forward(*args, run_feedback=False)
+    torch.manual_seed(0)
+    b = controller.forward(*args, run_feedback=False, a_token_override=None)
+    assert torch.allclose(a.bb0_dense, b.bb0_dense)

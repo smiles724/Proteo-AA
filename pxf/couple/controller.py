@@ -164,8 +164,21 @@ class CoupledDenoiser:
         seq_mask=None,
         run_feedback=None,
         sidechain_context=None,
+        a_token_override=None,
     ):
-        """One cycle. ``run_feedback`` defaults to whether SC->BB is enabled."""
+        """One cycle. ``run_feedback`` defaults to whether SC->BB is enabled.
+
+        ``a_token_override`` feeds ``A_BS`` token features from somewhere other
+        than this structure's own backbone pass. It is an experimental control,
+        not a model capability: substituting another protein's ``a_token`` asks
+        whether the adapter's gain comes from *sample-specific* information or
+        from behaving as a generic regularizer on ``h_V``.
+
+        It deliberately affects only the BB->SC residual. The backbone proposal,
+        the encoder features and the SC->BB feedback all keep this structure's
+        own ``a_token``, so the substitution changes one quantity and the arms
+        stay comparable.
+        """
         converter = self.converter
         # --- backbone proposal ---
         bb0_flat, a_token = self.backbone(x_noisy, sigma)
@@ -214,7 +227,10 @@ class CoupledDenoiser:
         # L_SC re-runs the side-chain denoiser from these features, so the cycle
         # records the dict itself rather than just h_V.
         out.aux["features"] = features
-        out.delta_h = self._delta_h(a_token, sigma, h_base)
+        # Only the residual reads the override; out.a_token stays this
+        # structure's own, so the recorded provenance is not falsified.
+        source = a_token if a_token_override is None else a_token_override
+        out.delta_h = self._delta_h(source, sigma, h_base)
         out.h_cond = h_base if out.delta_h is None else h_base + out.delta_h
 
         # --- pack ---

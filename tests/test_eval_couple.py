@@ -346,3 +346,33 @@ def test_backbone_rmsd_grows_with_real_displacement():
         10, len(atom37.BACKBONE_SLOTS), 3, generator=torch.Generator().manual_seed(3)
     )
     assert ev.backbone_rmsd(nudged, native) > 0.3
+
+
+# --- donor reshaping for the shuffled control -------------------------------
+
+
+def test_a_longer_donor_is_cropped_and_a_shorter_one_tiled():
+    source = torch.arange(12, dtype=torch.float32).reshape(1, 6, 2)
+    assert ev.donor_a_token(source, 6).shape == (1, 6, 2)
+    assert ev.donor_a_token(source, 4).shape == (1, 4, 2)
+    assert ev.donor_a_token(source, 10).shape == (1, 10, 2)
+
+
+def test_an_equal_length_donor_is_returned_untouched():
+    source = torch.randn(1, 7, 3)
+    assert ev.donor_a_token(source, 7) is source
+
+
+def test_cropping_keeps_real_donor_values_rather_than_padding():
+    """Zero-padding would make the control partly an ablation, not a swap."""
+    source = torch.arange(10, dtype=torch.float32).reshape(1, 5, 2)
+    out = ev.donor_a_token(source, 3)
+    assert torch.equal(out, source[:, :3, :])
+    tiled = ev.donor_a_token(source, 8)
+    assert torch.equal(tiled[:, :5, :], source)
+    assert int((tiled == 0).sum()) == int((source == 0).sum()) * 2  # no new zeros
+
+
+def test_a_donor_of_the_wrong_rank_is_refused():
+    with pytest.raises(ValueError, match=r"\[B, L, C\]"):
+        ev.donor_a_token(torch.randn(5, 3), 5)

@@ -433,6 +433,7 @@ class TorsionPacker(nn.Module):
         bb_q: Optional[torch.Tensor] = None,        # IGNORED
         coord_scale: Optional[torch.Tensor] = None,  # IGNORED (EDM c_in)
         bb_atom_mask: Optional[torch.Tensor] = None,  # [B, L, 4] bool
+        diffuse_mask: Optional[torch.Tensor] = None,   # [B, L] -- see below
         residue_index: Optional[torch.Tensor] = None,  # [B, L] long
         asym_id: Optional[torch.Tensor] = None,        # [B, L] long, chain index
     ):
@@ -456,9 +457,20 @@ class TorsionPacker(nn.Module):
             node_mask_f = node_mask.float()
             edge_mask = node_mask_f[:, None, :] * node_mask_f[:, :, None]
 
-            # Ownership of a side chain -- APM's `diffuse_mask`, i.e. "is this
-            # position being generated".
-            diffuse_mask = atom_mask.bool().any(-1).float()
+            # APM's `diffuse_mask`: "is this position being generated". It is a
+            # network INPUT (one node channel, two edge channels), so its
+            # definition has to match whatever produced the weights.
+            #
+            # The default here is side-chain ownership, which is what our own
+            # PXDesign-data runs were trained with -- and that makes GLY a 0,
+            # since it owns no slot. APM's packing task instead sets it to 1 for
+            # every modelled residue, GLY included. Callers holding weights
+            # trained under APM's convention must pass it explicitly rather than
+            # inherit ours.
+            if diffuse_mask is None:
+                diffuse_mask = atom_mask.bool().any(-1).float()
+            else:
+                diffuse_mask = diffuse_mask.to(device).float()
 
             if residue_index is None:
                 residue_index = torch.arange(L, device=device)[None].expand(B, L)

@@ -56,6 +56,19 @@ def convert_one(pdb_path: Path, out_path: Path, name: str, revision_date: str) -
         for chain in model:
             if not chain.name.strip():
                 chain.name = "A"
+    return structure_to_cif(st, out_path, name, revision_date)
+
+
+def structure_to_cif(st, out_path: Path, name: str, revision_date: str,
+                     keep_entity_poly_seq: bool = False) -> dict:
+    """Write a gemmi Structure as an mmCIF carrying everything Protenix needs.
+
+    Split out of `convert_one` so that any in-memory structure can reach the
+    same CIF -- `scripts/data/apm_pkl_to_cif.py` builds one from atom37 arrays.
+    Sharing the writer is the point: the required-category list below was
+    established by making Protenix's parser accept CASP natives, and a second
+    copy would drift out of agreement with it silently.
+    """
     st.name = name
     st.setup_entities()
     # force=True — without it label_seq_id stays '.', and Protenix does int('.').
@@ -70,16 +83,23 @@ def convert_one(pdb_path: Path, out_path: Path, name: str, revision_date: str) -
 
     # entity_poly_seq: one row per (entity, seq position). Protenix rebuilds a
     # reference chain from this; without it you get KeyError on the entity id.
-    ent, num, mon, seen = [], [], [], set()
-    for eid, n, comp in zip(site["label_entity_id"], site["label_seq_id"], site["label_comp_id"]):
-        key = (eid, n)
-        if key in seen:
-            continue
-        seen.add(key)
-        ent.append(eid)
-        num.append(n)
-        mon.append(comp)
-    blk.set_mmcif_category("_entity_poly_seq", {"entity_id": ent, "num": num, "mon_id": mon})
+    #
+    # Derived from atom_site by default, which is correct when every residue of
+    # the chain has coordinates. A caller that set `entity.full_sequence` -- so
+    # that residues WITHOUT coordinates still get a token -- passes
+    # keep_entity_poly_seq=True and gemmi's own table survives; rebuilding from
+    # atom_site would delete exactly the unresolved rows that were the point.
+    if not keep_entity_poly_seq:
+        ent, num, mon, seen = [], [], [], set()
+        for eid, n, comp in zip(site["label_entity_id"], site["label_seq_id"], site["label_comp_id"]):
+            key = (eid, n)
+            if key in seen:
+                continue
+            seen.add(key)
+            ent.append(eid)
+            num.append(n)
+            mon.append(comp)
+        blk.set_mmcif_category("_entity_poly_seq", {"entity_id": ent, "num": num, "mon_id": mon})
 
     blk.set_mmcif_category("_entry", {"id": [name]})
     blk.set_mmcif_category("_exptl", {"entry_id": [name], "method": ["X-RAY DIFFRACTION"]})

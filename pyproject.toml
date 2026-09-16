@@ -22,6 +22,9 @@ include = ["pxf*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `slow` is for checks that must load the 557 MB PXDesign donor. They are
+# real tests, not optional ones -- deselect with `-m "not slow"` when iterating.
+markers = ["slow: needs the PXDesign donor checkpoint"]
 
 [tool.ruff]
 # 92 rather than the default 88: it is where this code already sits, so the

@@ -95,7 +95,14 @@ def make_dataset(cif_path, chain_id, crop_size):
         prov, source_name="apm", crop_size=int(crop_size),
         compute_sidechain=True, backbone_only_binder=True,
         inference_safe_binder=True, ref_pos_augment=False,
-        hotspot_force_zero_prob=0.0, aa_mask_mode="all", aa_mask_prob=1.0,
+        hotspot_force_zero_prob=0.0,
+        # `aa_mask_mode="none"` is what `--training-stage sidechain_warmup` sets
+        # (train_protenix_monomer.py:1331), and therefore what the earlier
+        # a_token arm conditioned on. The CASP benchmark uses "all", and copying
+        # that here turns EVERY token into the [xpb] design token -- measured:
+        # 154/154 on 101m -- so a_token would carry no sequence at all. Nothing
+        # errors; the arm just silently stops being the same experiment.
+        aa_mask_mode="none", aa_mask_prob=0.0,
         max_crop_retries=1)
 
 
@@ -222,7 +229,10 @@ def main():
             net.training_noise_sampler.forced_sigmas = (float(sigma),)
         net.aa_clean_coordinate_input = bool(clean)
         ds = make_dataset(cif, chain, args.crop_size)
-        batch = trainer._maybe_add_batch_dim(trainer._to_device(_identity_collate([ds[0]])))
+        # Exactly what `forward_loss` does: collate, move, call. The model takes
+        # the unbatched dict; adding a leading dim here trips an assertion deep
+        # in the atom-attention encoder.
+        batch = trainer._to_device(_identity_collate([ds[0]]))
         # The coordinate augmentation is a random rotation + translation of the
         # GT -- a rigid motion, not noise, but it does make the trunk's input
         # differ run to run. Seeding separates "is the network deterministic"
@@ -233,10 +243,11 @@ def main():
             o = net(input_feature_dict=batch["input_feature_dict"],
                     label_dict=batch["label_dict"], mode="train")
         a = o["h_res_candidate"]
-        rt = batch["input_feature_dict"]["restype"]
-        rt = rt.reshape(-1, rt.shape[-1]).argmax(-1).cpu()
+        fd = batch["input_feature_dict"]
+        rt = fd["restype"].reshape(-1, fd["restype"].shape[-1]).argmax(-1).cpu()
+        ri = fd["residue_index"].reshape(-1).cpu()
         used = o["sigma"].reshape(-1).float().cpu()
-        return a.reshape(-1, a.shape[-1]).float().cpu(), rt, used
+        return a.reshape(-1, a.shape[-1]).float().cpu(), (rt, ri), used
 
     if args.check:
         run_check(args, files, cif_dir, convert, featurise, a_token_for, torch)
@@ -248,7 +259,7 @@ def main():
     for f in files:
         try:
             rec = convert(f, cif_dir)
-            a, _rt, used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor)
+            a, _ids, used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor)
             if abs(float(used.max()) - args.sigma_floor) > 1e-9:
                 raise RuntimeError(f"forward ran at sigma {float(used.max()):g}, "
                                    f"not the pinned {args.sigma_floor:g}")
@@ -267,28 +278,32 @@ def main():
 def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
     """Does a_token line up with the packer's residues, and is it deterministic?
 
-    Four questions, because each has its own way of being silently wrong:
+    Five questions, because each has its own way of being silently wrong:
 
       shape        one a_token row per residue the packer sees?
       alignment    is row i the SAME residue as the packer's residue i?
+      sequence     did the trunk see the real residue types, or [xpb]?
       determinism  does a repeat forward reproduce the tensor?
       sigma        how much does dropping the noise actually change a_token?
 
-    Alignment is the one a shape check misses: a chain with an interior
-    unresolved residue still has the right length if the two featurisers
-    disagree by one insertion and one deletion.
+    Alignment is checked twice over, by `residue_index` and by residue name.
+    A length check alone would miss a chain where the two featurisers disagree
+    by one insertion and one deletion, which is exactly the shape of the bug an
+    interior unresolved residue would cause.
 
-    The sigma comparison is between the two REGIMES, not two numbers in the
-    same regime: clean coordinates at the sigma floor, against noisy
-    coordinates at sigma=0.4, which is what the earlier arms trained on.
+    The sequence question is here because it has already been wrong once: the
+    CASP benchmark's `aa_mask_mode="all"` makes every token the [xpb] design
+    token, and a_token then carries no sequence at all without anything failing.
+
+    The sigma comparison is between two REGIMES, not two numbers in one:
+    clean coordinates at the sigma floor, against noisy coordinates at
+    sigma=0.4, which is what the earlier arms trained on.
     """
-    # Protenix restype indices are not openfold aatype indices, so compare
-    # through the three-letter name both sides can produce.
-    from openfold.np.residue_constants import restype_1to3, restypes
     from pxdesign.data.constants import STD_RESIDUES_WITH_GAP
+    from openfold.np.residue_constants import restype_1to3, restypes
 
-    px_names = list(STD_RESIDUES_WITH_GAP)
-    apm_names = [restype_1to3[r] for r in restypes] + ["UNK"]
+    px_name = {v: k for k, v in STD_RESIDUES_WITH_GAP.items()}
+    apm_name = [restype_1to3[r] for r in restypes] + ["UNK"]
 
     print("\n=== a_token bridge consistency check ===", flush=True)
     print(f"  regime A: coordinate noise 0, conditioning sigma {args.sigma_floor:g}")
@@ -299,42 +314,46 @@ def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
         rec = convert(f, cif_dir)
         feats = featurise(f)                       # APM's own featurisation
         apm_aat = feats["aatypes_1"].cpu()
+        apm_ri = feats["res_idx"].cpu()
         n_apm = int(apm_aat.shape[0])
 
-        a, rt, s_used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
-                                    clean=True, seed=0)
+        a, (rt, ri), s_used = a_token_for(rec["cif"], rec["chain"],
+                                          sigma=args.sigma_floor, clean=True, seed=0)
         a2, _, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
                                clean=True, seed=0)
         a_rot, _, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
                                   clean=True, seed=7)
         a_hi, _, s_hi = a_token_for(rec["cif"], rec["chain"], sigma=args.compare_sigma,
                                     clean=False, seed=0)
+
         # Read back, not echoed: proves the pin took effect on this forward.
         if abs(float(s_used.max()) - args.sigma_floor) > 1e-9:
-            print(f"  {rec['target']}: SIGMA NOT PINNED -- forward ran at "
-                  f"{float(s_used.max()):g}")
+            print(f"  {rec['target']}: SIGMA NOT PINNED -- ran at {float(s_used.max()):g}")
             ok = False
 
         len_ok = a.shape[0] == n_apm
+        n = min(len(rt), n_apm)
+        ri_ok = len_ok and bool((ri[:n] == apm_ri[:n]).all())
+        same = sum(1 for k in range(n)
+                   if px_name[int(rt[k])] == apm_name[int(apm_aat[k])])
+        design_tok = sum(1 for k in range(n) if px_name[int(rt[k])] in
+                         ("xpb", "xpa", "rbb", "raa", "-"))
         det = (a - a2).abs().max().item()
         rot = (a - a_rot).abs().max().item()
         d_sigma = (a - a_hi).abs().max().item()
         scale = max(a.abs().max().item(), 1e-9)
 
-        n = min(len(rt), n_apm)
-        same = sum(1 for k in range(n)
-                   if px_names[int(rt[k])] == apm_names[int(apm_aat[k])])
-        align_ok = (same == n) and len_ok
-        ok = ok and align_ok and det < 1e-3
-
+        row_ok = len_ok and ri_ok and same == n and det < 1e-3
+        ok = ok and row_ok
         print(f"  {rec['target']:6s} L_apm={n_apm:4d} L_atoken={a.shape[0]:4d} "
-              f"{'len OK ' if len_ok else 'LEN MISMATCH'}  "
-              f"restype {same}/{n} {'OK' if align_ok else 'MISALIGNED'}  "
+              f"{'len OK' if len_ok else 'LEN MISMATCH'}  "
+              f"res_idx {'OK' if ri_ok else 'MISALIGNED'}  "
+              f"restype {same}/{n}{'' if design_tok == 0 else f' ({design_tok} design tokens!)'}  "
               f"repeat={det:.2e}  rot-aug={rot:.2e}  "
-              f"sigma_used A={float(s_used.max()):.2e} B={float(s_hi.max()):.3g}  "
+              f"sigma A={float(s_used.max()):.2e} B={float(s_hi.max()):.3g}  "
               f"|A-B|max={d_sigma:.4f} ({100*d_sigma/scale:.1f}% of |a|max={scale:.3f})",
               flush=True)
-    print("VERDICT:", "bridge aligned and deterministic" if ok
+    print("VERDICT:", "bridge aligned, sequence-carrying and deterministic" if ok
           else "BRIDGE NOT USABLE -- see mismatches above", flush=True)
     if not ok:
         raise SystemExit(1)

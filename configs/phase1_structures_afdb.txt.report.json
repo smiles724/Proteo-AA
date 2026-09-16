@@ -1,0 +1,16 @@
+{
+  "source": {
+    "root": "/hai/scratch/yfsun/afdb_laproteina/run",
+    "split": "train",
+    "records": 343207,
+    "source": "la-proteina"
+  },
+  "exported": 2000,
+  "eligible": 343207,
+  "max_length": 512,
+  "longest_exported": 510,
+  "min_crop_size_required": 510,
+  "verified_sample": 40,
+  "verified_passed": 40,
+  "failures": []
+}

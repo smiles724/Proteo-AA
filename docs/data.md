@@ -180,6 +180,55 @@ phase 1 was first launched from a list built by a throwaway script in a session
 scratchpad, and the run would not have been reproducible once that directory was
 cleaned.
 
+## AFDB for the coupling phases
+
+The La-Proteina AFDB subset is the coupling phases' data source, and it suits
+them in a way the PDB does not. Every constraint that rejects most Protenix
+mmCIFs is satisfied by construction: each record is a **single chain** of
+**canonical residues** with a **complete atom set** and a **contiguous
+residue_index**, so there is no assembly-versus-asymmetric-unit discrepancy and
+no hetero group to break the token count.
+
+| | |
+|---|---|
+| records | 344,507 (343,207 train / 1,300 val), **0 failures** |
+| shards | 44, 6.25 GB |
+| lengths | 33 – 511, median 149 |
+| missing atoms | 0 — `missing_atom_mask` comes out all-zero |
+| per-residue veto | not applicable; no occupancy or altloc to be ambiguous about |
+
+`scripts/export_afdb_cifs.py` re-emits records as mmCIF, because the builder
+discards the files it downloaded (`raw` is transient) and the coupling path reads
+mmCIF. 2,000 exported for phase 1, strided across the length distribution so the
+set is not all near the 33-residue floor.
+
+**Verification is sampled here, not exhaustive** — a deliberate difference from
+`survey_coupling_structures.py`. For PDB entries the usable set has to be found
+one file at a time because agreement depends on the entry; AFDB is homogeneous,
+so a random sample measures the set. 40/40 passed, and the rate is written into
+the manifest header so the assumption is on the record and falsifiable.
+
+### Four mmCIF fields, three of which fail silently
+
+Writing a file the featurizer accepts took seven attempts, because most of the
+ways to get it wrong produce no error. Recorded here so the next person does not
+rediscover them:
+
+| Wrong | What you see |
+|---|---|
+| `pdbx_struct_assembly` absent | `KeyError: 'pdbx_struct_assembly'` — the only loud one; `oligomeric_count` is read unguarded |
+| `label_seq_id` unset (writes as `.`) | `ValueError: invalid literal for int()` deep in the consecutive-Cα filter, surfacing as "parsed without atom_array" |
+| `label_asym_id` ≠ `assembly_gen.asym_id_list` | **nothing.** Every filter reports zero drops; `expand_assembly` shows `atom: -243` and the atom array is `None` |
+| `label_entity_id` unset | **nothing.** No mapping to `entity_poly_type`, so `mol_type` becomes `"ligand"` and the selector says "no protein chains" |
+| `_entity_poly_seq` absent | `KeyError` on the entity id in `build_ref_chain_with_atom_array` |
+| an unquoted value with a space | `DeserializationError` on the whole category — the row gains a token |
+
+The subchain is the subtle one: `setup_entities()` invents an id (`"Axp"`), which
+gemmi writes as `label_asym_id`, so the assembly has to name *that*. Pinning it
+to the chain name works only if done **before** `setup_entities`; doing it after
+orphans the subchain and `label_entity_id` goes empty instead. `write_cif`
+asserts the subchain took, since the failure is otherwise invisible.
+
 ## Recorded patches
 
 `patches/protenix-sidechain-process-ids-file.patch` records the `--ids-file`

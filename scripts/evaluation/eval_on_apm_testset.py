@@ -84,6 +84,12 @@ def load_chain(path, slot_idx, slot_ok, device):
     with open(path, "rb") as fh:
         d = pickle.load(fh)
     keep = torch.as_tensor(d["modeled_idx"], dtype=torch.long)
+    # Where each kept residue sits inside APM's contiguous span. The a_token
+    # cache is built over that span (as `_process_csv_row_FAESM` slices it), so
+    # a chain with an interior gap has more cached rows than this function keeps
+    # residues -- 324 vs 322 on one of the 449. Recording the offsets lets the
+    # cache be indexed by THIS residue set instead of assumed to match it.
+    span_index = (keep - int(keep.min())).to(device)
     types = torch.as_tensor(d["aatype"], dtype=torch.long)[keep].to(device)
     pos = torch.as_tensor(d["atom_positions"], dtype=torch.float32)[keep].to(device)
     amask = torch.as_tensor(d["atom_mask"], dtype=torch.float32)[keep].to(device) > 0.5
@@ -107,7 +113,8 @@ def load_chain(path, slot_idx, slot_ok, device):
     bb_local = to_local(pos[:, :3], R, t)
     return dict(types=types, tix=tix, R=R, t=t, chem=chem, observed=observed,
                 gt_local=gt_local, bb_local=bb_local, res_idx=res_idx,
-                chain_idx=chain_idx, frame_ok=frame_ok, canonical=canonical)
+                chain_idx=chain_idx, frame_ok=frame_ok, canonical=canonical, span_index=span_index)
+
 
 
 # Our four arms were trained BEFORE the packer was restructured to APM's module
@@ -355,7 +362,8 @@ def main() -> None:
             preds[m] = predict_apm(
                 mod, ch, device,
                 diffuse_mask=ch["frame_ok"].float() if m.startswith("apmdata_") else None,
-                a_token=a_tokens[m].get(pdb) if m in a_tokens else None)
+                a_token=(a_tokens[m][pdb][ch["span_index"].cpu()]
+                         if m in a_tokens else None))
         if "dunbrack_template" in methods:
             # phi/psi from the GLOBAL backbone: a dihedral spans three residues,
             # so it cannot be taken in any single residue's local frame.

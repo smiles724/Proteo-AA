@@ -164,6 +164,12 @@ warmup 2000、最多 50k step，每 2000 step 在 ≤491 条 held-out recent-PDB
 
 ## 结果（2026-09-15，job 117035，四臂各 50000 步）
 
+> **⚠ 这张表里 `a_token` 和 `both` 两列无效**（2026-09-16 发现）：评测脚本
+> 把 a_token 通道喂成了零，所以这两臂是在没有条件输入的情况下被评分的。
+> `none` / `plm` / `apm_ckpt` / `template` 各列不受影响。
+> 修复与重测见 `docs/weekly_report_sc_packer_zh.md`。
+
+
 四臂全部 COMPLETED，16.6–18.5 h。step 50000、308 条 held-out monomer：
 
 | arm | symmetry_rmsd ↓ | χ1 acc 40° ↑ | χ1+χ2 acc ↑ | chi_rec 40° ↑ | rotamer_rec ↑ |
@@ -202,22 +208,31 @@ sqrt-of-mean ≥ mean-of-sqrt（Jensen），加上链集不同、对称对齐只
 
 **教训**：拿一个文档里的数字当验收门槛之前，先确认它和你要比的东西是同一个估计量。
 
-### a_token 为什么没用：最可能的解释
+### ~~a_token 为什么没用：最可能的解释~~ —— 已撤回（2026-09-16）
 
-这个相位喂给 packer 的是 **native 骨架 + native frame + native 序列**
-（`predicted_frame=False`、`force_gt_type_logits=True`），而 a_token 是**同一份
-native 骨架**在 σ=0.4 条件下过一遍冻结 trunk 得到的结构感知 embedding。IPA 已经
-直接读着这份几何了，所以 **a_token 在这里与几何输入高度冗余**。
+**这一节原本给出的"a_token 与几何输入冗余"的解释，建立在无效数字上，撤回。**
 
-关于那个 σ：坐标上**没有加噪**（`x_noisy` 就是 native 坐标）。σ 只进两处，
-`c_in=1/√(σ²+σ_data²)` 在 σ∈[0.01,1] 区间几乎不变（0.06250→0.06238，σ_data=16
-主导），真正起作用的只有时间嵌入 `ln(σ/σ_data)/4`。所以 **σ=0 不可表示**
-（ln 0 = −∞），而且 trunk 是个 denoiser、σ 是它输入契约的一部分：训练噪声是
-log-normal(−1.2, 1.5)，中位数 σ=0.301，`feature_sigma=0.4` 正落在 57.5 分位。
-σ→0 是分布外外推，不是"更干净的表示"。**这个 trunk 上不存在"σ=0 的 a_token"。**
+理由：评测脚本 `eval_on_apm_testset.py` 的 `predict_apm` 无条件把 `h_res`
+喂成 `torch.zeros(1, L, 768)`，所以上一轮所有 a_token / both 臂在评分时
+**从来没拿到 a_token**。本节赖以成立的 `ours_a_token` 1.532 和
+`ours_both` 1.486，测的是"这两臂被拿掉条件输入之后"的分数，
+不是它们的分数。修复见 commit `f24d227`。
 
-要证伪"冗余"这个解释，该做的是让 a_token 携带几何以外的信息 —— 即把骨架换成
-**预测的/带噪的**（`predicted_frame=True`，Stage III/IV），而不是调 σ。
+修复后在 APM 数据上重训的三臂给出的结论是"**无差别**"而不是"有害"：
+a_token 1.593 vs none 1.611（−0.018 Å），chi 指标几乎完全重合。
+详见 `docs/weekly_report_sc_packer_zh.md`。
+
+上一轮那四臂的 a_token 效应**无法补测**：它们训练时的 a_token 带 σ≈0.4
+噪声和每步重抽的随机旋转，逐链不可复现。喂零得 1.531、喂干净 cache 得
+1.882，两个都不是它们见过的输入。只能重训。
+
+本节唯一仍然成立的部分是关于 σ 的算术：`c_in = 1/√(σ²+σ_data²)` 在
+σ ≤ 1 时几乎不变，真正起作用的是时间嵌入 `ln(σ/σ_data)/4`，因此
+**σ=0 在这个网络上不可表示**。但"σ→0 是分布外外推、不存在 σ=0 的
+a_token"这个判断也需要修正：坐标噪声可以严格设为 0
+（`clean_coordinate_input`），只有时间通道需要一个下界，取 Protenix 自己的
+`s_min = 4e-4`。实测 σ=0.4 与之相差 150–186% 的 a_token 幅度——
+**两者确实不是同一个特征，但可用的那个是零噪声那个。**
 
 ## 这次踩到并修掉的坑
 

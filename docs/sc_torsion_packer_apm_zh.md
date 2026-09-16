@@ -348,8 +348,14 @@ batch size = `min(64, 400000 // L² + 1)`，因此 L=384 时只有 3 条、L≤7
 
 还有一条 APM 的行为值得记下来：当某个长度组凑不满 batch 时，
 `batch_repeats = bs // len(batch)` 会把这些样本**重复**填满。实测一个真实 epoch：
-540 个 batch、3,694 条 unique、6,373 个 forward slot，**平均重复 1.73 倍**。
+3,694 条 unique、6,373 个 forward slot，**平均重复 1.73 倍**。
 也就是说名义 batch size 高估了每步看到的不同蛋白数。这是他们的代码，照抄。
+
+sampler 是这一轮唯一"复刻"而非"调用"的部分（`LengthBatcher_nonRep` 是按分布式
+写的），也因此是最可能悄悄跑偏的一块——batch 组成不一样不会报错，只是变成另一个实验。
+所以做了逐 batch 比对：在真实过滤后的 index 上，epoch 0/1/5 各 526/528/528 个 batch，
+**和 APM 本人的输出 index 对 index 完全相同**。固化成 `tests/test_apm_sampler_parity.py`
+（apm_reference 不在 PYTHONPATH 上时跳过）。
 
 ## 参数量的实话
 

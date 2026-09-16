@@ -514,7 +514,25 @@ VERDICT: bridge aligned, sequence-carrying and deterministic
 我认为这是更干净的输入，但它改变了解读：如果新臂赢了 none，不能直接归因于
 "去掉噪声"。要保留与上一轮的严格可比性，`--keep-random-rotation` 开关留着。
 
-## 现在的状态
+## 最终结果（2026-09-16，job 117588 四臂 + job 117866 评测）
+
+四臂各 200 epoch，449 条 APM post-2021 held-out monomer，统一估计器：
+
+| 臂 | symmetry_rmsd ↓ | vs none | chi1_acc ↑ | rotamer_rec ↑ |
+|---|---|---|---|---|
+| `none` | 1.6109 | — | 0.7963 | 0.6044 |
+| `plm` | 1.6119 | +0.0010 | 0.7940 | 0.6025 |
+| `a_token` | **1.5929** | −0.0180 | 0.7969 | 0.6027 |
+| `both` | 1.6379 | +0.0270 | 0.7874 | 0.5962 |
+| — | | | | |
+| `apm_ckpt`（官方） | **1.3477** | −0.2632 | 0.8552 | 0.6843 |
+| `dunbrack_template` | 2.0415 | +0.4306 | 0.7207 | 0.5489 |
+
+**两条序列条件都没有可测收益，同时加还更差。** 与官方 checkpoint 的差距
+（0.263 Å）是被消融那一项的 **14 倍**，所以下一步是补数据而不是调条件。
+详见 `docs/weekly_report_sc_packer_zh.md`。
+
+## 当时的状态（已过期，保留为记录）
 
 - `none` / `plm` 两臂：已具备提交条件，等 smoke（job 117525）确认后提交正式 run。
 - a_token 桥：job 117532 在跑一致性检查；通过之后才会预算 a_token / both 两臂。

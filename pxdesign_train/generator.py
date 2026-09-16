@@ -35,6 +35,7 @@ def sample_diffusion_training(
     inplace_safe: bool = False,
     attn_chunk_size: Optional[int] = None,
     clean_coordinate_input: bool = False,
+    centre_only_augmentation: bool = False,
     precomputed_input: Optional[
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     ] = None,
@@ -59,6 +60,13 @@ def sample_diffusion_training(
         s_inputs / s_trunk / z_trunk: from `DesignConditionEmbedder`.
         N_sample: how many independent (rotation, noise) draws per macro-batch
             item. The PXDesign report's "diffusion batch size 8" maps to N_sample=8.
+        centre_only_augmentation: skip the random rotation and translation and
+            only centre on the masked CoM. Off by default, which is training's
+            behaviour. Needed when a downstream consumer requires the forward to
+            be a deterministic function of the structure: the rotation comes
+            from scipy's global RNG and, measured on eight chains, moves
+            a_token by ~10.4 against its own scale of ~7 -- so an
+            orientation-sensitive feature cannot be cached without pinning it.
         clean_coordinate_input: diagnostic mode for AA prediction. Still samples
             and passes a strictly positive sigma to the diffusion network, but
             does not perturb the augmented native coordinates with Gaussian
@@ -95,6 +103,7 @@ def sample_diffusion_training(
             x_input_coords=label_dict["coordinate"],
             N_sample=N_sample,
             mask=label_dict["coordinate_mask"],
+            centre_only=centre_only_augmentation,
         ).to(dtype)  # [..., N_sample, N_atom, 3]
 
         # 2. Sample σ per (batch, sample) from EDM log-normal.

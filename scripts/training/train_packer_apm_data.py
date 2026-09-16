@@ -130,7 +130,11 @@ def packer_inputs(batch, device):
     ids, chem = instantiate_from_type_indices(aat.clamp(0, n_aa - 1).cpu())
     ids, chem = ids.to(device), chem.to(device) & canonical[..., None]
     return dict(
-        h_res=torch.zeros(B, L, 768, device=device),
+        # The a_token channel. Zeros on the none/plm arms -- the packer
+        # multiplies a_proj's output by zero there, so the value is unread and
+        # the parameter set stays identical across arms.
+        h_res=(batch["a_token"].to(device).float() if "a_token" in batch
+               else torch.zeros(B, L, 768, device=device)),
         restype_logits=logits,
         atom_name_ids=ids,
         atom_mask=chem,
@@ -154,7 +158,7 @@ def to_device(batch, device):
 
 # --------------------------------------------------------------------------
 @torch.no_grad()
-def validate(packer, files, device, tables, limit=0):
+def validate(packer, files, device, tables, limit=0, a_token_dir=None):
     """chi1 accuracy, rotamer recovery and symmetry-aware atom14 side-chain RMSD.
 
     This is a *training-curve* metric computed in atom14 space off openfold's
@@ -174,7 +178,11 @@ def validate(packer, files, device, tables, limit=0):
     chi1_ok = chi1_n = rot_ok = rot_n = 0
     files = files[:limit] if limit else files
     for f in files:
-        b = collate([featurise(f)])
+        item = featurise(f)
+        if a_token_dir is not None:
+            a = np.load(Path(a_token_dir) / f"{Path(f).stem}.npy")
+            item["a_token"] = torch.from_numpy(a).float()
+        b = collate([item])
         b = to_device(b, device)
         packer(**packer_inputs(b, device))
         unit = packer.last_torsions["unit"]
@@ -217,6 +225,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--data-root", default=DATA_ROOT)
     ap.add_argument("--plm-checkpoint", default=ESM2_650M)
+    ap.add_argument("--a-token-cache", default="",
+                    help="root with train/ and val/ subdirectories of cached "
+                         "a_token .npy files (a_token / both arms)")
     ap.add_argument("--max-epochs", type=int, default=200)
     ap.add_argument("--accum", type=int, default=8, help="stands in for APM's 8 GPUs")
     # APM's sampler settings for 80GB GPUs (pretrain_sidechain.yaml). Exposed so
@@ -235,11 +246,13 @@ def main():
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
-    if args.arm in ("a_token", "both"):
+    needs_a_token = args.arm in ("a_token", "both")
+    if needs_a_token and not args.a_token_cache:
         raise SystemExit(
-            "a_token needs the frozen PXDesign trunk, which consumes a Protenix "
-            "feature dict that APM's pickles do not carry. The feature bridge is "
-            "a separate piece of work; this script trains none/plm only."
+            f"arm {args.arm!r} reads a_token, which APM's pickles do not carry. "
+            "Point --a-token-cache at the directory built by "
+            "scripts/data/build_a_token_cache.py; without it the arm would be "
+            "fed zeros and would silently be the `none` arm."
         )
 
     out = Path(args.out)
@@ -266,7 +279,9 @@ def main():
     meta = meta.reset_index(drop=True)
     files = [root / f"{n}.pkl" for n in meta["pdb_name"].astype(str)]
 
-    train = APMPackingDataset(files, crop_size=None, seed=args.seed)
+    a_root = Path(args.a_token_cache) if args.a_token_cache else None
+    train = APMPackingDataset(files, crop_size=None, seed=args.seed,
+                              a_token_dir=(a_root / "train") if needs_a_token else None)
     sampler = LengthBatcher(meta, seed=args.seed,
                             max_batch_size=args.max_batch_size,
                             max_num_res_squared=args.max_num_res_squared)
@@ -279,6 +294,7 @@ def main():
     tables = RigidGroupTables(torch.float32, device)
 
     header = dict(arm=args.arm, params_total=n_par, train_chains=len(files),
+                  a_token_cache=(str(a_root) if needs_a_token else None),
                   filtered_out=n_raw - len(files), clusters=int(meta.cluster.nunique()),
                   batches_per_epoch=len(list(iter(sampler))), accum=args.accum,
                   val_chains=len(val), lr=args.lr, clip=args.clip,
@@ -364,7 +380,8 @@ def main():
                     run = {"chi": 0.0, "fape": 0.0, "total": 0.0, "n": 0}
 
         if (epoch + 1) % args.val_every == 0 or epoch + 1 == args.max_epochs:
-            m = validate(packer, val, device, tables, limit=args.val_n)
+            m = validate(packer, val, device, tables, limit=args.val_n,
+                         a_token_dir=(a_root / "val") if needs_a_token else None)
             rec = dict(epoch=epoch, step=step, hours=(time.time() - t0) / 3600, **m)
             print("VAL " + json.dumps(rec), flush=True)
             log.write(json.dumps({"val": rec}) + "\n"); log.flush()

@@ -1212,6 +1212,8 @@ class ProtenixDesignTrain(ProtenixDesign):
             z_trunk=z,
             N_sample=N_sample,
             clean_coordinate_input=self.aa_clean_coordinate_input,
+            centre_only_augmentation=getattr(
+                self, "aa_centre_only_augmentation", False),
         )
 
         out = {

@@ -36,6 +36,7 @@ import math
 import os
 import random
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -119,12 +120,18 @@ def main():
                     default="/hai/scratch/shenjm/pxdesign_official/pxdesign_v0.1.0.pt")
     ap.add_argument("--data-root", default="/hai/scratch/yfsun/protenix_data")
     ap.add_argument("--sigma-floor", type=float, default=PROTENIX_S_MIN)
+    ap.add_argument("--keep-random-rotation", action="store_true",
+                    help="keep the augmentation's random rotation (training's "
+                         "behaviour). Off by default: it makes a_token "
+                         "non-deterministic, which a cache cannot absorb.")
     ap.add_argument("--compare-sigma", type=float, default=0.4,
                     help="second sigma to quantify against, in --check mode")
     ap.add_argument("--crop-size", type=int, default=768)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", default="bf16")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--overwrite", action="store_true",
+                    help="recompute chains that already have a .npy")
     ap.add_argument("--check", type=int, default=0,
                     help="run the consistency check on the first N chains and exit")
     args = ap.parse_args()
@@ -211,8 +218,19 @@ def main():
     if not net.aa_clean_coordinate_input:
         raise SystemExit("aa_clean_coordinate_input is False after construction: "
                          "coordinates would be perturbed.")
-    print("verified: clean_coordinate_input=True and sigma is pinned "
-          f"({type(net.training_noise_sampler).__name__})", flush=True)
+
+    # The augmentation's random rotation is drawn from scipy's global RNG and,
+    # measured over eight chains, changes a_token by ~10.4 against its own
+    # scale of ~7 -- as large as the sigma=0.4 noise. a_token is an AF3
+    # diffusion intermediate, so orientation dependence is expected, not a bug;
+    # but it means an unpinned orientation makes the cached feature arbitrary.
+    # Caching one orientation per chain would freeze an arbitrary global frame
+    # in; dropping the rotation makes a_token a deterministic function of the
+    # structure as APM stored it.
+    net.aa_centre_only_augmentation = not args.keep_random_rotation
+    print(f"verified: clean_coordinate_input=True, sigma pinned "
+          f"({type(net.training_noise_sampler).__name__}), "
+          f"centre_only_augmentation={net.aa_centre_only_augmentation}", flush=True)
 
     def a_token_for(cif, chain, sigma=None, clean=True, seed=0):
         """One forward; returns (a_token [L, C], restype [L], sigma actually used).
@@ -259,25 +277,45 @@ def main():
         return
 
     manifest = {"sigma_floor": args.sigma_floor, "c_noise": c_noise, "c_in": c_in,
-                "clean_coordinate_input": True, "checkpoint": args.checkpoint,
+                "clean_coordinate_input": True,
+                "centre_only_augmentation": bool(net.aa_centre_only_augmentation),
+                "checkpoint": args.checkpoint, "aa_mask_mode": "none",
                 "chains": []}
-    for f in files:
+    t0, done = time.time(), 0
+    for n_seen, f in enumerate(files, 1):
         try:
+            target = Path(f).stem
+            npy = out / f"{target}.npy"
+            if npy.is_file() and not args.overwrite:
+                a0 = np.load(npy, mmap_mode="r")
+                manifest["chains"].append({"name": target, "L": int(a0.shape[0]),
+                                           "C": int(a0.shape[1]), "cached": True})
+                continue
             rec = convert(f, cif_dir)
             a, _ids, used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor)
             if abs(float(used.max()) - args.sigma_floor) > 1e-9:
                 raise RuntimeError(f"forward ran at sigma {float(used.max()):g}, "
                                    f"not the pinned {args.sigma_floor:g}")
-            np.save(out / f"{rec['target']}.npy", a.numpy().astype(np.float16))
+            np.save(npy, a.numpy().astype(np.float16))
             manifest["chains"].append({"name": rec["target"], "L": int(a.shape[0]),
                                        "C": int(a.shape[1]),
                                        "apm_span_res": rec["apm_span_res"]})
+            done += 1
         except Exception as e:                        # noqa: BLE001
             manifest.setdefault("failed", []).append(
                 {"pkl": str(f), "error": f"{type(e).__name__}: {e}"})
+        if n_seen % 200 == 0:
+            rate = done / max(time.time() - t0, 1e-9)
+            left = (len(files) - n_seen) / max(rate, 1e-9) / 3600
+            print(f"  {n_seen}/{len(files)}  computed {done}  "
+                  f"failed {len(manifest.get('failed', []))}  "
+                  f"{rate:.2f} chain/s  ~{left:.1f}h left", flush=True)
+            (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
-    print(f"cached {len(manifest['chains'])}/{len(files)}; "
-          f"failed {len(manifest.get('failed', []))}", flush=True)
+    fails = manifest.get("failed", [])
+    print(f"cached {len(manifest['chains'])}/{len(files)}; failed {len(fails)}", flush=True)
+    for bad in fails[:10]:
+        print("  FAIL", bad["pkl"], bad["error"][:160], flush=True)
 
 
 def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):

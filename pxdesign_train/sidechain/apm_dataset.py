@@ -21,6 +21,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -66,12 +67,20 @@ def featurise(path, crop_size=None):
 
 
 class APMPackingDataset(Dataset):
-    """Chains as items. Lengths vary, so batching is length-bucketed elsewhere."""
+    """Chains as items. Lengths vary, so batching is length-bucketed elsewhere.
 
-    def __init__(self, files, crop_size=None, seed: int = 0):
+    `a_token_dir` attaches the precomputed trunk feature for the a_token arms.
+    It is read rather than recomputed because at zero coordinate noise with the
+    orientation pinned the trunk is a deterministic function of the structure
+    (`scripts/data/build_a_token_cache.py`), so a forward per step would buy
+    nothing but cost one 259M-parameter model per batch.
+    """
+
+    def __init__(self, files, crop_size=None, seed: int = 0, a_token_dir=None):
         self.files = [Path(f) for f in files]
         self.crop_size = crop_size
         self.seed = int(seed)
+        self.a_token_dir = Path(a_token_dir) if a_token_dir else None
         if not self.files:
             raise ValueError("empty dataset")
 
@@ -83,7 +92,24 @@ class APMPackingDataset(Dataset):
         # the conditional-chain coin we pinned to 0.0). Seed per item so a run
         # is reproducible under multi-worker loading.
         random.seed(self.seed * 1_000_003 + i)
-        return featurise(self.files[i], crop_size=self.crop_size)
+        out = featurise(self.files[i], crop_size=self.crop_size)
+        if self.a_token_dir is not None:
+            name = self.files[i].stem
+            path = self.a_token_dir / f"{name}.npy"
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"no cached a_token for {name} at {path}. Training the "
+                    "a_token arm without it would silently feed zeros, which is "
+                    "the `none` arm wearing another name."
+                )
+            a = torch.from_numpy(np.load(path)).float()
+            if a.shape[0] != out["aatypes_1"].shape[0]:
+                raise ValueError(
+                    f"{name}: cached a_token has {a.shape[0]} rows but the "
+                    f"chain has {out['aatypes_1'].shape[0]} residues"
+                )
+            out["a_token"] = a
+        return out
 
 
 def pdb_monomer_files(root, metadata, apply_filters=True):

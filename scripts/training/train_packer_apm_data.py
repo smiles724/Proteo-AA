@@ -230,6 +230,8 @@ def main():
     ap.add_argument("--val-every", type=int, default=10, help="epochs")
     ap.add_argument("--val-n", type=int, default=100, help="0 = all 449")
     ap.add_argument("--time-limit-h", type=float, default=0.0)
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>/last.pt if it exists")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
@@ -289,15 +291,34 @@ def main():
     print("CONFIG " + json.dumps(header), flush=True)
     (out / "config.json").write_text(json.dumps(header, indent=2))
 
+    start_epoch, step = 0, 0
+    if args.resume and (out / "last.pt").is_file():
+        ck = torch.load(out / "last.pt", map_location=device, weights_only=False)
+        if ck.get("config", {}).get("arm") not in (None, args.arm):
+            raise SystemExit(f"{out/'last.pt'} is arm {ck['config']['arm']!r}, "
+                             f"not {args.arm!r}")
+        packer.load_state_dict(ck["state_dict"])
+        if "optimizer" in ck:
+            opt.load_state_dict(ck["optimizer"])
+        else:
+            # Without the moments, resuming restarts Adam's bias correction and
+            # the first steps take an effectively different step size. Say so
+            # rather than letting the loss curve kink for no visible reason.
+            print("RESUME warning: checkpoint has no optimizer state; "
+                  "Adam moments restart from zero", flush=True)
+        start_epoch, step = int(ck["epoch"]) + 1, int(ck["step"])
+        print(f"RESUME from epoch {start_epoch}, step {step}", flush=True)
+
     log = (out / "train_log.jsonl").open("a")
     loader = torch.utils.data.DataLoader(
         train, batch_sampler=sampler, num_workers=args.workers, collate_fn=collate,
         pin_memory=True, persistent_workers=args.workers > 0)
 
     t0 = time.time()
-    step = micro = 0
+    micro = 0
+    epoch = start_epoch - 1          # defined even if the loop body never runs
     opt.zero_grad(set_to_none=True)
-    for epoch in range(args.max_epochs):
+    for epoch in range(start_epoch, args.max_epochs):
         sampler.set_epoch(epoch)
         run = {"chi": 0.0, "fape": 0.0, "total": 0.0, "n": 0}
         for batch in loader:
@@ -347,7 +368,10 @@ def main():
             rec = dict(epoch=epoch, step=step, hours=(time.time() - t0) / 3600, **m)
             print("VAL " + json.dumps(rec), flush=True)
             log.write(json.dumps({"val": rec}) + "\n"); log.flush()
-            torch.save({"state_dict": packer.state_dict(), "epoch": epoch,
+            # Optimizer state included so --resume continues the same run
+            # rather than a differently-conditioned one.
+            torch.save({"state_dict": packer.state_dict(),
+                        "optimizer": opt.state_dict(), "epoch": epoch,
                         "step": step, "val": m, "config": header},
                        out / "last.pt")
 

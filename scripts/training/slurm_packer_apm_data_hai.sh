@@ -42,4 +42,5 @@ exec "$PYBIN" scripts/training/train_packer_apm_data.py \
   --arm "$ARM" --out "$OUT" \
   --max-epochs "${MAX_EPOCHS:-200}" --accum "${ACCUM:-8}" \
   --val-every "${VAL_EVERY:-10}" --val-n "${VAL_N:-100}" \
-  --workers 6 --time-limit-h "${TIME_LIMIT_H:-45}" "$@"
+  --workers 6 --time-limit-h "${TIME_LIMIT_H:-45}" \
+  --resume "$@"

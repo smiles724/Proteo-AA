@@ -10,6 +10,16 @@ in ways that would not have been obvious from the loss curve:
 * Protenix calls ``AtomAttentionDecoder`` positionally through ``checkpoint_fn``
   but with ``a=`` as a keyword otherwise. A hook that handles only one form stops
   injecting under the other, which presents as an adapter that learned nothing.
+* ``pxdesign_train`` emits CPU tensors while the model sits wherever it was
+  loaded, and the mismatch surfaces at the condition embedder's first
+  ``F.linear`` rather than anywhere informative, because every step before the
+  first weight multiply is indexing, which tolerates a CPU index.
+
+**Set ``LAYERNORM_TYPE=torch``** to run these, as the launchers do. Without it
+Protenix selects its fused LayerNorm kernel, which raises ``RuntimeError: input
+must be a CUDA tensor`` on a CPU model -- a message that invites the wrong
+conclusion that these tests need a GPU. They do not; they need the non-fused
+kernel.
 """
 
 import os
@@ -131,3 +141,45 @@ def test_the_gradient_path_from_l_bb_reaches_the_feedback(driver_and_structure):
     denoised, _ = denoise(noisy, torch.tensor([5.0]), feedback=delta)
     (denoised - target[None]).pow(2).sum().backward()
     assert delta.grad is not None and float(delta.grad.abs().sum()) > 0
+
+
+@needs_donor
+def test_the_structure_moves_every_tensor_and_keeps_the_string_columns(
+    driver_and_structure,
+):
+    """``pxdesign_train`` emits CPU tensors; the model is wherever it was loaded.
+
+    Without this the run dies inside the condition embedder's first ``F.linear``
+    on mixed devices -- and not at the obvious place, because everything up to
+    the first weight multiply is pure indexing, which tolerates a CPU index.
+    """
+    _, structure, _ = driver_and_structure
+    moved = structure.to("cpu")  # a no-op device, so this runs anywhere
+
+    strings = [k for k, v in structure.feature_dict.items() if not torch.is_tensor(v)]
+    assert strings, "the featurizer is expected to emit string columns"
+    for key in strings:
+        assert moved.feature_dict[key] is structure.feature_dict[key]
+    tensors = [k for k, v in structure.feature_dict.items() if torch.is_tensor(v)]
+    assert len(tensors) > 50
+    for key in tensors:
+        assert moved.feature_dict[key].device == torch.device("cpu")
+
+    # The topology travels too: indexing tolerates a CPU index, arithmetic does not.
+    assert moved.topology.atom_to_token_idx.device == torch.device("cpu")
+    assert moved.topology.num_tokens == structure.topology.num_tokens
+    assert moved.topology.atom_names is structure.topology.atom_names
+    for field in ("aatype", "design_mask", "backbone_target"):
+        assert getattr(moved, field).device == torch.device("cpu")
+
+
+@needs_donor
+def test_conditioning_moves_the_dict_itself(driver_and_structure):
+    """A caller that forgets ``.to()`` should still get a run, not a traceback."""
+    driver, structure, _ = driver_and_structure
+    stale = {
+        key: (value.cpu() if torch.is_tensor(value) else value)
+        for key, value in structure.feature_dict.items()
+    }
+    conditioning = driver.conditioning(stale)
+    assert conditioning.s_inputs.device == driver.device

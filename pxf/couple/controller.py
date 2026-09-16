@@ -63,6 +63,21 @@ class Topology:
     residue_index: torch.Tensor | None = None
     chain_index: torch.Tensor | None = None
 
+    def to(self, device):
+        """The same topology with its index tensors on ``device``.
+
+        Indexing a CUDA tensor with a CPU index happens to work, but arithmetic
+        between them does not, so the mapping has to travel with the batch.
+        """
+        from dataclasses import replace
+
+        moved = {
+            name: getattr(self, name).to(device)
+            for name in ("atom_to_token_idx", "residue_index", "chain_index")
+            if torch.is_tensor(getattr(self, name))
+        }
+        return replace(self, **moved)
+
 
 @dataclass
 class GradientPolicy:

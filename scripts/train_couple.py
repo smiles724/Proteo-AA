@@ -207,8 +207,9 @@ def _native_atom37(structures, sample_id, structure):
             f"{sample_id}: featurized sequence differs from the file's; "
             "side-chain targets would be misaligned"
         )
+    device = structure.aatype.device
     return {
-        key: value.unsqueeze(0)
+        key: value.unsqueeze(0).to(device)
         for key, value in single.items()
         if torch.is_tensor(value)
         and key
@@ -391,10 +392,12 @@ def main(argv=None):
         epoch = 0
         while True:
             for sample_id, source in featurized:
-                structure = to_featurized(sample_id, source[0])
+                # The featurizer emits CPU tensors; the model is on `device`.
+                structure = to_featurized(sample_id, source[0]).to(device)
                 native = _native_atom37(structures, sample_id, structure)
-                target = structure.backbone_target.float().to(device)
-                # A fresh sigma_B per example, from the coupling window.
+                target = structure.backbone_target.float()
+                # A fresh sigma_B per example, from the coupling window. The
+                # generator is a CPU one, so draw on the CPU and then move.
                 sigma = sigma_schedule.sample(1, generator=noise_gen).to(device)
                 noise = torch.randn(target.shape, generator=noise_gen).to(device)
                 # One denoiser evaluation per target needs its own conditioning.

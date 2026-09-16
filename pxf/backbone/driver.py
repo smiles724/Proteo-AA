@@ -161,7 +161,13 @@ class PXDesignBackboneDriver:
         return update_input_feature_dict(prepared)
 
     def conditioning(self, feature_dict, *, prepare=True):
-        """Compute the per-target conditioning once; reused across evaluations."""
+        """Compute the per-target conditioning once; reused across evaluations.
+
+        The dict is moved onto the model's device first, so the derived features
+        ``prepare_features`` builds land there too rather than being recomputed
+        on the CPU and then mismatching.
+        """
+        feature_dict = move_to_device(feature_dict, self.device)
         if prepare:
             feature_dict = self.prepare_features(feature_dict)
         return Conditioning.build(self.model, feature_dict, chunk_size=self.chunk_size)
@@ -214,6 +220,37 @@ class FeaturizedStructure:
     design_mask: torch.Tensor  # [L] bool
     backbone_target: torch.Tensor  # [N_atom, 3] native coordinates
     num_tokens: int = 0
+
+    def to(self, device):
+        """Move every tensor onto ``device``, leaving the string columns alone.
+
+        ``pxdesign_train``'s featurizer emits CPU tensors and five numpy string
+        columns (``structure_atom_name`` and friends). The model is wherever it
+        was loaded, so without this the first ``F.linear`` inside the condition
+        embedder fails on mixed devices -- and it fails there rather than at the
+        obvious place, because everything up to the first weight multiply is
+        pure indexing that tolerates a CPU index.
+        """
+        from dataclasses import replace
+
+        device = torch.device(device)
+        return replace(
+            self,
+            feature_dict=move_to_device(self.feature_dict, device),
+            label_dict=move_to_device(self.label_dict, device),
+            topology=self.topology.to(device),
+            aatype=self.aatype.to(device),
+            design_mask=self.design_mask.to(device),
+            backbone_target=self.backbone_target.to(device),
+        )
+
+
+def move_to_device(mapping, device):
+    """Tensors in a feature dict onto ``device``; anything else passed through."""
+    return {
+        key: (value.to(device) if torch.is_tensor(value) else value)
+        for key, value in mapping.items()
+    }
 
 
 def featurize_structures(

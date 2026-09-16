@@ -430,8 +430,13 @@ def main(argv=None):
                     atom_names=[atom37.ATOM37[i] for i in slots] * length,
                     atom_to_token_idx=[r for r in range(length) for _ in slots],
                     num_tokens=length,
+                    # Two-sided bound: aatype 20 is X/UNK and AA_ORDER holds
+                    # only the canonical twenty, so an unresolved residue would
+                    # index past the end of the string.
                     res_names=[
                         rc.restype_1to3[atom37.AA_ORDER[int(a)]]
+                        if 0 <= int(a) < 20
+                        else "UNK"
                         for a in aatype
                         for _ in slots
                     ],

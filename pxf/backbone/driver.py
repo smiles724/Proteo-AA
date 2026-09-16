@@ -17,6 +17,7 @@ is the released network, not a reimplementation.
 """
 
 import inspect
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,8 @@ from pxf import atom37
 from pxf.backbone import proteoaa
 from pxf.couple.controller import Topology
 from pxf.couple.pxdesign_iface import BackboneTap, Conditioning, token_feature_dim
+
+logger = logging.getLogger("pxf.backbone.driver")
 
 DONOR_MODEL_NAME = "pxdesign_v0.1.0"
 # The featurizer defaults that make a monomer's whole chain the design region.
@@ -294,8 +297,15 @@ def to_featurized(sample_id, item):
     # structure_res_name, which would teacher-force glycine everywhere.
     from fampnn.data import residue_constants as rc
 
+    # aa_clean uses -100 for tokens that are not amino acids at all -- ligands,
+    # ions, waters. `int(a) < 20` is true for -100 and AA_ORDER[-100] raises
+    # IndexError, so the bound has to be two-sided. CASP14 targets are
+    # protein-only, which is why this only appears on PDB entries with hetero
+    # groups (101m: 154 residues plus 49 HEM tokens).
+    non_protein = int(((aatype < 0) | (aatype >= 20)).sum())
     per_token = [
-        rc.restype_1to3[atom37.AA_ORDER[int(a)]] if int(a) < 20 else "UNK" for a in aatype
+        rc.restype_1to3[atom37.AA_ORDER[int(a)]] if 0 <= int(a) < 20 else "UNK"
+        for a in aatype
     ]
     tokens = feature_dict["atom_to_token_idx"].reshape(-1).long()
     res_names = [per_token[int(t)] for t in tokens]
@@ -307,6 +317,20 @@ def to_featurized(sample_id, item):
         residue_index=feature_dict.get("residue_index"),
         chain_index=feature_dict.get("asym_id"),
     )
+    if non_protein:
+        # Not raised here: the structure is still usable for backbone work. But
+        # the side-chain module only accepts the canonical twenty, and
+        # _native_atom37's sequence-equality check would compare a
+        # protein-only parse against this token count. Say so where it is
+        # visible rather than failing later with a length mismatch.
+        logger.warning(
+            "%s: %d of %d tokens are not amino acids (ligands/ions/waters). The "
+            "coupling path needs a protein-only entry; its side-chain targets "
+            "will not align.",
+            sample_id,
+            non_protein,
+            num_tokens,
+        )
     return FeaturizedStructure(
         sample_id=sample_id,
         feature_dict=feature_dict,

@@ -117,6 +117,19 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def target_seed(base, pdb_id, sample):
+    """A seed fixed by the *target*, not by its position in the id list.
+
+    Positional seeding (``base + index * 1000``) makes a target's packing depend
+    on how the run was sliced, so a ``--max-targets`` subset packs the same
+    structure differently from a full run and the two are not comparable. CRC32
+    rather than ``hash()``, which is salted per process.
+    """
+    import zlib
+
+    return int(base) + (zlib.crc32(str(pdb_id).encode()) % 1_000_000) * 16 + int(sample)
+
+
 def compare(before_dir, after_dir):
     """Delta table between two runs. The failure mode is a regression, so say so."""
     before = json.loads((Path(before_dir) / "sidechain_metrics.json").read_text())
@@ -252,7 +265,7 @@ def main(argv=None):
                 atom_mask=given[None],
                 residue_index=entry.residue_index[None],
                 chain_index=entry.chain_index[None],
-                seed=args.seed + index * 1000 + sample,
+                seed=target_seed(args.seed, pdb_id, sample),
             )
             summaries = {}
             for scope, mask in scopes.items():

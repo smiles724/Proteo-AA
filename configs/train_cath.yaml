@@ -15,6 +15,10 @@ train:
   snapshot_every: 5000
   seed: 0
   amp_dtype: bf16
+  # The reduction for L_diff. FaMPNN released inference only, so the original
+  # is not recoverable from the code; per_residue weights every residue equally
+  # (Trp does not count 7x Ser), per_atom is a global atom-weighted average.
+  sidechain_reduction: per_residue
 # Not specified in the preprint -- chosen here, recorded in every checkpoint.
 optim:
   lr: 1.0e-4

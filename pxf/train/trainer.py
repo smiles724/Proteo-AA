@@ -63,6 +63,13 @@ class TrainSettings:
     seed: int = 0
     train_confidence: bool | None = None  # None = the paper's 1-in-8 sampling
     amp_dtype: str | None = None  # None | bf16 | fp16
+    # How L_diff reduces per-atom error: per_residue (every residue counts once)
+    # or per_atom (large side chains dominate). Unrecoverable from the released
+    # code, so it is a recorded setting rather than a hard-coded choice.
+    sidechain_reduction: str = "per_residue"
+    # Ablation only: score side chains the encoder was shown, which is not
+    # masked modeling. See pxf.train.step's module docstring.
+    supervise_visible_sidechains: bool = False
 
 
 def learning_rate(step, settings: OptimSettings, max_steps):
@@ -227,10 +234,17 @@ class Trainer:
                         batch,
                         train_confidence=self.settings.train_confidence,
                         generator=self.generator,
+                        reduction=self.settings.sidechain_reduction,
+                        supervise_visible_sidechains=(
+                            self.settings.supervise_visible_sidechains
+                        ),
                     )
                 (out.total / accum).backward()
                 pending += 1
                 for key, value in out.scalars().items():
+                    # Some stats are labels (the active reduction), not numbers.
+                    if not isinstance(value, (int, float)):
+                        continue
                     running[key] = running.get(key, 0.0) + value
                     counts[key] = counts.get(key, 0) + 1
 

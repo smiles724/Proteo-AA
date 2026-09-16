@@ -10,6 +10,22 @@ residual. Phase 2 is the backbone denoising loss on the corrected backbone.
     phase 2   L_BB  = EDM-weighted denoising loss on X_BB^1            -> A_SB
     phase 3   alternate the two, one per batch
 
+``L_SC`` is the diffusion term **only** -- deliberately not
+``L_MLM + L_diff + L_confidence``. The question phase 1 answers is whether
+PXDesign's ``a_token`` carries information that improves side-chain packing:
+
+    min_{theta_BS}  E[ L_SC( D_psi( h_V + A_BS(a_token, sigma_B) ) ) ]
+
+and the sequence is held *fixed* throughout, so an MLM term would be scoring a
+prediction of something already given. Adding it would move the loss without
+bearing on the question, and a gain could no longer be read as better packing.
+The confidence head is likewise excluded: it trains on stop-gradient inputs, so
+it cannot reach ``A_BS`` at all and would only add noise to the curve.
+:func:`sidechain_coupling_loss` therefore calls ``train_step.diffusion_loss``
+directly rather than ``training_forward``, and ``test_couple_losses.py`` pins
+that -- the objective is a design decision, not an accident of which helper was
+convenient.
+
 Phase 3 alternates rather than summing. Backpropagating L_BB through the
 side-chain sampler into A_BS would make the two adapters compete through a
 50-step rollout, which is expensive and gives poor credit assignment; alternating
@@ -21,6 +37,7 @@ from dataclasses import dataclass
 import torch
 
 from pxf.couple import fampnn_iface as iface
+from pxf.train import losses as train_losses
 from pxf.train import step as train_step
 
 
@@ -36,9 +53,8 @@ class CoupledLoss:
         out = {"loss": float(self.total), "loss_kind": self.kind}
         out.update(
             {
-                k: float(v)
+                k: (float(v) if torch.is_tensor(v) or isinstance(v, (int, float)) else v)
                 for k, v in self.stats.items()
-                if isinstance(v, (int, float)) or torch.is_tensor(v)
             }
         )
         return out
@@ -53,14 +69,20 @@ def sidechain_coupling_loss(
     multiplier=None,
     self_cond_p=None,
     generator=None,
+    reduction=train_losses.DEFAULT_SIDECHAIN_REDUCTION,
 ):
-    """``L_SC``: FaMPNN's own diffusion objective, conditioned through ``A_BS``.
+    """``L_SC``: FaMPNN's diffusion objective alone, conditioned through ``A_BS``.
 
     ``features`` is the encoder's feature dict for the *generated* backbone;
     ``delta_h`` is the BB -> SC residual. Everything else -- the noise schedule,
     the 8-way clone, the EDM loss weighting, the teacher-forced sequence -- is
     reused from :mod:`pxf.train.step`, so the adapter is trained against the
     objective the module already knows.
+
+    No MLM and no confidence term; see the module docstring for why. No
+    ``scn_mlm_mask`` either: the coupling cycle packs with every side chain
+    hidden, exactly as ``sidechain_pack`` does at inference, so every supervisable
+    atom is a legitimate target.
     """
     conditioned = iface.with_residual(features, delta_h)
     loss, stats = train_step.diffusion_loss(
@@ -70,6 +92,8 @@ def sidechain_coupling_loss(
         multiplier=multiplier,
         self_cond_p=self_cond_p,
         generator=generator,
+        scn_mlm_mask=None,
+        reduction=reduction,
     )
     stats = dict(stats)
     stats["delta_h_norm"] = (

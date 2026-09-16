@@ -9,10 +9,24 @@ couple:
   grad_accum_steps: 1
   pack_steps: 10          # side-chain rollout inside the cycle; 50 at eval time
   sigma_data_backbone: 16.0
+  # per_residue: every residue contributes once, so Trp does not outweigh Ala.
+  # per_atom reproduces a global atom-weighted average instead.
+  sidechain_reduction: per_residue
   log_every: 25
   checkpoint_every: 1000
   ema_relative_length: 0.25
   seed: 0
+# The sigma_B distribution. Both adapters are conditioned on log sigma_B, so
+# training at one value makes that conditioning constant and only licenses
+# deployment at that value. This is the late end of PXDesign's own 400-step
+# schedule -- steps 281-395, where the fold is decided but the geometry is not
+# yet final -- and "trajectory" draws from exactly the discrete sigmas the
+# sampler visits there.
+sigma:
+  mode: trajectory       # trajectory | loguniform | fixed
+  sigma_min: 0.01        # Angstroms
+  sigma_max: 5.0
+  n_step: 400            # PXDesign's sample_diffusion.N_step
 adapters:
   d_hidden: 256
   d_noise: 64

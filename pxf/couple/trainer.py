@@ -82,6 +82,13 @@ class CoupleSettings:
     grad_accum_steps: int = 1
     pack_steps: int | None = None  # side-chain rollout length in the cycle
     sigma_data_backbone: float = 16.0
+    # Reduction for L_SC; see pxf.train.losses.SIDECHAIN_REDUCTIONS.
+    sidechain_reduction: str = "per_residue"
+    # The sigma_B distribution the batches were drawn from, as
+    # CouplingNoiseSchedule.identity(). Recorded, not used: the schedule lives in
+    # the batch generator, but a checkpoint that does not say which noise range
+    # its adapter was trained on cannot be deployed correctly.
+    sigma_schedule: dict | None = None
     log_every: int = 25
     checkpoint_every: int = 1_000
     ema_decay: float | None = None
@@ -178,6 +185,7 @@ class CoupledTrainer:
                 features,
                 delta_h=cycle.delta_h,
                 generator=self.generator,
+                reduction=self.settings.sidechain_reduction,
             ), cycle
         return couple_losses.backbone_feedback_loss(
             cycle,
@@ -248,7 +256,12 @@ class CoupledTrainer:
             kind = couple_losses.loss_kind_for(self.settings.phase, self.step)
             loss, cycle = self.loss_for(batch, kind)
             (loss.total / accum).backward()
-            running[kind].append(loss.scalars())
+            scalars = loss.scalars()
+            # sigma_B now varies per batch, so the log has to say which noise
+            # levels a window actually covered; a mean alone would hide a
+            # collapsed range.
+            scalars["sigma_b"] = float(torch.as_tensor(batch.sigma).float().mean())
+            running[kind].append(scalars)
             pending += 1
             if pending < accum:
                 continue
@@ -281,8 +294,11 @@ class CoupledTrainer:
                 # them together -- report each over the steps that used it.
                 for name, rows in running.items():
                     if rows:
+                        sigmas = [r["sigma_b"] for r in rows]
                         record[f"{name}_loss"] = sum(r["loss"] for r in rows) / len(rows)
                         record[f"{name}_steps"] = len(rows)
+                        record[f"{name}_sigma_b_mean"] = sum(sigmas) / len(sigmas)
+                        record[f"{name}_sigma_b_range"] = [min(sigmas), max(sigmas)]
                 self._log(record)
                 if progress:
                     parts = [f"step {self.step:>7d}", f"phase {self.settings.phase}"]

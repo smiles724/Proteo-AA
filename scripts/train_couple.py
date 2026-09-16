@@ -28,6 +28,14 @@ The backbone driver is selected explicitly:
     monomer). Takes ``.cif`` inputs and requires ``--crop-size`` to be at least
     the structure length, so residue correspondence with the atom37 side-chain
     targets is exact and checkable.
+
+**Backbone noise.** ``sigma_B`` is *sampled* per batch from the interval the
+coupling is intended to run in, not held at one value -- both adapters are
+conditioned on ``log sigma_B``, so a single training value leaves that
+conditioning constant and only licenses deployment at that same value. The
+default window is the late end of PXDesign's own 400-step trajectory; see
+:mod:`pxf.couple.schedule`. ``--sigma-mode fixed --sigma X`` restores the old
+single-value behaviour for a deployment-matched ablation.
 """
 
 from __future__ import annotations
@@ -35,10 +43,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
 import torch
+
+from pxf.couple import schedule
 
 logger = logging.getLogger("pxf.train_couple")
 
@@ -64,7 +75,41 @@ def parse_args(argv=None):
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--crop-size", type=int, default=128)
     p.add_argument(
-        "--sigma", type=float, default=1.0, help="backbone noise level fed to the cycle"
+        "--sigma-mode",
+        default=None,
+        choices=schedule.MODES,
+        help=(
+            "how sigma_B is drawn: trajectory (uniform over the backbone "
+            "sampler's own steps inside the window, the default), loguniform, "
+            "or fixed (one value; noise conditioning is then constant)"
+        ),
+    )
+    p.add_argument(
+        "--sigma-min",
+        type=float,
+        default=None,
+        help=f"low edge of the coupling window, Angstroms (default {schedule.DEFAULT_SIGMA_MIN})",
+    )
+    p.add_argument(
+        "--sigma-max",
+        type=float,
+        default=None,
+        help=f"high edge of the coupling window, Angstroms (default {schedule.DEFAULT_SIGMA_MAX})",
+    )
+    p.add_argument(
+        "--sigma",
+        type=float,
+        default=None,
+        help="the single noise level used by --sigma-mode fixed",
+    )
+    p.add_argument(
+        "--sigma-n-step",
+        type=int,
+        default=None,
+        help=(
+            "steps in the backbone sampler's schedule, which defines the discrete "
+            f"sigma values trajectory mode draws from (default {schedule.PXDESIGN_N_STEP})"
+        ),
     )
     p.add_argument(
         "--pxdesign-donor",
@@ -206,6 +251,15 @@ def main(argv=None):
             couple_cfg[key] = value
     if args.lr is not None:
         optim_cfg["lr"] = args.lr
+    # The sigma_B distribution: config block, overridden by any flag that is set.
+    sigma_schedule = schedule.from_config(
+        config.get("sigma"),
+        mode=args.sigma_mode,
+        sigma_min=args.sigma_min,
+        sigma_max=args.sigma_max,
+        sigma=args.sigma,
+        n_step=args.sigma_n_step,
+    )
 
     suffix = ".cif" if args.backbone == "pxdesign" else ".pdb"
     structures = resolve_structures(args.structures, suffix=suffix)
@@ -260,6 +314,12 @@ def main(argv=None):
         )
 
     couple_cfg.setdefault("sigma_data_backbone", sigma_data)
+    # The schedule's sigma_data must be the donor's, or the discrete sigma values
+    # trajectory mode draws from are not the ones the sampler visits.
+    if args.backbone == "pxdesign" and sigma_schedule.sigma_data != sigma_data:
+        sigma_schedule = replace(sigma_schedule, sigma_data=sigma_data)
+    couple_cfg["sigma_schedule"] = sigma_schedule.identity()
+    logger.info("%s", sigma_schedule.describe())
     adapters = CouplingAdapters(c_token, c_h_V, **adapter_cfg).to(device)
     if px_driver is None:
         backbone = make_stub_backbone(args.crop_size, c_token)
@@ -306,6 +366,7 @@ def main(argv=None):
                 optim=optim_cfg,
                 adapters=adapter_cfg,
                 n_structures=len(structures),
+                sigma_schedule=sigma_schedule.identity(),
                 backbone=args.backbone,
                 device=str(device),
                 frozen=frozen,
@@ -333,6 +394,8 @@ def main(argv=None):
                 structure = to_featurized(sample_id, source[0])
                 native = _native_atom37(structures, sample_id, structure)
                 target = structure.backbone_target.float().to(device)
+                # A fresh sigma_B per example, from the coupling window.
+                sigma = sigma_schedule.sample(1, generator=noise_gen).to(device)
                 noise = torch.randn(target.shape, generator=noise_gen).to(device)
                 # One denoiser evaluation per target needs its own conditioning.
                 controller.backbone = px_driver.bind(
@@ -340,8 +403,8 @@ def main(argv=None):
                 )
                 yield CoupledBatch(
                     topology=structure.topology,
-                    x_noisy=(target + noise * args.sigma)[None],
-                    sigma=torch.tensor([args.sigma], device=device),
+                    x_noisy=(target + noise * sigma)[None],
+                    sigma=sigma,
                     aatype=structure.aatype.to(device),
                     sidechain_batch=native,
                     backbone_target=target[None],
@@ -370,11 +433,12 @@ def main(argv=None):
                         for _ in slots
                     ],
                 )
+                sigma = sigma_schedule.sample(1, generator=noise_gen).to(device)
                 noise = torch.randn(flat.shape, generator=noise_gen).to(device)
                 yield CoupledBatch(
                     topology=topology,
-                    x_noisy=flat + noise * args.sigma,
-                    sigma=torch.tensor([args.sigma], device=device),
+                    x_noisy=flat + noise * sigma,
+                    sigma=sigma,
                     aatype=aatype.to(device),
                     sidechain_batch={
                         k: v.to(device) for k, v in item.items() if torch.is_tensor(v)

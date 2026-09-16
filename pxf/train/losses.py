@@ -48,6 +48,19 @@ def psce_bin_spec(module=None):
     return float(cfg.min_bin), float(cfg.max_bin), int(cfg.n_bins)
 
 
+# The reduction used to turn per-atom squared error into one scalar. The authors
+# did not release the training loop, so which one FaMPNN used cannot be
+# established from the released code; both are implemented and the active choice
+# is returned in the stats rather than left implicit.
+#
+#   per_residue  L_i = sum_a m_ia d_ia^2 / sum_a m_ia,  then L = mean_i w_i L_i
+#                every residue counts once, so Trp does not outweigh Ala.
+#   per_atom     L = sum_ia m_ia w_i d_ia^2 / sum_ia m_ia
+#                atom-weighted, so large side chains dominate the gradient.
+SIDECHAIN_REDUCTIONS = ("per_residue", "per_atom")
+DEFAULT_SIDECHAIN_REDUCTION = "per_residue"
+
+
 def _masked_mean(values, mask):
     """Mean of ``values`` over ``mask``, or an exact zero when nothing is scored.
 
@@ -58,6 +71,31 @@ def _masked_mean(values, mask):
     total = (values * mask).sum()
     count = mask.sum()
     return total / count.clamp_min(1.0), count
+
+
+def _broadcast_weight(loss_weight, ndim):
+    """Right-pad a per-example weight with singleton axes up to ``ndim``."""
+    pad = ndim - loss_weight.dim()
+    if pad < 0:
+        raise ValueError(
+            f"loss weight has {loss_weight.dim()} dims, more than the {ndim} it must "
+            "broadcast against"
+        )
+    return loss_weight.reshape(*loss_weight.shape, *([1] * pad))
+
+
+def _per_residue_mean(squared, atom_mask):
+    """Average each residue's squared error over *its own* supervised atoms.
+
+    Returns ``(per_residue, residue_mask)``, both ``[..., L]``. A residue with no
+    supervised atom -- glycine, an unresolved side chain, a target masked out by
+    the interpolant -- gets an exact zero and is excluded by ``residue_mask``, so
+    it neither contributes error nor dilutes the mean.
+    """
+    mask = atom_mask.to(squared.dtype)
+    atoms_per_residue = mask.sum(-1)
+    per_residue = (squared * mask).sum(-1) / atoms_per_residue.clamp_min(1.0)
+    return per_residue, (atoms_per_residue > 0).to(squared.dtype)
 
 
 def sequence_mlm_loss(seq_logits, aatype, seq_mlm_mask, seq_mask):
@@ -77,24 +115,59 @@ def sequence_mlm_loss(seq_logits, aatype, seq_mlm_mask, seq_mask):
     return loss, dict(masked_residues=count.detach())
 
 
-def sidechain_diffusion_loss(x1_pred, x1_target, loss_weight, atom_mask):
+def sidechain_diffusion_loss(
+    x1_pred, x1_target, loss_weight, atom_mask, *, reduction=DEFAULT_SIDECHAIN_REDUCTION
+):
     """``L_diff``: EDM-weighted L2 between predicted and clean side-chain atoms.
 
-    Operates on local-frame side-chain coordinates ``[..., A, 3]``.
+    Operates on local-frame side-chain coordinates ``[..., L, A, 3]``.
     ``loss_weight`` is EDM's ``1/c_out(sigma)^2`` per example, broadcast over
-    atoms; ``atom_mask`` selects the atoms that actually exist and are supervised.
+    residues and atoms; ``atom_mask`` selects the atoms that exist and are
+    supervised.
 
-    The weighted squared error is summed over xyz and averaged over supervised
-    atoms, which is the standard EDM denoising objective.
+    ``reduction`` picks how per-atom error becomes one scalar, and it changes what
+    the objective actually optimizes:
+
+    ``"per_residue"`` (default)
+        Average within each residue first, then over residues. Every residue
+        carries weight 1, so Trp (14 supervised slots) does not count seven times
+        Ser (2). Prefer this when the quantity of interest is per-residue packing
+        quality, which is what the downstream side-chain metrics all report.
+
+    ``"per_atom"``
+        One global average over supervised atoms, so large side chains dominate
+        the gradient in proportion to their atom count.
+
+    FaMPNN released inference only, so the original reduction is not recoverable
+    from the code; both are kept and the active one is reported in the stats.
     """
-    squared = (x1_pred.float() - x1_target.float()).pow(2).sum(-1)  # [..., A]
-    weight = loss_weight.reshape(
-        *loss_weight.shape, *([1] * (squared.dim() - loss_weight.dim()))
-    )
-    loss, count = _masked_mean(squared * weight, atom_mask)
+    if reduction not in SIDECHAIN_REDUCTIONS:
+        raise ValueError(
+            f"Unknown reduction {reduction!r}; choose from {list(SIDECHAIN_REDUCTIONS)}"
+        )
+    squared = (x1_pred.float() - x1_target.float()).pow(2).sum(-1)  # [..., L, A]
+    atom_mask = atom_mask.to(squared.dtype)
+
+    if reduction == "per_residue":
+        per_residue, residue_mask = _per_residue_mean(squared, atom_mask)
+        weight = _broadcast_weight(loss_weight, per_residue.dim())
+        loss, residues = _masked_mean(per_residue * weight, residue_mask)
+        atoms = atom_mask.sum()
+    else:
+        weight = _broadcast_weight(loss_weight, squared.dim())
+        loss, atoms = _masked_mean(squared * weight, atom_mask)
+        residues = (atom_mask.sum(-1) > 0).to(squared.dtype).sum()
+
     with torch.no_grad():
+        # Always per-atom and unweighted, so this diagnostic stays comparable
+        # across reductions and across noise levels.
         unweighted, _ = _masked_mean(squared, atom_mask)
-    return loss, dict(scored_atoms=count.detach(), sidechain_mse_local=unweighted.detach())
+    return loss, dict(
+        scored_atoms=atoms.detach(),
+        scored_residues=residues.detach(),
+        sidechain_mse_local=unweighted.detach(),
+        reduction=reduction,
+    )
 
 
 def psce_bin_targets(

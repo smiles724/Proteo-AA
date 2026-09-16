@@ -43,6 +43,17 @@ has a test:
 - **Confidence stop gradient.** Appendix D.4: the confidence loss must not reach
   the main model. Verified by asserting encoder gradients are bit-identical with
   and without the term.
+- **The side-chain target set.** `L_diff` is scored only where the interpolant
+  *hid* the side chain: `m_target = (1 - scn_mlm_mask) · seq_mask`. The encoder
+  receives visible side chains as input — `encoder_inputs` gates atom37's
+  non-backbone slots by `scn_mlm_mask` — so supervising those residues asks the
+  denoiser to reproduce coordinates it was just shown. The paper's objective is
+  `p(Y_M | Y_M̄)`, and the deployment regime agrees: `sidechain_pack` hides every
+  side chain, so the hidden set is the only one the module is ever used on.
+  `test_the_encoder_input_and_the_loss_target_never_overlap` pins it.
+  `supervise_visible_sidechains=True` restores the unrestricted set as an
+  ablation, and `scn_mlm_mask=None` (packing, coupling) supervises everything
+  because nothing was visible.
 
 ## Two upstream gaps this had to work around
 
@@ -78,6 +89,26 @@ too. That is consistent with the 0.3 Å model packing worse than the 0.0 Å one
 (CASP14 RMSD 0.821 vs 0.745, Table 6). `noise_targets: false` keeps targets clean
 if you prefer the other reading.
 
+**The reduction in `L_diff`.** With no training loop released, whether the
+per-atom squared error was averaged per atom or per residue cannot be recovered
+from the code, and the two are different objectives:
+
+| `sidechain_reduction` | Formula | What it weights |
+|---|---|---|
+| `per_residue` (default) | `L_i = Σ_a m_ia d²_ia / Σ_a m_ia`, then `L = (1/N) Σ_i w(t) L_i` | every residue once |
+| `per_atom` | `L = Σ_ia m_ia w(t) d²_ia / Σ_ia m_ia` | Trp > Phe > Leu > Ala, by atom count |
+
+`per_residue` is the default because the quantity of interest is per-residue
+packing quality, which is what every downstream side-chain metric reports; under
+`per_atom` a Trp (14 supervised slots) contributes seven times a Ser (2) and the
+gradient is dominated by large side chains. Residues with nothing to score —
+glycine, an unresolved side chain, a target the interpolant masked out — are
+excluded rather than averaged in as zeros, so the loss does not shrink in
+proportion to how many glycines a crop happens to contain. The active choice is
+returned in the stats and recorded in every checkpoint under
+`settings.sidechain_reduction`; `sidechain_mse_local` stays per-atom and
+unweighted so curves remain comparable across both.
+
 ## Presets
 
 From Appendix B.2, in `configs/`:
@@ -112,6 +143,48 @@ python scripts/train.py --pdb-dir <dir> --out runs/ft --resume runs/ft/checkpoin
 Checkpoints carry `state_dict` + `model_cfg` *and* optimizer/EMA/step, so one file
 both resumes this loop and loads directly into upstream inference or
 `scripts/pack.py`.
+
+## Coupling: which σ_B the adapters train at
+
+Phase 1–3 train residual adapters conditioned on the backbone noise level,
+`A(z, σ_B) = W_out SiLU(W_in [LN(z), e(log σ_B)])`, so the σ_B *distribution* is
+part of the objective. `pxf/couple/schedule.py` samples it from the interval the
+coupling is intended to run in rather than fixing one value — with a single
+training σ_B the noise embedding sees a constant, and the adapter is only
+licensed at that σ_B while nothing in the code looks wrong.
+
+The default window is the late end of PXDesign's own 400-step schedule, defined
+by the same formula the sampler uses (`InferenceNoiseScheduler`, `s_max` 160,
+`s_min` 4e-4, ρ 7, σ_data 16):
+
+```
+ step      0        200       280     320      360     400
+ sigma  2560       56.0      5.06    1.02     0.126   0.0064
+        |-----------|----------|-------|--------|-------|
+         coupling off          [ ---- training window ---- ]
+                                σ ∈ [0.01, 5.0] = steps 281–395
+```
+
+| `sigma.mode` | Draws |
+|---|---|
+| `trajectory` (default) | a step index uniform over the window, returning that step's exact σ — 115 distinct values, and every one is a σ the sampler really visits |
+| `loguniform` | continuous and uniform in `log σ` over the same interval |
+| `fixed` | one value; the degenerate case, kept for deployment-matched ablations |
+
+A window too narrow to hold two trajectory steps is an **error**, not a
+degenerate run — that failure is the whole reason the module exists. Likewise
+`--sigma` outside `fixed` mode is refused rather than silently ignored. Every
+run records the distribution in `run_config.json` and in each checkpoint under
+`settings.sigma_schedule`, and the training log reports `*_sigma_b_mean` and
+`*_sigma_b_range` per window so a collapsed range is visible rather than
+inferred.
+
+`L_SC` is the **diffusion term alone** — not `L_MLM + L_diff + L_conf`. Phase 1
+asks whether PXDesign's `a_token` improves side-chain packing, and the sequence
+is held fixed, so an MLM term would score a prediction of something already
+given and a change in the loss could no longer be read as a change in packing.
+`test_l_sc_equals_the_diffusion_term_alone` and
+`test_l_sc_carries_no_mlm_or_confidence_term` pin it.
 
 ## Verified
 

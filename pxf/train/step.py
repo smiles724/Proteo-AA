@@ -17,7 +17,19 @@ Everything else follows the preprint:
   released config) and a different noise level drawn for each, because the MLP is
   lightweight relative to the encoder (Section 4.3.1);
 * the confidence head trains on a stop-gradient diffusion rollout, on roughly one
-  step in ``subsample_train_iter_mult`` (8) (Appendix D.4).
+  step in ``subsample_train_iter_mult`` (8) (Appendix D.4);
+* the side-chain objective is scored only where the interpolant *hid* the side
+  chain. The encoder receives visible side chains as input (``encoder_inputs``
+  gates atom37's non-backbone slots by ``scn_mlm_mask``), so supervising those
+  residues would ask the denoiser to reproduce coordinates it was just shown --
+  a shortcut, not masked modeling. The paper's objective is ``p(Y_M | Y_M-bar)``,
+  so the target mask is ``(1 - scn_mlm_mask) * seq_mask``.
+
+  Note the regime this matches: at inference ``sidechain_pack`` hides *every*
+  side chain, so restricting training to hidden residues is also the only setting
+  the module is ever deployed in. ``scn_mlm_mask=None`` means "nothing was
+  visible" and supervises everything, which is the correct mask for the packing
+  and coupling paths.
 """
 
 from dataclasses import dataclass, field
@@ -59,7 +71,14 @@ class StepOutput:
         }
         if self.confidence is not None:
             out["loss_confidence"] = float(self.confidence)
-        out.update({k: float(v) for k, v in self.stats.items()})
+        # Stats carry a few strings (the active reduction), so coerce only what
+        # is actually numeric instead of float()-ing everything.
+        out.update(
+            {
+                k: (float(v) if torch.is_tensor(v) or isinstance(v, (int, float)) else v)
+                for k, v in self.stats.items()
+            }
+        )
         return out
 
 
@@ -89,11 +108,17 @@ def encoder_inputs(model, batch, mar_out):
     return atom_mask
 
 
-def sidechain_targets(model, batch):
+def sidechain_targets(model, batch, *, scn_mlm_mask=None):
     """Ground-truth side chains in the local backbone frame, plus their mask.
 
     Uses upstream's own frame construction (AF2 Algorithm 21 via OpenFold), so
     training targets live in exactly the space inference denoises in.
+
+    ``scn_mlm_mask`` is the interpolant's ``[b, n]`` visibility mask -- 1 where the
+    residue's side chain was given to the encoder, 0 where it was hidden. When
+    supplied, the target mask is restricted to the hidden residues, which is what
+    makes this a masked-modeling objective rather than a partial copy. ``None``
+    means nothing was visible (packing and coupling), so everything is supervised.
     """
     rc = _constants()
     from fampnn.data.data import get_rc_tensor, transform_sidechain_frame
@@ -110,11 +135,19 @@ def sidechain_targets(model, batch):
     atom_mask_bb = (1 - batch["missing_atom_mask"][..., rc.bb_idxs]) * batch[
         "seq_mask"
     ].unsqueeze(-1)
+    # The frame transform is run on the *unrestricted* mask: it needs the real
+    # atom set to build frames, and restricting the target set is a separate
+    # decision applied afterwards.
     x_scn_local, bb_frames_exist = transform_sidechain_frame(
         x_scn, x_bb, atom_mask_scn, atom_mask_bb, to_local=True
     )
     # No frame means no defined local target for that residue.
     atom_mask_scn = atom_mask_scn * bb_frames_exist.unsqueeze(-1)
+    if scn_mlm_mask is not None:
+        # Score only what was hidden: predict the masked side chains from the
+        # visible context, never from themselves.
+        hidden = 1.0 - scn_mlm_mask.to(atom_mask_scn.dtype)
+        atom_mask_scn = atom_mask_scn * hidden.unsqueeze(-1)
     return x_scn_local, atom_mask_scn
 
 
@@ -124,9 +157,23 @@ def _repeat(tensor, times):
 
 
 def diffusion_loss(
-    model, batch, mpnn_feature_dict, *, multiplier=None, self_cond_p=None, generator=None
+    model,
+    batch,
+    mpnn_feature_dict,
+    *,
+    multiplier=None,
+    self_cond_p=None,
+    generator=None,
+    scn_mlm_mask=None,
+    reduction=loss_fns.DEFAULT_SIDECHAIN_REDUCTION,
 ):
-    """One denoising step per (example, noise level), teacher-forced on GT sequence."""
+    """One denoising step per (example, noise level), teacher-forced on GT sequence.
+
+    ``scn_mlm_mask`` restricts the target set to the residues whose side chain the
+    interpolant hid (see the module docstring); ``None`` supervises every
+    supervisable atom, which is the right mask when no side chain was visible.
+    ``reduction`` is forwarded to :func:`pxf.train.losses.sidechain_diffusion_loss`.
+    """
     module = model.denoiser.scn_diffusion_module
     interpolant = module.scn_interpolant
     denoiser = module.scn_denoiser
@@ -141,7 +188,7 @@ def diffusion_loss(
         else self_cond_p
     )
 
-    x1_local, atom_mask = sidechain_targets(model, batch)
+    x1_local, atom_mask = sidechain_targets(model, batch, scn_mlm_mask=scn_mlm_mask)
     h_V = mpnn_feature_dict["h_V"]
     seq_mask = batch["seq_mask"]
     aatype = batch["aatype"].long()
@@ -170,9 +217,15 @@ def diffusion_loss(
         xt, aatype_rep, t, h_V_rep, seq_mask_rep, x_scn_self_cond=self_cond
     )
     weight = interpolant.get_loss_weight(t)
-    loss, stats = loss_fns.sidechain_diffusion_loss(x1_pred, x1_rep, weight, mask_rep)
+    loss, stats = loss_fns.sidechain_diffusion_loss(
+        x1_pred, x1_rep, weight, mask_rep, reduction=reduction
+    )
     stats["noise_clones"] = torch.tensor(float(multiplier))
     stats["self_conditioned"] = torch.tensor(float(self_cond is not None))
+    if scn_mlm_mask is not None:
+        with torch.no_grad():
+            visible = (scn_mlm_mask * seq_mask).sum()
+            stats["hidden_sidechain_fraction"] = 1.0 - visible / seq_mask.sum().clamp_min(1)
     return loss, stats
 
 
@@ -210,9 +263,22 @@ def _rollout_packed_sidechains(model, batch, mpnn_feature_dict, aatype):
     return aux
 
 
-def confidence_loss(model, batch, mpnn_feature_dict, aatype):
-    """Train the confidence head on a stop-gradient rollout (Appendix D.4)."""
+def confidence_loss(model, batch, mpnn_feature_dict, aatype, *, scn_mlm_mask=None):
+    """Train the confidence head on a stop-gradient rollout (Appendix D.4).
+
+    ``scn_mlm_mask`` restricts what is *scored*, not what the head is *shown*, and
+    the distinction is load-bearing. The head is a network over the whole packed
+    structure, so its input has to look the way it does at deployment: the
+    rollout packs every residue and ``sidechain_pack`` hides every side chain, so
+    the input is fully populated. Zeroing the visible residues' coordinates
+    before the head sees them would shift its input distribution away from the
+    only regime it is ever used in. The *scored* set is restricted for the same
+    reason the diffusion target is -- a psCE head trained to call visible side
+    chains "zero error" would be calibrated for a case that never arises.
+    """
     module = model.denoiser.scn_diffusion_module
+    # One frame transform, on the unrestricted mask; the restriction is a
+    # reduction over the result, applied below.
     x1_local, atom_mask = sidechain_targets(model, batch)
     detached = {
         k: (v.detach() if torch.is_tensor(v) else v) for k, v in mpnn_feature_dict.items()
@@ -245,9 +311,12 @@ def confidence_loss(model, batch, mpnn_feature_dict, aatype):
         batch["residue_index"],
         batch["chain_index"],
     )
+    scored = atom_mask
+    if scn_mlm_mask is not None:
+        scored = scored * (1.0 - scn_mlm_mask.to(scored.dtype)).unsqueeze(-1)
     spec = loss_fns.psce_bin_spec(module.confidence_module)
     return loss_fns.confidence_loss(
-        psce_logits, packed_local, x1_local, atom_mask, bin_spec=spec
+        psce_logits, packed_local, x1_local, scored, bin_spec=spec
     )
 
 
@@ -259,8 +328,15 @@ def training_forward(
     generator=None,
     multiplier=None,
     self_cond_p=None,
+    reduction=loss_fns.DEFAULT_SIDECHAIN_REDUCTION,
+    supervise_visible_sidechains=False,
 ):
-    """Compute ``L_total = L_MLM + L_diff`` (+ confidence) for one batch."""
+    """Compute ``L_total = L_MLM + L_diff`` (+ confidence) for one batch.
+
+    ``supervise_visible_sidechains=True`` restores the unrestricted target set --
+    every existing atom scored, including residues whose side chain the encoder
+    was shown. Kept only as an ablation switch; it is not masked modeling.
+    """
     missing = [key for key in REQUIRED_KEYS if key not in batch]
     if missing:
         raise ValueError(f"training batch is missing {missing}")
@@ -293,7 +369,9 @@ def training_forward(
         seq_logits, batch["aatype"], mar_out["seq_mlm_mask"], batch["seq_mask"]
     )
 
-    # 4. L_diff, teacher-forced on the ground-truth sequence.
+    # 4. L_diff on the residues whose side chain was hidden, teacher-forced on
+    #    the ground-truth sequence.
+    scn_target_mask = None if supervise_visible_sidechains else mar_out["scn_mlm_mask"]
     loss_diff, diff_stats = diffusion_loss(
         model,
         batch,
@@ -301,6 +379,8 @@ def training_forward(
         multiplier=multiplier,
         self_cond_p=self_cond_p,
         generator=generator,
+        scn_mlm_mask=scn_target_mask,
+        reduction=reduction,
     )
     stats.update(diff_stats)
 
@@ -316,7 +396,11 @@ def training_forward(
         if not module.use_confidence_module:
             raise ValueError("Confidence training requested but the module is disabled")
         loss_conf, conf_stats = confidence_loss(
-            model, batch, mpnn_feature_dict, batch["aatype"].long()
+            model,
+            batch,
+            mpnn_feature_dict,
+            batch["aatype"].long(),
+            scn_mlm_mask=scn_target_mask,
         )
         stats.update(conf_stats)
 

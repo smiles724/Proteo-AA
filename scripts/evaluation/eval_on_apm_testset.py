@@ -28,6 +28,7 @@ import json
 import pickle
 from pathlib import Path
 
+import numpy as np
 import torch
 
 # openfold atom37 ordering (openfold/np/residue_constants.py: atom_types)
@@ -55,6 +56,10 @@ def parse_args() -> argparse.Namespace:
                    default="/hai/scratch/shenjm/proteo_aa_runs/packer_apm_data",
                    help="root of the runs trained on APM data (method apmdata_<arm>)")
     p.add_argument("--apm-data-ckpt", default="final.pt")
+    p.add_argument("--a-token-cache",
+                   default="/hai/scratch/shenjm/proteo_aa_runs/a_token_cache/val",
+                   help="directory of cached a_token .npy for the 449 val chains; "
+                        "required by any arm whose seq_cond reads a_token")
     p.add_argument("--plm-checkpoint",
                    default="/hai/scratch/shenjm/plm_weights/esm2_t33_650M_UR50D.pt")
     return p.parse_args()
@@ -207,15 +212,30 @@ def load_apm_data_arm(path, arm, plm_ckpt, device):
     return packer
 
 
-def predict_apm(packer, ch, device, diffuse_mask=None):
-    """Run a packer on one chain and return the side chain in the residue frame."""
+def predict_apm(packer, ch, device, diffuse_mask=None, a_token=None):
+    """Run a packer on one chain and return the side chain in the residue frame.
+
+    `a_token` is REQUIRED for an arm whose seq_cond reads it. This function used
+    to pass zeros unconditionally, which scored every a_token and both arm with
+    its conditioning channel blanked -- the arm deprived of the input it was
+    trained on. It showed up as the two estimators agreeing to 0.006 on none and
+    plm while disagreeing by 0.095 on a_token, and it invalidated every a_token
+    number this script has produced. `main` now refuses those arms without a
+    cache rather than quietly feeding zeros again.
+    """
     from pxdesign_train.sidechain.frames import to_local
     L = ch["types"].shape[0]
     logits = torch.nn.functional.one_hot(ch["tix"], 20).float() * 40.0 - 20.0
     ids = torch.zeros(1, L, ch["chem"].shape[-1], dtype=torch.long, device=device)
+    if a_token is None:
+        h_res = torch.zeros(1, L, 768, device=device)
+    else:
+        if a_token.shape[0] != L:
+            raise ValueError(f"a_token has {a_token.shape[0]} rows for a chain of {L}")
+        h_res = a_token.to(device).float()[None]
     with torch.no_grad():
         xyz, _, _ = packer(
-            torch.zeros(1, L, 768, device=device), logits[None], ids,
+            h_res, logits[None], ids,
             ch["chem"][None], torch.zeros(1, L, ch["chem"].shape[-1], 3, device=device),
             torch.zeros(1, device=device),
             frame_R=ch["R"][None], frame_t=ch["t"][None],
@@ -279,6 +299,31 @@ def main() -> None:
                                    args.plm_checkpoint, device)
             print(f"loaded our arm {arm} ({args.our_weights} weights)")
 
+    # a_token has to be supplied per chain for the arms that read it. Loading it
+    # up front means a missing tensor fails before 449 chains are scored, not
+    # after -- and an arm that reads a_token is never scored without one, which
+    # is what produced every invalid a_token number this script used to report.
+    a_tokens = {}
+    needs = [m for m in methods
+             if m.split("_", 1)[-1] in ("a_token", "both") or m.endswith("_both")]
+    if needs:
+        cache = Path(args.a_token_cache)
+        if not cache.is_dir():
+            raise SystemExit(
+                f"methods {needs} read a_token but {cache} does not exist. Build it "
+                "with scripts/data/build_a_token_cache.py; scoring them without it "
+                "measures the arm with its conditioning channel blanked."
+            )
+        by_name = {}
+        for pdb, _path in files:
+            f = cache / f"{pdb}.npy"
+            if not f.is_file():
+                raise SystemExit(f"no cached a_token for {pdb} at {f}")
+            by_name[pdb] = torch.from_numpy(np.load(f)).float()
+        for m in needs:
+            a_tokens[m] = by_name
+        print(f"a_token supplied to {needs} from {cache} ({len(by_name)} chains)")
+
     totals = {m: {} for m in methods}
     n_used = skipped = 0
     for i, (pdb, path) in enumerate(files):
@@ -309,7 +354,8 @@ def main() -> None:
             # which is the packer's own default.
             preds[m] = predict_apm(
                 mod, ch, device,
-                diffuse_mask=ch["frame_ok"].float() if m.startswith("apmdata_") else None)
+                diffuse_mask=ch["frame_ok"].float() if m.startswith("apmdata_") else None,
+                a_token=a_tokens[m].get(pdb) if m in a_tokens else None)
         if "dunbrack_template" in methods:
             # phi/psi from the GLOBAL backbone: a dihedral spans three residues,
             # so it cannot be taken in any single residue's local frame.

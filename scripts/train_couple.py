@@ -128,6 +128,15 @@ def parse_args(argv=None):
     p.add_argument("--resume", default=None)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--train-fampnn",
+        action="store_true",
+        help="CONTROL ARM: train FaMPNN's own weights instead of the adapters, "
+        "with no adapter applied. Same data, same steps, same objective and "
+        "same optimiser settings as the adapter run, so the two are comparable "
+        "and any difference is attributable to the mechanism rather than to the "
+        "data. The checkpoint is written in --fampnn-checkpoint's own format",
+    )
     p.add_argument("--allow-unpinned-sources", action="store_true")
     return p.parse_args(argv)
 
@@ -283,8 +292,14 @@ def main(argv=None):
     bundle = torch.load(checkpoint, map_location="cpu", weights_only=False)
     fampnn = SeqDenoiser(bundle["model_cfg"])
     fampnn.load_state_dict(bundle["state_dict"], strict=True)
-    fampnn.eval()
-    fampnn.requires_grad_(False)  # donors frozen: the whole point
+    if getattr(args, "train_fampnn", False):
+        # The control arm trains the donor. Keep it in train() so dropout and
+        # any norm statistics behave as they would in a real fine-tune.
+        fampnn.train()
+        fampnn.requires_grad_(True)
+    else:
+        fampnn.eval()
+        fampnn.requires_grad_(False)  # donors frozen: the whole point
     device = select_device(args.device)
     fampnn.to(device)
 
@@ -329,6 +344,15 @@ def main(argv=None):
     couple_cfg["sigma_schedule"] = sigma_schedule.identity()
     logger.info("%s", sigma_schedule.describe())
     adapters = CouplingAdapters(c_token, c_h_V, **adapter_cfg).to(device)
+    if args.train_fampnn:
+        # No adapter may train or be applied: the control has to isolate the
+        # fine-tune. CoupledTrainer._assert_adapters_are_inert re-checks both.
+        adapters.requires_grad_(False)
+        adapters.enable_bb_to_sc = False
+        adapters.enable_sc_to_bb = False
+        logger.info(
+            "CONTROL ARM: training FaMPNN weights, adapters frozen and not applied"
+        )
     if px_driver is None:
         backbone = make_stub_backbone(args.crop_size, c_token)
     else:
@@ -363,6 +387,8 @@ def main(argv=None):
         settings=CoupleSettings(**couple_cfg),
         device=device,
         frozen_identity=frozen,
+        fampnn_finetune=bool(args.train_fampnn),
+        fampnn_model_cfg=bundle["model_cfg"] if args.train_fampnn else None,
     )
     if args.resume:
         logger.info("resumed at step %d", trainer.resume(args.resume))

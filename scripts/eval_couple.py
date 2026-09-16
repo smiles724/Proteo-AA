@@ -70,7 +70,8 @@ from pathlib import Path
 import _bootstrap  # noqa: F401
 import torch
 
-from pxf.couple import schedule
+from pxf.couple import codesign, schedule
+from pxf.couple.controller import CycleOutput
 from pxf.eval import couple as ev
 
 logger = logging.getLogger("pxf.eval_couple")
@@ -161,6 +162,23 @@ def parse_args(argv=None):
         help="denoised: pack the PXDesign proposal, coupled vs uncoupled arms. "
         "native: pack the deposited backbone with pretrained FaMPNN -- the "
         "ceiling, and the only measurement that needs no donor and no sigma",
+    )
+    p.add_argument(
+        "--codesign",
+        action="store_true",
+        help="co-generate sequence and side chains instead of teacher-forcing "
+        "the native sequence: the MPNN module predicts s_hat from a fully "
+        "X-masked sequence and (s_hat, h_V) go into the side-chain diffusion "
+        "MLP, per FaMPNN's published inference. Side-chain geometry is then "
+        "scored only where s_hat matches the deposited identity -- elsewhere "
+        "the atom sets differ -- and sequence recovery is reported alongside",
+    )
+    p.add_argument(
+        "--seq-temperature",
+        type=float,
+        default=0.0,
+        help="sampling temperature for the predicted sequence; 0.0 is argmax "
+        "(only read with --codesign)",
     )
     p.add_argument("--fail-on-regression", action="store_true")
     p.add_argument("--allow-unpinned-sources", action="store_true")
@@ -271,6 +289,22 @@ def report(record):
     return len(hurt)
 
 
+
+def _with_sequence_recovery(summary):
+    """Add ``sequence_recovery`` to an aggregate that carries the seq counts.
+
+    ``aggregate`` sums every count key it is given but only derives the ratios
+    ``canonical.summarize_metrics`` knows about, so the co-design ratio is
+    formed here -- once, over summed counts, the same way the other ratios are.
+    """
+    total = summary.get("seq_residues")
+    if not total:
+        return summary
+    summary = dict(summary)
+    summary["sequence_recovery"] = float(summary.get("seq_recovered", 0.0)) / float(total)
+    return summary
+
+
 def compare(run_dir):
     path = Path(run_dir) / METRICS_FILE
     if not path.is_file():
@@ -342,30 +376,72 @@ def run_native(args):
         # Backbone slots only: the side chains are what the packer must produce.
         given = torch.zeros_like(native_mask, dtype=torch.float32)
         given[:, backbone_slots] = native_mask[:, backbone_slots].float()
+        backbone_only = (native37 * given[..., None])[None].to(device)
+        residue_mask, seq_counts = (None, None)
         with torch.no_grad():
-            packed = packer(
-                coords_af2=(native37 * given[..., None])[None].to(device),
-                aatype=aatype[None].to(device),
-                atom_mask=given[None].to(device),
-                residue_index=native["residue_index"].reshape(1, -1).to(device),
-                chain_index=native["chain_index"].reshape(1, -1).to(device),
-                seed=ev.target_seed(args.seed, sample_id, 0),
-            )
+            if args.codesign:
+                # MPNN -> s_hat -> side-chain diffusion on the deposited
+                # backbone. No adapters, so this is the co-design ceiling.
+                torch.manual_seed(ev.target_seed(args.seed, sample_id, 0))
+                s_hat, sidechains, _aux = codesign.codesign_native(
+                    packer.model,
+                    backbone_only,
+                    residue_index=native["residue_index"].reshape(1, -1).to(device),
+                    chain_index=native["chain_index"].reshape(1, -1).to(device),
+                    pack_steps=args.pack_steps,
+                    temperature=args.seq_temperature,
+                )
+                assembled = CycleOutput(
+                    bb0_flat=None,
+                    bb0_dense=backbone_only,
+                    a_token=None,
+                    sidechains=sidechains,
+                )
+                pred37, pred_mask = ev.predicted_atom37(
+                    assembled, s_hat.reshape(-1), rc
+                )
+                pred37, pred_mask = pred37.cpu(), pred_mask.cpu()
+                residue_mask, seq_counts = codesign.sequence_recovery(s_hat, aatype)
+                residue_mask = residue_mask.cpu()
+                # The deposited backbone is passed through unchanged here, so
+                # there is no packer-induced shift to report.
+                backbone_shift = 0.0
+            else:
+                packed = packer(
+                    coords_af2=backbone_only,
+                    aatype=aatype[None].to(device),
+                    atom_mask=given[None].to(device),
+                    residue_index=native["residue_index"].reshape(1, -1).to(device),
+                    chain_index=native["chain_index"].reshape(1, -1).to(device),
+                    seed=ev.target_seed(args.seed, sample_id, 0),
+                )
+                pred37 = packed["coords_af2"][0].cpu()
+                pred_mask = packed["atom_mask_af2"][0].cpu()
+                backbone_shift = float(packed["backbone_shift"])
         target_counts, summary = score(
-            packed["coords_af2"][0].cpu(),
-            packed["atom_mask_af2"][0].cpu(),
+            pred37,
+            pred_mask,
             native37.cpu(),
             native_mask.cpu(),
             aatype.cpu(),
             canonical=canonical,
+            residue_mask=residue_mask,
         )
+        if seq_counts is not None:
+            target_counts = dict(target_counts)
+            target_counts["seq_residues"] = torch.tensor(float(seq_counts["residues"]))
+            target_counts["seq_recovered"] = torch.tensor(
+                float(seq_counts["recovered"])
+            )
+            summary = dict(summary)
+            summary["sequence_recovery"] = seq_counts["sequence_recovery"]
         counts.append(target_counts)
         rows.append(
             dict(
                 target=sample_id,
                 arm="native",
                 length=int(aatype.shape[0]),
-                backbone_shift=float(packed["backbone_shift"]),
+                backbone_shift=backbone_shift,
                 **{
                     k: summary[k]
                     for group in ev.REPORT.values()
@@ -388,13 +464,16 @@ def run_native(args):
     record = dict(
         label="pretrained FaMPNN on the deposited backbone",
         mode="native",
+        codesign=bool(args.codesign),
+        seq_decode=(codesign.DECODE_SINGLE_PASS if args.codesign else None),
+        seq_temperature=(args.seq_temperature if args.codesign else None),
         checkpoint=None,
         structures=str(args.structures),
         n_targets=len(counts),
         n_packings=len(counts),
         pack_steps=args.pack_steps,
         fampnn_weights=args.fampnn_weights,
-        native=aggregate(counts, canonical=canonical),
+        native=_with_sequence_recovery(aggregate(counts, canonical=canonical)),
         skipped=skipped,
         seconds=round(time.time() - started, 1),
     )
@@ -603,14 +682,30 @@ def main(argv=None):
                 # reseeded identically -- otherwise the delta measures the sampler.
                 torch.manual_seed(seed)
                 with torch.no_grad():
-                    cycle = controller.forward(
-                        structure.topology,
-                        x_noisy,
-                        sigma,
-                        aatype,
-                        run_feedback=args.run_feedback and enabled,
-                    )
-                pred37, pred_mask = ev.predicted_atom37(cycle, aatype, rc)
+                    if args.codesign:
+                        # MPNN -> s_hat -> side-chain diffusion, with the
+                        # adapter residual still on h_V between the stages.
+                        cycle, s_hat = codesign.codesign_cycle(
+                            controller,
+                            structure.topology,
+                            x_noisy,
+                            sigma,
+                            aatype,
+                            temperature=args.seq_temperature,
+                        )
+                    else:
+                        s_hat = None
+                        cycle = controller.forward(
+                            structure.topology,
+                            x_noisy,
+                            sigma,
+                            aatype,
+                            run_feedback=args.run_feedback and enabled,
+                        )
+                # The packed atom set belongs to whatever sequence was packed
+                # for, so atom37 assembly must use s_hat in codesign mode.
+                scored_aatype = aatype if s_hat is None else s_hat.reshape(-1)
+                pred37, pred_mask = ev.predicted_atom37(cycle, scored_aatype, rc)
                 pred37, pred_mask = pred37.cpu(), pred_mask.cpu()
                 native_cpu, native_mask_cpu = native37.cpu(), native_mask.cpu()
                 # How far the proposal itself landed, before side chains are
@@ -621,6 +716,15 @@ def main(argv=None):
                 # backbone, which a diffusion proposal in the featurizer's frame
                 # is not.
                 placed = ev.place_on_native_backbone(pred37, native_cpu, canonical)
+                # With a predicted sequence, geometry is only comparable where
+                # the identity matches -- elsewhere the residue has a different
+                # atom set and rotamer recovery has no referent.
+                residue_mask, seq_counts = (None, None)
+                if s_hat is not None:
+                    residue_mask, seq_counts = codesign.sequence_recovery(
+                        s_hat, aatype
+                    )
+                    residue_mask = residue_mask.cpu()
                 target_counts, summary = score(
                     placed,
                     pred_mask,
@@ -628,7 +732,18 @@ def main(argv=None):
                     native_mask_cpu,
                     aatype.cpu(),
                     canonical=canonical,
+                    residue_mask=residue_mask,
                 )
+                if seq_counts is not None:
+                    target_counts = dict(target_counts)
+                    target_counts["seq_residues"] = torch.tensor(
+                        float(seq_counts["residues"])
+                    )
+                    target_counts["seq_recovered"] = torch.tensor(
+                        float(seq_counts["recovered"])
+                    )
+                    summary = dict(summary)
+                    summary["sequence_recovery"] = seq_counts["sequence_recovery"]
                 counts[(arm, si)].append(target_counts)
                 pooled_counts[arm].append(target_counts)
                 rows.append(
@@ -673,13 +788,24 @@ def main(argv=None):
         sigma_schedule=sigma_schedule.identity(),
         pack_steps=args.pack_steps,
         run_feedback=bool(args.run_feedback),
+        codesign=bool(args.codesign),
+        seq_decode=(codesign.DECODE_SINGLE_PASS if args.codesign else None),
+        seq_temperature=(args.seq_temperature if args.codesign else None),
         ema=bool(args.ema and args.checkpoint),
-        pooled={arm: aggregate(pooled_counts[arm], canonical=canonical) for arm in ev.ARMS},
+        pooled={
+            arm: _with_sequence_recovery(
+                aggregate(pooled_counts[arm], canonical=canonical)
+            )
+            for arm in ev.ARMS
+        },
         per_sigma=[
             dict(
                 sigma=float(sigmas[i]),
                 arms={
-                    arm: aggregate(counts[(arm, i)], canonical=canonical) for arm in ev.ARMS
+                    arm: _with_sequence_recovery(
+                        aggregate(counts[(arm, i)], canonical=canonical)
+                    )
+                    for arm in ev.ARMS
                 },
                 backbone_rmsd={
                     arm: (

@@ -108,9 +108,25 @@ class CoupledTrainer:
         settings=None,
         device=None,
         frozen_identity=None,
+        fampnn_finetune=False,
+        fampnn_model_cfg=None,
     ):
         self.controller = controller
         self.adapters = controller.adapters
+        # The FaMPNN fine-tune CONTROL: train the donor's own weights on the
+        # same data, for the same steps, with the adapters switched off. This is
+        # deliberately not the default and not reachable by accident -- the
+        # caller has to ask for it -- because a "coupling" number produced with
+        # an unfrozen donor would be a fine-tune wearing the coupling's name.
+        # See _assert_only_adapters_train.
+        self.fampnn_finetune = bool(fampnn_finetune)
+        self.tuned = controller.fampnn if self.fampnn_finetune else self.adapters
+        self.fampnn_model_cfg = fampnn_model_cfg
+        if self.fampnn_finetune and fampnn_model_cfg is None:
+            raise ValueError(
+                "fampnn_finetune needs fampnn_model_cfg: the checkpoint has to "
+                "carry the config so --fampnn-checkpoint can rebuild SeqDenoiser"
+            )
         self.settings = settings or CoupleSettings()
         self.optim_settings = optim or OptimSettings()
         self.out_dir = Path(out_dir)
@@ -118,12 +134,22 @@ class CoupledTrainer:
         self.device = torch.device(device) if device else torch.device("cpu")
         self.frozen_identity = frozen_identity or {}
 
-        self._assert_only_adapters_train()
         record = self.controller.set_phase(self.settings.phase)
-        trainable = [p for p in self.adapters.parameters() if p.requires_grad]
+        if self.fampnn_finetune:
+            # set_phase unfreezes this phase's adapter branch -- that is its job
+            # -- so the control arm has to neutralise it afterwards, not before.
+            # Freezing in the caller is silently undone by the line above.
+            self.adapters.requires_grad_(False)
+            self.adapters.enable_bb_to_sc = False
+            self.adapters.enable_sc_to_bb = False
+            self._assert_adapters_are_inert()
+        else:
+            self._assert_only_adapters_train()
+        trainable = [p for p in self.tuned.parameters() if p.requires_grad]
         if not trainable:
+            which = "FaMPNN" if self.fampnn_finetune else "adapter"
             raise ValueError(
-                f"Phase {self.settings.phase!r} leaves no adapter "
+                f"Phase {self.settings.phase!r} leaves no {which} "
                 "parameter trainable; there is nothing to optimize"
             )
         self.optimizer = torch.optim.AdamW(
@@ -136,7 +162,7 @@ class CoupledTrainer:
         self.ema = None
         if self.settings.ema_decay or self.settings.ema_relative_length:
             self.ema = EMA(
-                self.adapters,
+                self.tuned,
                 decay=self.settings.ema_decay,
                 relative_length=self.settings.ema_relative_length,
             )
@@ -145,6 +171,34 @@ class CoupledTrainer:
         torch.manual_seed(self.settings.seed)
         self.generator = torch.Generator().manual_seed(self.settings.seed)
         self._log_path = self.out_dir / "train_log.jsonl"
+
+    def _assert_adapters_are_inert(self):
+        """In the control arm no adapter may train or be applied.
+
+        The point of the control is to attribute the gain: if an adapter were
+        live here, the run would measure coupling plus fine-tuning together and
+        the comparison against the adapter run would be meaningless.
+        """
+        live = [n for n, p in self.adapters.named_parameters() if p.requires_grad]
+        if live:
+            raise ValueError(
+                f"{len(live)} adapter parameter(s) still require grad (e.g. "
+                f"{live[:3]}); the FaMPNN fine-tune control must train the donor "
+                "only. Freeze the adapters."
+            )
+        applied = [
+            name
+            for name, flag in (
+                ("bb_to_sc", getattr(self.adapters, "enable_bb_to_sc", False)),
+                ("sc_to_bb", getattr(self.adapters, "enable_sc_to_bb", False)),
+            )
+            if flag
+        ]
+        if applied:
+            raise ValueError(
+                f"adapter branch(es) {applied} are still applied; the control "
+                "must run no adapter at all (set enable_* False)"
+            )
 
     def _assert_only_adapters_train(self):
         """The donors must be frozen, or a 'coupling' gain is really fine-tuning."""
@@ -198,7 +252,36 @@ class CoupledTrainer:
     # ---- persistence -----------------------------------------------------
 
     def checkpoint_state(self):
+        extra = {}
+        if self.fampnn_finetune:
+            # Saved in the shape --fampnn-checkpoint expects (model_cfg +
+            # state_dict), so every existing evaluator can load the control
+            # without special-casing it.
+            # The adapter arm is evaluated on EMA weights, so the control has
+            # to be too or the comparison is not like-for-like. `state_dict` is
+            # therefore the EMA view (what --fampnn-checkpoint will load) and
+            # the raw weights are kept alongside it.
+            raw = {
+                k: v.detach().cpu().clone()
+                for k, v in self.controller.fampnn.state_dict().items()
+            }
+            if self.ema is not None:
+                with self.ema.swapped_into(self.controller.fampnn):
+                    tuned = {
+                        k: v.detach().cpu().clone()
+                        for k, v in self.controller.fampnn.state_dict().items()
+                    }
+            else:
+                tuned = raw
+            extra = dict(
+                fampnn_finetune=True,
+                fampnn_state_is_ema=self.ema is not None,
+                model_cfg=self.fampnn_model_cfg,
+                state_dict=tuned,
+                fampnn_state_raw=raw,
+            )
         return dict(
+            **extra,
             adapters=self.adapters.state_dict(),
             step=self.step,
             optimizer=self.optimizer.state_dict(),
@@ -271,14 +354,14 @@ class CoupledTrainer:
                 group["lr"] = lr
             grad_norm = float(
                 torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.adapters.parameters() if p.requires_grad],
+                    [p for p in self.tuned.parameters() if p.requires_grad],
                     self.optim_settings.max_grad_norm,
                 )
             )
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
             if self.ema:
-                self.ema.update(self.adapters)
+                self.ema.update(self.tuned)
             self.step += 1
             pending = 0
 

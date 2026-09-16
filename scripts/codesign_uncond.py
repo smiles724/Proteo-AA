@@ -59,6 +59,31 @@ def parse_args(argv=None):
     p.add_argument("--shard-index", type=int, default=0)
     p.add_argument("--shard-count", type=int, default=1)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--adapters",
+        default=None,
+        help="coupling checkpoint; enables the COUPLED arm. The BB->SC residual "
+        "is injected into h_V on every step of FaMPNN's iterative design loop "
+        "(see pxf.couple.pack_hook) because model.sample() gives a caller no "
+        "feature dict to substitute. Omit for the uncoupled arm",
+    )
+    p.add_argument(
+        "--sigma-b",
+        type=float,
+        default=None,
+        help="backbone noise level the adapter is conditioned on. REQUIRED with "
+        "--adapters and deliberately not defaulted: a fully denoised sample has "
+        "sigma=0, which is outside the trained window and log-undefined. The "
+        "bottom of the training window is 0.010 A; whatever is passed is "
+        "recorded in the output JSON",
+    )
+    p.add_argument(
+        "--pxdesign-donor",
+        default=None,
+        help="PXDesign donor, required with --adapters: the residual is "
+        "A_BS(a_token, sigma_B) and a_token comes from one denoiser call",
+    )
+    p.add_argument("--uncond-crop-size", type=int, default=640)
     p.add_argument("--allow-unpinned-sources", action="store_true")
     return p.parse_args(argv)
 
@@ -91,6 +116,157 @@ def backbone_from_record(record, atom37_order, backbone_slots):
             coords[position, slot] = torch.as_tensor(np.asarray(coord), dtype=torch.float32)
             mask[position, slot] = 1.0
     return coords, mask, torch.tensor(order, dtype=torch.long)
+
+
+
+class _Coupling:
+    """Supplies the per-sample BB->SC residual for the coupled arm.
+
+    ``delta_h = A_BS(a_token, sigma_B)`` needs PXDesign's token features, so
+    each sampled CIF is re-featurized through ``pxdesign_train`` (the bare CIF
+    parse this script already does is not enough -- the diffusion module needs
+    the featurizer's feature_dict) and the denoiser is evaluated once at the
+    requested ``sigma_B``.
+
+    One evaluation per sample, not per decoding step: ``a_token`` and
+    ``sigma_B`` are both fixed within a sample, so the residual is constant.
+    """
+
+    def __init__(self, *, driver, adapters, sigma_b, datasets, device):
+        self.driver = driver
+        self.adapters = adapters
+        self.sigma_b = float(sigma_b)
+        self.datasets = datasets
+        self.device = device
+        self._cache = {}
+
+    def delta_h_for(self, name, length):
+        import torch
+
+        if name in self._cache:
+            return self._cache[name]
+        entry = self.datasets.get(name)
+        if entry is None:
+            raise SystemExit(
+                f"{name}: no featurized structure; cannot compute a_token for "
+                "the coupled arm"
+            )
+        from pxf.backbone.driver import to_featurized
+
+        _sample_id, dataset = entry
+        structure = to_featurized(name, dataset[0]).to(self.device)
+        sigma = torch.full((1,), self.sigma_b, device=self.device)
+        cond = self.driver.conditioning(structure.feature_dict)
+        bound = self.driver.bind(cond)
+        with torch.no_grad():
+            # x_noisy is the sample itself perturbed to sigma_B: the adapter was
+            # trained on (denoised backbone, sigma_B) pairs from the trajectory,
+            # so feeding the clean sample at a declared sigma_B is the closest
+            # in-distribution query available for a finished structure.
+            target = structure.backbone_target.float()
+            noise = torch.randn(
+                target.shape,
+                generator=torch.Generator().manual_seed(hash(name) % (2**31)),
+            ).to(self.device)
+            x_noisy = (target + noise * self.sigma_b)[None]
+            _bb0, a_token = bound(x_noisy, sigma)
+        if a_token is None:
+            raise SystemExit(f"{name}: driver returned no a_token")
+        per_residue = a_token if a_token.dim() == 3 else a_token.reshape(
+            -1, length, a_token.shape[-1]
+        )
+        with torch.no_grad():
+            delta = self.adapters.delta_h(per_residue, sigma)
+        if delta is None:
+            raise SystemExit(
+                f"{name}: adapters returned no residual; is enable_bb_to_sc off?"
+            )
+        self._cache[name] = delta
+        return delta
+
+
+def _build_coupling(args, designer, entries):
+    """Load the donor and adapters, and featurize every sampled CIF once."""
+    import torch
+
+    from pxf.backbone.driver import (
+        PXDesignBackboneDriver,
+        featurize_structures,
+        load_backbone_model,
+        to_featurized,
+    )
+    from pxf.couple.adapters import CouplingAdapters
+    from pxf.couple.fampnn_iface import node_feature_dim
+
+    device = designer.device
+    # The adapter's FaMPNN side was fitted to one variant's h_V. Running the
+    # coupled arm against a different donor would query the adapter far out of
+    # distribution while appearing to work, because the widths can still match.
+    state_peek = torch.load(args.adapters, map_location="cpu", weights_only=False)
+    frozen_fampnn = (state_peek.get("frozen") or {}).get("fampnn")
+    # The trainer records this as the bare variant string ("0.0"); tolerate a
+    # dict in case an older checkpoint nested it.
+    trained_variant = (
+        frozen_fampnn.get("variant")
+        if isinstance(frozen_fampnn, dict)
+        else frozen_fampnn
+    )
+    del state_peek
+    if trained_variant and str(trained_variant) != str(designer.variant):
+        raise SystemExit(
+            f"--adapters was trained against FaMPNN {trained_variant} but this "
+            f"run uses {designer.variant}; pass --fampnn-weights "
+            f"{trained_variant} so the coupled arm queries the adapter in "
+            "distribution (and use the same variant for the uncoupled arm)"
+        )
+    px_model, _cfg, _rec = load_backbone_model(args.pxdesign_donor, device=device)
+    driver = PXDesignBackboneDriver(px_model)
+
+    adapters = CouplingAdapters(driver.c_token, node_feature_dim(designer.model)).to(
+        device
+    )
+    state = torch.load(args.adapters, map_location="cpu", weights_only=False)
+    if "adapters" not in state:
+        raise SystemExit(f"{args.adapters} is not a coupling checkpoint")
+    adapters.load_state_dict(state["adapters"])
+    if state.get("ema"):
+        # Match how eval_couple.py scores the adapter arm.
+        from pxf.train.ema import EMA
+
+        settings = state.get("settings") or {}
+        ema = EMA(
+            adapters,
+            decay=settings.get("ema_decay"),
+            relative_length=(
+                None
+                if settings.get("ema_decay") is not None
+                else settings.get("ema_relative_length") or 0.25
+            ),
+        )
+        ema.load_state_dict(state["ema"])
+        ema.copy_to(adapters)
+        logger.info("using the adapter EMA weights (step %s)", state.get("step"))
+    adapters.eval().requires_grad_(False)
+    adapters.enable_bb_to_sc = True
+    adapters.enable_sc_to_bb = False  # phase 1 trains only A_BS
+
+    paths = [str(path) for _, _, path in entries]
+    names = [Path(path).stem for path in paths]
+    # featurize_structures returns (sample_id, DesignSourceDataset) pairs and
+    # the item comes from indexing the dataset. Datasets are held rather than
+    # items so the structures are featurized one at a time instead of all 60
+    # sitting on the GPU at once.
+    datasets = dict(zip(names, featurize_structures(
+        paths, crop_size=args.uncond_crop_size
+    )))
+    logger.info("prepared %d dataset(s) for a_token", len(datasets))
+    return _Coupling(
+        driver=driver,
+        adapters=adapters,
+        sigma_b=args.sigma_b,
+        datasets=datasets,
+        device=device,
+    )
 
 
 def main(argv=None):
@@ -150,6 +326,24 @@ def main(argv=None):
         "FaMPNN %s (%s) on %s", designer.variant, designer.identity["mode"], designer.device
     )
 
+    coupling = None
+    if args.adapters:
+        if args.sigma_b is None:
+            raise SystemExit(
+                "--adapters requires --sigma-b: A_BS is conditioned on log "
+                "sigma_B and a denoised sample has sigma=0, which is outside "
+                "the trained window and log-undefined. Pass 0.010 (the bottom "
+                "of the training window) unless you mean something else"
+            )
+        if not args.pxdesign_donor:
+            raise SystemExit("--adapters requires --pxdesign-donor for a_token")
+        coupling = _build_coupling(args, designer, entries)
+        logger.info(
+            "COUPLED arm: adapters=%s sigma_b=%.4g A", args.adapters, args.sigma_b
+        )
+    else:
+        logger.info("UNCOUPLED arm: no adapter applied")
+
     backbone_slots = list(atom37.BACKBONE_SLOTS)
     manifest, failures = [], []
     for position, (length, index, path) in enumerate(entries):
@@ -170,13 +364,33 @@ def main(argv=None):
                     "lack a complete N/CA/C/O backbone"
                 )
 
-            result = designer.design(
-                coords_af2=coords[None],
-                atom_mask=mask[None],
-                residue_index=residue_index[None],
-                chain_index=torch.zeros(1, length, dtype=torch.long),
-                seed=args.seed + 1000 * index + length,
-            )
+            delta_h = None
+            hook_stats = {}
+            if coupling is not None:
+                delta_h = coupling.delta_h_for(name, length)
+            # The hook is installed for BOTH arms -- delta_h=None is a
+            # traversing no-op -- so the two arms run identical code and any
+            # difference between them is the residual, not the call path.
+            from pxf.couple.pack_hook import residual_on_sidechain_diffusion
+
+            with residual_on_sidechain_diffusion(
+                designer.model, delta_h, counter=hook_stats
+            ):
+                result = designer.design(
+                    coords_af2=coords[None],
+                    atom_mask=mask[None],
+                    residue_index=residue_index[None],
+                    chain_index=torch.zeros(1, length, dtype=torch.long),
+                    seed=args.seed + 1000 * index + length,
+                )
+            if coupling is not None and hook_stats.get("applied", 0) == 0:
+                # An inert hook would make this arm a copy of the uncoupled one
+                # and the comparison a null result dressed as a finding.
+                raise SystemExit(
+                    f"{name}: --adapters was given but the residual was never "
+                    f"applied ({hook_stats}); the coupled arm would be a "
+                    "duplicate of the uncoupled arm"
+                )
             design = result["designs"][0]
 
             pdb_path = out / "samples" / f"{name}.pdb"

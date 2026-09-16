@@ -177,6 +177,106 @@ def _cross_concat(feats_1d, num_batch, num_res):
 # --------------------------------------------------------------------------
 
 
+class PackingNodeFeatureNet(nn.Module):
+    """APM's `PackingNodeFeatureNet`, name-for-name.
+
+    The submodule name and the internal names (`aatype_embedding`,
+    `torsion_embedding`, `linear`) are APM's, because that is what makes the
+    released `sidechain_model.ckpt` loadable into this module. The feature
+    ORDER is theirs too, and it is load-bearing for weight compatibility:
+    pos_emb, diffuse_mask, aatype, rotvecs, time, torsions, torsions_sc.
+    """
+
+    def __init__(self, c_s, c_pos_emb, c_timestep_emb, embed_aatype, embed_rotvecs,
+                 use_mlp, n_type=20):
+        super().__init__()
+        self.c_s = c_s
+        self.c_pos_emb = c_pos_emb
+        self.c_timestep_emb = c_timestep_emb
+        self.embed_aatype = bool(embed_aatype)
+        self.embed_rotvecs = bool(embed_rotvecs)
+        embed_size = c_pos_emb + 1
+        if self.embed_aatype:
+            self.aatype_embedding = nn.Embedding(n_type + 1, c_s)
+            embed_size += c_s
+        self.torsion_embedding = AngularEncoding()
+        embed_size += c_timestep_emb + self.torsion_embedding.get_out_dim(4) * 2
+        if self.embed_rotvecs:
+            embed_size += 3
+        if use_mlp:
+            self.linear = nn.Sequential(
+                nn.Linear(embed_size, c_s), nn.ReLU(),
+                nn.Linear(c_s, c_s), nn.ReLU(),
+                nn.Linear(c_s, c_s), nn.LayerNorm(c_s),
+            )
+        else:
+            self.linear = nn.Linear(embed_size, c_s)
+
+    def forward(self, *, tor_t, res_mask, diffuse_mask, pos, aatypes, rotvecs,
+                torsions, torsions_sc):
+        B, L = res_mask.shape
+        pos_emb = get_index_embedding(pos, self.c_pos_emb) * res_mask[..., None]
+        feats = [pos_emb, diffuse_mask[..., None]]
+        if self.embed_aatype:
+            feats.append(self.aatype_embedding(aatypes))
+        if self.embed_rotvecs:
+            feats.append(rotvecs)
+        time_emb = get_time_embedding(tor_t[:, 0], self.c_timestep_emb,
+                                      max_positions=2056)[:, None, :].repeat(1, L, 1)
+        feats.append(time_emb * res_mask[..., None])
+        feats.append(self.torsion_embedding(torsions))
+        feats.append(self.torsion_embedding(torsions_sc))
+        return self.linear(torch.cat(feats, dim=-1))
+
+
+class FullEdgeFeatureNet(nn.Module):
+    """APM's `FullEdgeFeatureNet`, name-for-name. See the note above.
+
+    Feature order: cross-concat(node), relpos, CA distogram, cross-concat of the
+    two torsion encodings, chain embedding, diffuse mask. The chain embedding
+    sits BEFORE the diffuse mask -- swapping them silently shifts 128 input
+    columns of `edge_embedder.0` and the released weights stop meaning anything.
+    """
+
+    def __init__(self, c_s, c_p, feat_dim, num_bins, embed_chain):
+        super().__init__()
+        self.c_p = c_p
+        self.feat_dim = feat_dim
+        self.num_bins = num_bins
+        self.embed_chain = bool(embed_chain)
+        self.linear_s_p = nn.Linear(c_s, feat_dim)
+        self.linear_relpos = nn.Linear(feat_dim, feat_dim)
+        self.torsion_embedding = AngularEncoding()
+        total = (feat_dim * 3 + num_bins
+                 + self.torsion_embedding.get_out_dim(4) * 2 * 2
+                 + 2)                                  # embed_diffuse_mask=True
+        if self.embed_chain:
+            self.rel_chain_emb = nn.Embedding(2, c_p)
+            total += c_p
+        self.edge_embedder = nn.Sequential(
+            nn.Linear(total, c_p), nn.ReLU(),
+            nn.Linear(c_p, c_p), nn.ReLU(),
+            nn.Linear(c_p, c_p), nn.LayerNorm(c_p),
+        )
+
+    def forward(self, s, trans, torsions, torsions_sc, edge_mask, diffuse_mask,
+                residue_index, chain_index):
+        B, L, _ = s.shape
+        p_i = self.linear_s_p(s)
+        feats = [_cross_concat(p_i, B, L)]
+        d = residue_index[:, :, None] - residue_index[:, None, :]
+        feats.append(self.linear_relpos(get_index_embedding(d, self.feat_dim)))
+        feats.append(calc_distogram(trans, min_bin=1e-3, max_bin=20.0,
+                                    num_bins=self.num_bins))
+        feats.append(_cross_concat(self.torsion_embedding(torsions), B, L))
+        feats.append(_cross_concat(self.torsion_embedding(torsions_sc), B, L))
+        if self.embed_chain:
+            same = (chain_index[:, :, None] == chain_index[:, None, :]).long()
+            feats.append(self.rel_chain_emb(same))
+        feats.append(_cross_concat(diffuse_mask[..., None], B, L))
+        return self.edge_embedder(torch.cat(feats, dim=-1)) * edge_mask[..., None]
+
+
 class TorsionPacker(nn.Module):
     """APM's SideChainModel, signature-compatible with `SideChainModule`.
 
@@ -210,6 +310,8 @@ class TorsionPacker(nn.Module):
         seq_cond: str = "a_token",
         embed_aatype: bool = True,
         embed_rotvecs: bool = True,
+        use_mlp: bool = True,
+        embed_chain: bool = True,
         random_torsion_input: bool = True,
         plm_checkpoint: str = "",
         plm_num_layers: int = 33,
@@ -239,17 +341,11 @@ class TorsionPacker(nn.Module):
         self.trunk_grad_scale = float(trunk_grad_scale)
         self.angle_eps = float(angle_eps)
 
-        # ---- node features (APM PackingNodeFeatureNet) ----
-        self.c_pos_emb = int(c_pos_emb)
-        self.c_timestep_emb = int(c_timestep_emb)
-        self.torsion_embedding = AngularEncoding()
-        node_in = c_pos_emb + 1 + c_timestep_emb + self.torsion_embedding.get_out_dim(4) * 2
-        if self.embed_aatype:
-            self.aatype_embedding = nn.Embedding(n_type + 1, c_node)
-            node_in += c_node
-        if self.embed_rotvecs:
-            node_in += 3
-        self.node_linear = nn.Linear(node_in, c_node)   # packing config: use_mlp=False
+        # ---- node features: APM's module, APM's names ----
+        self.node_feature_net = PackingNodeFeatureNet(
+            c_s=c_node, c_pos_emb=c_pos_emb, c_timestep_emb=c_timestep_emb,
+            embed_aatype=self.embed_aatype, embed_rotvecs=self.embed_rotvecs,
+            use_mlp=use_mlp, n_type=n_type)
 
         # ---- sequence conditioning, inserted where APM inserts the PLM ----
         # BOTH projections are always constructed, whichever arm is running, so
@@ -267,19 +363,10 @@ class TorsionPacker(nn.Module):
         self.plm_runner = FrozenESM2(plm_checkpoint) if self.seq_cond in (
             "plm", "both") else None
 
-        # ---- edge features (APM FullEdgeFeatureNet) ----
-        self.edge_feat_dim = int(edge_feat_dim)
-        self.edge_num_bins = int(edge_num_bins)
-        self.linear_s_p = nn.Linear(c_node, edge_feat_dim)
-        self.linear_relpos = nn.Linear(edge_feat_dim, edge_feat_dim)
-        edge_in = (edge_feat_dim * 3 + edge_num_bins
-                   + self.torsion_embedding.get_out_dim(4) * 2 * 2
-                   + 2)                                   # embed_diffuse_mask=True
-        self.edge_embedder = nn.Sequential(
-            nn.Linear(edge_in, c_pair), nn.ReLU(),
-            nn.Linear(c_pair, c_pair), nn.ReLU(),
-            nn.Linear(c_pair, c_pair), nn.LayerNorm(c_pair),
-        )
+        # ---- edge features: APM's module, APM's names ----
+        self.edge_feature_net = FullEdgeFeatureNet(
+            c_s=c_node, c_p=c_pair, feat_dim=edge_feat_dim, num_bins=edge_num_bins,
+            embed_chain=embed_chain)
 
         # ---- trunk ----
         self.trunk = nn.ModuleDict()
@@ -347,8 +434,7 @@ class TorsionPacker(nn.Module):
         coord_scale: Optional[torch.Tensor] = None,  # IGNORED (EDM c_in)
         bb_atom_mask: Optional[torch.Tensor] = None,  # [B, L, 4] bool
         residue_index: Optional[torch.Tensor] = None,  # [B, L] long
-        asym_id: Optional[torch.Tensor] = None,        # [B, L] long (unused; APM's
-                                                       # packing config has embed_chain=False)
+        asym_id: Optional[torch.Tensor] = None,        # [B, L] long, chain index
     ):
         if frame_R is None or frame_t is None:
             raise ValueError(
@@ -387,41 +473,25 @@ class TorsionPacker(nn.Module):
             torsions_sc = torch.zeros(B, L, MAX_CHI, device=device)
             tor_t = torch.zeros(B, 1, device=device)
 
-            # ---- node embedding ----
-            pos_emb = get_index_embedding(residue_index, self.c_pos_emb) * node_mask_f[..., None]
-            feats = [pos_emb, diffuse_mask[..., None]]
-            if self.embed_aatype:
-                canonical = (type_idx >= 0) & (type_idx < len(STD_AA_3))
-                idx = torch.where(canonical, type_idx, torch.full_like(type_idx,
-                                                                       len(STD_AA_3)))
-                feats.append(self.aatype_embedding(idx))
-            if self.embed_rotvecs:
-                feats.append(rotmat_to_rotvec(R))
-            time_emb = get_time_embedding(tor_t[:, 0], self.c_timestep_emb,
-                                          max_positions=2056)[:, None, :].repeat(1, L, 1)
-            feats.append(time_emb * node_mask_f[..., None])
-            feats.append(self.torsion_embedding(torsions_t))
-            feats.append(self.torsion_embedding(torsions_sc))
-            init_node_embed = self.node_linear(torch.cat(feats, dim=-1))
+            # ---- node embedding (APM's PackingNodeFeatureNet) ----
+            canonical = (type_idx >= 0) & (type_idx < len(STD_AA_3))
+            aa_idx = torch.where(canonical, type_idx,
+                                 torch.full_like(type_idx, len(STD_AA_3)))
+            init_node_embed = self.node_feature_net(
+                tor_t=tor_t, res_mask=node_mask_f, diffuse_mask=diffuse_mask,
+                pos=residue_index, aatypes=aa_idx, rotvecs=rotmat_to_rotvec(R),
+                torsions=torsions_t, torsions_sc=torsions_sc)
 
             init_node_embed = init_node_embed + self._sequence_channel(
                 h_res, type_idx, node_mask)
             init_node_embed = init_node_embed * node_mask_f[..., None]
 
-            # ---- edge embedding ----
-            p_i = self.linear_s_p(init_node_embed)
-            cross_node = _cross_concat(p_i, B, L)
-            relpos = self.linear_relpos(
-                get_index_embedding(residue_index[:, :, None] - residue_index[:, None, :],
-                                    self.edge_feat_dim))
-            dist_feats = calc_distogram(trans, min_bin=1e-3, max_bin=20.0,
-                                        num_bins=self.edge_num_bins)
-            cross_tor = _cross_concat(self.torsion_embedding(torsions_t), B, L)
-            cross_sc_tor = _cross_concat(self.torsion_embedding(torsions_sc), B, L)
-            diff_feat = _cross_concat(diffuse_mask[..., None], B, L)
-            edge_embed = self.edge_embedder(torch.cat(
-                [cross_node, relpos, dist_feats, cross_tor, cross_sc_tor, diff_feat],
-                dim=-1)) * edge_mask[..., None]
+            # ---- edge embedding (APM's FullEdgeFeatureNet) ----
+            chain_idx = (torch.zeros(B, L, dtype=torch.long, device=device)
+                         if asym_id is None else asym_id.to(device).long())
+            edge_embed = self.edge_feature_net(
+                init_node_embed, trans, torsions_t, torsions_sc, edge_mask,
+                diffuse_mask, residue_index, chain_idx)
 
             # ---- trunk ----
             node_embed = init_node_embed

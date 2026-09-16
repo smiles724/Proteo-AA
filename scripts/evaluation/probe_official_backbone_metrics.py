@@ -19,6 +19,13 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument('--checkpoint',required=True)
     p.add_argument('--official-checkpoint',required=True)
+    # The probe was written to verify that a RUNNING job's frozen backbone is
+    # the official one, so it asserted exact tensor equality. That also made it
+    # unusable on any checkpoint with its own backbone -- which is why the
+    # corrected-probe numbers only ever covered the official weights. With this
+    # flag the equality becomes a measured, reported fact instead of a
+    # precondition, so our own checkpoints can be put through the same probe.
+    p.add_argument('--allow-different-backbone',action='store_true')
     p.add_argument('--data-root',default='/hai/scratch/yfsun')
     p.add_argument('--output',required=True)
     p.add_argument('--samples-per-source',type=int,default=12)
@@ -54,8 +61,15 @@ def main():
         backbone_only_binder=True,ref_pos_augment=False,seed=a.seed)
     model=evaluation_model(a.checkpoint,device='cuda',weights='raw')
     donor=component_state(model,read_checkpoint(a.official_checkpoint),BACKBONE_PREFIXES)
-    assert all(torch.equal(model.state_dict()[k].cpu(),v) for k,v in donor.items())
-    del donor
+    live=model.state_dict()
+    same=sum(1 for k,v in donor.items() if torch.equal(live[k].cpu(),v))
+    backbone_exact=(same==len(donor))
+    print(f'BACKBONE_PROVENANCE {same}/{len(donor)} backbone tensors equal to official; '
+          f'exact={backbone_exact}',flush=True)
+    if not backbone_exact and not a.allow_different_backbone:
+        raise SystemExit(f'only {same}/{len(donor)} backbone tensors match the official '
+                         'checkpoint; pass --allow-different-backbone to probe it anyway')
+    del donor,live
     rows=[];failures=[]
     for source,dataset in [('monomer',mono.train_dataset.datasets[0]),('binder',bind)]:
         seen=set()
@@ -99,7 +113,8 @@ def main():
                 entry[kind]=dict(bad_bond_count=bad,ca_ca_count=count,bad_bond_percent=100*bad/count if count else None,
                     sample_mean_bad_bond_percent=float(np.mean([100*r[kind]['bad_bond_fraction'] for r in selected if r[kind]['bad_bond_fraction'] is not None])) if selected else None)
             summary.append(entry)
-    report=dict(arguments=vars(a),component_origins=model.component_origins,official_backbone_exact=True,
+    report=dict(arguments=vars(a),component_origins=model.component_origins,
+        official_backbone_exact=backbone_exact,official_backbone_tensors_equal=same,
         profile='native joint free generation; no packing or refinement; FP32',
         definition='100 * count(|CA_i-CA_(i+1)| outside [3.5,4.1] A) / valid continuous design-residue CA pairs',
         split_scope='PINDER source validation clusters exclude training clusters; recentPDB monomers; no cross-source homology guarantee',

@@ -151,6 +151,9 @@ warmup 2000、最多 50k step，每 2000 step 在 ≤491 条 held-out recent-PDB
    错了，别读别的数。
 2. 打得过 Dunbrack-mode 模板基线（不用模型，违例率 ~0）：局部 RMSD **1.277 Å**、
    χ1 recovery **68.7%**。打不过就不该进 V1。
+   > **这条预注册写错了，原样留着以存档。** 1.277 Å 是另一个估计量在另一批链上的
+   > 数，和 packer 被打分的 `symmetry_rmsd` 不可比。同口径下的正确门槛是
+   > **2.086 Å / χ1 0.703**，见下面「基线口径」一节。
 3. 然后才看四臂差异：`symmetry_rmsd`、`chi_recovery_20deg`/`_40deg`、
    `chi1_accuracy_*`、`rotamer_recovery`、`torsion/chi_mae_deg`、clash 率。
 
@@ -159,25 +162,62 @@ warmup 2000、最多 50k step，每 2000 step 在 ≤491 条 held-out recent-PDB
 另外 **`packer_random_torsion_input=True` 让前向是随机的**，评估数字本身带一点
 方差——这是照搬 APM 的代价，读数时记得。
 
-## 状态
+## 结果（2026-09-15，job 117035，四臂各 50000 步）
 
-**已验证**
+四臂全部 COMPLETED，16.6–18.5 h。step 50000、308 条 held-out monomer：
 
-- 全量 `pytest tests`：**755 passed, 2 skipped**（新增 `test_sc_ipa.py` 6 个、
-  `test_sc_torsion_packer.py` 19 个、`test_sc_only_aa_backend.py` 7 个）。
-- IPA 全局刚体不变性差 **0.0**；rotvec 的 log map 在 θ≈0 和 θ≈π 两个奇点都回环。
-- 四臂 GPU smoke（job **117026**，30 步）**全部 COMPLETED**：loss 有限、
-  `global_grad_norm` 6–10、ESM 只在 plm/both 两臂加载（日志各 1 行、另两臂 0 行）。
-- **键长是常数，真实数据上验证**：随机初始化下 `bond_mae = 7.2e-4 Å`、
-  `bad_bond_fraction = 0`。验收标准第 1 条由构造保证。
-- 速度/显存：crop 384、bf16、accumulation 8 下约 **1.4 s/optimizer step**
-  （smoke 117026 的第 1–30 步）。ESM-2 650M 前向 12–17 ms、2.7 GB，占比 ~1%。
+| arm | symmetry_rmsd ↓ | χ1 acc 40° ↑ | χ1+χ2 acc ↑ | chi_rec 40° ↑ | rotamer_rec ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Dunbrack-mode 模板基线** | **2.086** | **0.703** | — | — | — |
+| none | **1.509** | 0.765 | 0.590 | 0.696 | 0.565 |
+| a_token | 1.529 | 0.765 | 0.586 | 0.696 | 0.566 |
+| plm | 1.520 | **0.768** | **0.591** | **0.699** | **0.567** |
+| both | 1.537 | 0.764 | 0.587 | 0.697 | 0.565 |
 
-**没有验证**
+`bond_mae` 5.78e-4 Å、违例率 2.06e-5，四臂逐位相同。
 
-- packing 质量与任何 a-token / PLM 的结论。smoke 是 30 步随机初始化。
-- 50k 步的 wall clock：按 1.4 s/step 外推 **~19.4 小时**，在 23:50 的额度内但
-  余量不大。每 500 步存档，超时续跑代价可控。这是外推，不是承诺。
+### 验收标准：第 1 条通过，第 2 条通过，第 3 条无结论
+
+1. **键长/键角违例率 ≈ 0** —— 成立，且由 BuildSC 结构性保证，不是学出来的。
+2. **打得过 Dunbrack 模板基线** —— 成立，**2.086 → 1.509 Å（−28%）**，χ1 recovery
+   0.703 → 0.765。
+3. **四臂差异** —— 极差 0.028 Å，而单臂在最后 5 个验证点上的自身波动就有
+   0.008–0.021 Å。**同量级，不构成结论。**
+
+### 基线口径：一个必须先排掉的陷阱
+
+我一开始拿 `docs/sidechain_config_notes.md` 里的 **1.277 Å** 当验收门槛，据此得出
+"打不过模板基线"——**那是错的**。仓库里有三个模板基线数字，它们是三个不同的量：
+
+| 估计量 | 模板基线（同一批 308 条链上重测） | 出处 |
+| --- | ---: | --- |
+| mean per-residue RMSD（每残基 RMSD 再平均，不对齐） | 1.172 Å | `eval_template_quality.py` 报 1.277（33 条手挑链） |
+| atom-weighted RMSE（sqrt 全局 MSE，不对齐） | 2.174 Å | `eval_sidechain_template_baseline.py` 报 2.18（491 条） |
+| **`symmetry_rmsd`（sqrt 全局 MSE + 对称对齐）** | **2.086 Å** | **packer 被打分用的就是这个** |
+
+sqrt-of-mean ≥ mean-of-sqrt（Jensen），加上链集不同、对称对齐只有一边做 —— 三者
+本来就不可比。`scripts/evaluation/eval_template_baseline_matched.py` 在**同一批 308
+条链、同一 mask、同一估计量**下把三个口径一次算全，并交叉验证了 mask：它数出每条链
+**820.43** 个受监督原子，与训练 eval 日志里的 `val_sc_observed_atoms=820.4` 一致。
+
+**教训**：拿一个文档里的数字当验收门槛之前，先确认它和你要比的东西是同一个估计量。
+
+### a_token 为什么没用：最可能的解释
+
+这个相位喂给 packer 的是 **native 骨架 + native frame + native 序列**
+（`predicted_frame=False`、`force_gt_type_logits=True`），而 a_token 是**同一份
+native 骨架**在 σ=0.4 条件下过一遍冻结 trunk 得到的结构感知 embedding。IPA 已经
+直接读着这份几何了，所以 **a_token 在这里与几何输入高度冗余**。
+
+关于那个 σ：坐标上**没有加噪**（`x_noisy` 就是 native 坐标）。σ 只进两处，
+`c_in=1/√(σ²+σ_data²)` 在 σ∈[0.01,1] 区间几乎不变（0.06250→0.06238，σ_data=16
+主导），真正起作用的只有时间嵌入 `ln(σ/σ_data)/4`。所以 **σ=0 不可表示**
+（ln 0 = −∞），而且 trunk 是个 denoiser、σ 是它输入契约的一部分：训练噪声是
+log-normal(−1.2, 1.5)，中位数 σ=0.301，`feature_sigma=0.4` 正落在 57.5 分位。
+σ→0 是分布外外推，不是"更干净的表示"。**这个 trunk 上不存在"σ=0 的 a_token"。**
+
+要证伪"冗余"这个解释，该做的是让 a_token 携带几何以外的信息 —— 即把骨架换成
+**预测的/带噪的**（`predicted_frame=True`，Stage III/IV），而不是调 σ。
 
 ## 这次踩到并修掉的坑
 

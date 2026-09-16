@@ -1,0 +1,74 @@
+# Adds --ids-file to /hai/scratch/yfsun/protenix_sidechain/process.py
+#
+# That directory is not version controlled, so the change is recorded here.
+# process.py hard-coded the weighted before-2021-09-30 index as its only source
+# of pdb_ids. The recentPDB eval split is absent from that index by construction
+# -- which is exactly what makes the temporal split clean -- so the eval entries
+# had no supervision masks and the eval metric could not exclude ambiguous
+# residues. This flag lets the same builder run over an arbitrary id list or any
+# CSV carrying a pdb_id column. Additive: the default path is unchanged.
+#
+# Applied with:
+#   cd /hai/scratch/yfsun/protenix_sidechain
+#   patch -p1 < <this file>
+# Then rebuilt the eval masks with:
+#   python process.py --ids-file .../recentPDB_low_homology_maxtoken1536.csv \
+#       --nproc 32 --out out_eval
+#   python make_fampnn.py --in out_eval --out out_eval_fampnn_strictB \
+#       --drop-extreme-b
+--- a/process.py
++++ b/process.py
+@@ -99,6 +99,21 @@
+                 except (TypeError, ValueError):
+                     res[pid] = float("nan")
+     return res
++
++
++def read_ids_file(path) -> set[str]:
++    """pdb_ids from a plain list or from any CSV carrying a pdb_id column."""
++    text = pathlib.Path(path).read_text()
++    first = text.split("\n", 1)[0]
++    if "," in first and "pdb_id" in first:
++        import io
++        column = next(
++            i for i, name in enumerate(first.split(",")) if name.strip() == "pdb_id"
++        )
++        reader = csv.reader(io.StringIO(text))
++        next(reader)
++        return {r[column].strip().lower() for r in reader if r and r[column].strip()}
++    return {line.strip().lower() for line in text.split() if line.strip()}
+ 
+ 
+ def resolve_altloc(res) -> tuple[dict, bool, bool]:
+@@ -280,6 +295,13 @@
+     ap.add_argument("--cacb-tol", type=float, default=0.30)
+     ap.add_argument("--max-resolution", type=float, default=3.0,
+                     help="optional filter; applied only in the strict index")
++    ap.add_argument("--ids-file", default=None,
++                    help="process exactly these pdb_ids (one per line, or a CSV "
++                         "with a pdb_id column) instead of the weighted training "
++                         "index. Needed for the recentPDB eval split, whose "
++                         "entries are absent from that index by construction; "
++                         "resolution_index is then NaN and resolution_cif is read "
++                         "from the file as usual.")
+     args = ap.parse_args()
+ 
+     cfg = {
+@@ -292,9 +314,14 @@
+     out = pathlib.Path(args.out)
+     out.mkdir(parents=True, exist_ok=True)
+ 
+-    res_by_pid = protein_entries()
+-    ids = sorted(res_by_pid)
+-    if not args.all:
++    if args.ids_file:
++        ids = sorted(read_ids_file(args.ids_file))
++        res_by_pid = {}
++        print(f"id list: {len(ids):,} entries from {args.ids_file}", flush=True)
++    else:
++        res_by_pid = protein_entries()
++        ids = sorted(res_by_pid)
++    if not args.all and not args.ids_file:
+         import random
+         ids = random.Random(args.seed).sample(ids, min(args.n, len(ids)))
+     print(f"processing {len(ids):,} entries with {args.nproc} procs", flush=True)

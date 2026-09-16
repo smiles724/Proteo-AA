@@ -1,0 +1,105 @@
+{
+  "candidates": 78,
+  "usable": 56,
+  "crop_size": 512,
+  "min_crop_size_required": 482,
+  "lengths": {
+    "min": 48,
+    "median": 150,
+    "max": 482
+  },
+  "globs": [
+    "/hai/scratch/yfsun/casp14/cif/*.cif",
+    "/hai/scratch/yfsun/casp15/cif/*.cif"
+  ],
+  "rejected": [
+    {
+      "target": "T1024",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1036s1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1037",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1042",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1044",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: DesignCropper: binder ha"
+    },
+    {
+      "target": "T1050",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: DesignCropper: binder ha"
+    },
+    {
+      "target": "T1064",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1090",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1104-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1109-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1121-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1121-D2",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1123-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1129s2-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1133-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1137s7-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1145-D2",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1157s1-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1157s1-D2",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1157s1-D3",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1180-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: CifProvider: parsed /hai"
+    },
+    {
+      "target": "T1188-D1",
+      "reason": "ValueError: DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: DesignCropper: binder ha"
+    }
+  ]
+}

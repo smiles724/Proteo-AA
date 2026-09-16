@@ -142,3 +142,47 @@ alone — that is the run that says what the crystallographic filter was worth.
 Every training run records the mask set it used under
 `run_config.json:data_source.supervision_mask` (root, `keep_column`, blocker
 bitmask, entry count), so a checkpoint is never ambiguous about its supervision.
+
+## Structures for the coupling phases
+
+The phase 1–3 path does **not** use the Protenix reader above. It goes through
+`pxdesign_train`'s featurizer, which is fussy in ways that cannot be predicted
+from an index, so the usable set is discovered by trying:
+
+```bash
+python scripts/survey_coupling_structures.py \
+    --glob '/hai/scratch/yfsun/casp14/cif/*.cif' \
+    --glob '/hai/scratch/yfsun/casp15/cif/*.cif' \
+    --crop-size 512 --out configs/phase1_structures_casp14_15.txt
+```
+
+**56 of 78** CASP14+15 CIFs survive; lengths 48–482, so `--crop-size` must be at
+least 482. The 22 rejections and their reasons are written to
+`<manifest>.report.json` rather than discarded.
+
+Three constraints do the rejecting, and the second is the surprising one:
+
+- `DesignSourceDataset` must find a crop-valid example, which some targets never
+  satisfy.
+- The featurized token count must equal what FaMPNN parses from the same file,
+  because `_native_atom37` aligns the side-chain targets positionally. For PDB
+  entry `104l` the featurizer emits **166** tokens — assembly 1, one chain —
+  while gemmi and FaMPNN both see **328**, the two-chain asymmetric unit. The
+  index's `num_prot_chains` describes the *assembly*, so it cannot predict this;
+  only featurizing can. This is why the Protenix training split is unusable here
+  despite working for the FaMPNN fine-tune.
+- The sequences must match, not merely the lengths.
+
+The manifest carries its own generating command as `#` comments and
+`resolve_structures` skips them, so a run's data source is a committed file
+rather than a glob evaluated at submit time. That matters more than it sounds:
+phase 1 was first launched from a list built by a throwaway script in a session
+scratchpad, and the run would not have been reproducible once that directory was
+cleaned.
+
+## Recorded patches
+
+`patches/protenix-sidechain-process-ids-file.patch` records the `--ids-file`
+addition to `/hai/scratch/yfsun/protenix_sidechain/process.py`. That directory is
+not version controlled, and the change is what made the eval-split masks
+possible, so it is kept here and reverse-applies cleanly against the live file.

@@ -1,0 +1,63 @@
+# Structures the coupling path can train on, produced by
+#   scripts/survey_coupling_structures.py \
+#       --glob '/hai/scratch/yfsun/casp14/cif/*.cif' \
+#       --glob '/hai/scratch/yfsun/casp15/cif/*.cif' \
+#       --crop-size 512 --out configs/phase1_structures_casp14_15.txt
+# 56 usable of 78 candidates; lengths 48-482.
+# Run with --crop-size >= 482, or the side-chain targets misalign.
+/hai/scratch/yfsun/casp14/cif/T1025.cif
+/hai/scratch/yfsun/casp14/cif/T1026.cif
+/hai/scratch/yfsun/casp14/cif/T1027.cif
+/hai/scratch/yfsun/casp14/cif/T1030.cif
+/hai/scratch/yfsun/casp14/cif/T1031.cif
+/hai/scratch/yfsun/casp14/cif/T1032.cif
+/hai/scratch/yfsun/casp14/cif/T1033.cif
+/hai/scratch/yfsun/casp14/cif/T1035.cif
+/hai/scratch/yfsun/casp14/cif/T1038.cif
+/hai/scratch/yfsun/casp14/cif/T1039.cif
+/hai/scratch/yfsun/casp14/cif/T1040.cif
+/hai/scratch/yfsun/casp14/cif/T1041.cif
+/hai/scratch/yfsun/casp14/cif/T1043.cif
+/hai/scratch/yfsun/casp14/cif/T1046s1.cif
+/hai/scratch/yfsun/casp14/cif/T1046s2.cif
+/hai/scratch/yfsun/casp14/cif/T1049.cif
+/hai/scratch/yfsun/casp14/cif/T1054.cif
+/hai/scratch/yfsun/casp14/cif/T1056.cif
+/hai/scratch/yfsun/casp14/cif/T1067.cif
+/hai/scratch/yfsun/casp14/cif/T1073.cif
+/hai/scratch/yfsun/casp14/cif/T1074.cif
+/hai/scratch/yfsun/casp14/cif/T1079.cif
+/hai/scratch/yfsun/casp14/cif/T1080.cif
+/hai/scratch/yfsun/casp14/cif/T1082.cif
+/hai/scratch/yfsun/casp14/cif/T1099.cif
+/hai/scratch/yfsun/casp15/cif/T1106s1-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1106s2-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1119-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1120-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1120-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1124-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s1-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s1-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1137s2-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s2-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1137s3-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s3-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1137s4-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s4-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1137s4-D3.cif
+/hai/scratch/yfsun/casp15/cif/T1137s5-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s5-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1137s6-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s6-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1137s8-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1137s9-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1139-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1145-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1150-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1157s2-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1157s2-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1157s2-D3.cif
+/hai/scratch/yfsun/casp15/cif/T1170-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1170-D2.cif
+/hai/scratch/yfsun/casp15/cif/T1187-D1.cif
+/hai/scratch/yfsun/casp15/cif/T1194-D1.cif

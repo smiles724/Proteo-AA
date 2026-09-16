@@ -141,7 +141,14 @@ def resolve_structures(spec, *, suffix=".pdb"):
             raise SystemExit(f"--structures {path} contains no *{suffix} files")
         return found
     if path.is_file():
-        found = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+        # '#' lines are skipped so a manifest can record how it was produced --
+        # which is what makes a run's data source reproducible rather than a
+        # glob that happened to be evaluated at submit time.
+        found = [
+            line.strip()
+            for line in path.read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
         missing = [p for p in found if not Path(p).is_file()]
         if missing:
             raise SystemExit(

@@ -225,6 +225,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--data-root", default=DATA_ROOT)
     ap.add_argument("--plm-checkpoint", default=ESM2_650M)
+    ap.add_argument("--a-token-skip-missing", action="store_true",
+                    help="drop training chains that have no cached a_token "
+                         "instead of failing. Records the count and the names.")
     ap.add_argument("--a-token-cache", default="",
                     help="root with train/ and val/ subdirectories of cached "
                          "a_token .npy files (a_token / both arms)")
@@ -280,6 +283,28 @@ def main():
     files = [root / f"{n}.pkl" for n in meta["pdb_name"].astype(str)]
 
     a_root = Path(args.a_token_cache) if args.a_token_cache else None
+    n_no_cache = 0
+    if needs_a_token and args.a_token_skip_missing:
+        # A handful of chains have no cached a_token: their mmCIF does not
+        # survive Protenix's parse. Dropping them keeps the run going, at the
+        # cost of the a_token arms training on marginally fewer chains than
+        # none/plm -- so the count goes in the config, not just a log line, and
+        # the list is written out so the difference is auditable rather than
+        # remembered.
+        have = {f.stem for f in (a_root / "train").glob("*.npy")}
+        keep = [n in have for n in meta["pdb_name"].astype(str)]
+        missing = [n for n, k in zip(meta["pdb_name"].astype(str), keep) if not k]
+        n_no_cache = len(missing)
+        if n_no_cache:
+            (out / "chains_without_a_token.txt").write_text("\n".join(missing) + "\n")
+            print(f"SKIP {n_no_cache} chains with no cached a_token "
+                  f"({100 * n_no_cache / len(meta):.2f}%); listed in "
+                  f"{out / 'chains_without_a_token.txt'}", flush=True)
+        # meta and files are index-aligned and the sampler indexes into meta, so
+        # both have to be filtered by the same mask.
+        meta = meta[keep].reset_index(drop=True)
+        files = [root / f"{n}.pkl" for n in meta["pdb_name"].astype(str)]
+
     train = APMPackingDataset(files, crop_size=None, seed=args.seed,
                               a_token_dir=(a_root / "train") if needs_a_token else None)
     sampler = LengthBatcher(meta, seed=args.seed,
@@ -295,6 +320,7 @@ def main():
 
     header = dict(arm=args.arm, params_total=n_par, train_chains=len(files),
                   a_token_cache=(str(a_root) if needs_a_token else None),
+                  chains_dropped_no_a_token=n_no_cache,
                   filtered_out=n_raw - len(files), clusters=int(meta.cluster.nunique()),
                   batches_per_epoch=len(list(iter(sampler))), accum=args.accum,
                   val_chains=len(val), lr=args.lr, clip=args.clip,

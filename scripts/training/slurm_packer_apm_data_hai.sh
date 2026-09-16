@@ -46,7 +46,10 @@ if [[ "$ARM" == a_token || "$ARM" == both ]]; then
   [[ -d "$A_TOKEN_CACHE/train" && -d "$A_TOKEN_CACHE/val" ]] || {
     echo "arm $ARM needs $A_TOKEN_CACHE/{train,val}; run build_a_token_cache first" >&2
     exit 2; }
-  CACHE_ARGS=(--a-token-cache "$A_TOKEN_CACHE")
+  # Skip rather than block: a handful of chains have no cached a_token because
+  # their generated mmCIF does not survive Protenix's parse. The count and the
+  # names land in the run directory, so the arm difference is auditable.
+  CACHE_ARGS=(--a-token-cache "$A_TOKEN_CACHE" --a-token-skip-missing)
 fi
 
 export PYTHONPATH="$REPO:$REPO/PXDesign:$REPO/Protenix:$APM_REFERENCE:$PYEXTRA"

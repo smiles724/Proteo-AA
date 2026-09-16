@@ -64,6 +64,15 @@ ELEMENT = {"C": "C", "N": "N", "O": "O", "S": "S"}
 # the encoding exact everywhere it is representable.
 MAX_GAP_PAD = 32
 
+# Protenix drops a chain when two residues label_seq_id calls consecutive have
+# CAs further apart than this (Filter.remove_polymer_chains_with_consecutive_
+# c_alpha_too_far_away, default 10.0). Two residues that far apart are not
+# covalently adjacent, so where APM's numbering claims they are -- measured:
+# 1tlx 316->317 at 27.7A, 2amy 401->402 at 39.3A, all of them trailing residues
+# that physically belong to something else -- a sequence break is the truthful
+# statement, not an accommodation.
+CA_BREAK_ANGSTROM = 10.0
+
 
 def build_structure(d, name):
     """atom37 arrays -> a gemmi Structure over APM's residue span.
@@ -129,6 +138,7 @@ def build_structure(d, name):
     # APM's residues landed so the padding can be dropped from a_token again.
     seq_no = {c: 0 for c in order}
     prev_ri = {c: None for c in order}
+    prev_ca = {c: None for c in order}
     keep_index = []
     serial = 0
     for i in range(len(aatype)):
@@ -143,11 +153,19 @@ def build_structure(d, name):
         # to the model and only costs tokens. Uncapped, 1914 came to 2081 tokens
         # and was rejected by the crop.
         gap = 0 if prev_ri[cid] is None else max(int(res_idx[i]) - prev_ri[cid] - 1, 0)
+        # A break the numbering does not record. One padded residue is enough to
+        # stop label_seq_id claiming adjacency; see CA_BREAK_ANGSTROM.
+        has_ca = bool(mask[i, 1])
+        if gap == 0 and has_ca and prev_ca[cid] is not None:
+            if float(np.linalg.norm(pos[i, 1] - prev_ca[cid])) > CA_BREAK_ANGSTROM:
+                gap = 1
         gap = min(gap, MAX_GAP_PAD)
         for _ in range(gap):
             full_seq[cid].append("UNK")
             seq_no[cid] += 1
         prev_ri[cid] = int(res_idx[i])
+        if has_ca:
+            prev_ca[cid] = pos[i, 1].copy()
         full_seq[cid].append(rname)
         seq_no[cid] += 1
         # (chain, position within chain). Global offsets need the FINAL chain

@@ -34,6 +34,7 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -234,11 +235,15 @@ def main():
         # in the atom-attention encoder.
         batch = trainer._to_device(_identity_collate([ds[0]]))
         # The coordinate augmentation is a random rotation + translation of the
-        # GT -- a rigid motion, not noise, but it does make the trunk's input
-        # differ run to run. Seeding separates "is the network deterministic"
-        # from "is a_token invariant to the augmentation"; the check measures
-        # both, under seeds that are equal and unequal respectively.
+        # GT -- a rigid motion, not noise, but it makes the trunk's input differ
+        # run to run. NUMPY has to be seeded too, not just torch: the rotation
+        # comes from scipy's `Rotation.random` (Protenix/protenix/model/utils.py
+        # :108), which draws on numpy's global RNG, so a torch-only seed leaves
+        # it free and a "repeat" forward silently measures rotation sensitivity
+        # instead of determinism.
         torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
         with torch.no_grad():
             o = net(input_feature_dict=batch["input_feature_dict"],
                     label_dict=batch["label_dict"], mode="train")
@@ -333,7 +338,13 @@ def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
 
         len_ok = a.shape[0] == n_apm
         n = min(len(rt), n_apm)
+        # Informational only. The CIF has to renumber residues sequentially
+        # because APM flattens insertion codes and its residue_index is not
+        # unique (102l has two residues at index 40), so a disagreement here is
+        # expected on those chains and says nothing about alignment.
         ri_ok = len_ok and bool((ri[:n] == apm_ri[:n]).all())
+        # This is the alignment test that counts: the residue NAME at every
+        # position, which an insertion paired with a deletion cannot survive.
         same = sum(1 for k in range(n)
                    if px_name[int(rt[k])] == apm_name[int(apm_aat[k])])
         design_tok = sum(1 for k in range(n) if px_name[int(rt[k])] in
@@ -343,11 +354,11 @@ def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
         d_sigma = (a - a_hi).abs().max().item()
         scale = max(a.abs().max().item(), 1e-9)
 
-        row_ok = len_ok and ri_ok and same == n and det < 1e-3
+        row_ok = len_ok and same == n and det < 1e-3
         ok = ok and row_ok
         print(f"  {rec['target']:6s} L_apm={n_apm:4d} L_atoken={a.shape[0]:4d} "
               f"{'len OK' if len_ok else 'LEN MISMATCH'}  "
-              f"res_idx {'OK' if ri_ok else 'MISALIGNED'}  "
+              f"res_idx {'same' if ri_ok else 'renumbered'}  "
               f"restype {same}/{n}{'' if design_tok == 0 else f' ({design_tok} design tokens!)'}  "
               f"repeat={det:.2e}  rot-aug={rot:.2e}  "
               f"sigma A={float(s_used.max()):.2e} B={float(s_hi.max()):.3g}  "

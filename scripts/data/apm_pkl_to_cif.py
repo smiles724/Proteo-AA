@@ -101,6 +101,14 @@ def build_structure(d, name):
     names = {c: (chr(ord("A") + i) if i < 26 else f"A{i}") for i, c in enumerate(order)}
     chains = {c: gemmi.Chain(names[c]) for c in order}
     full_seq = {c: [] for c in order}
+    # Residues are numbered SEQUENTIALLY per chain, not by APM's residue_index.
+    # APM flattens insertion codes, so residue_index is not unique: 102l has an
+    # ASN and an ALA both at index 40. Writing that number into seqid makes
+    # gemmi merge them into one 16-atom residue, and the parse then dies far
+    # away in the symmetric-permutation table ("16 atoms vs 8 permutations").
+    # Nothing downstream reads auth_seq_id, and assign_label_seq_id rewrites
+    # label_seq_id regardless.
+    seq_no = {c: 0 for c in order}
     serial = 0
     for i in range(len(aatype)):
         cid = int(chain_idx[i])
@@ -109,11 +117,12 @@ def build_structure(d, name):
         # unknown residue and let it be a token with no coordinates.
         rname = restype_1to3[restypes[t]] if 0 <= t < len(restypes) else "UNK"
         full_seq[cid].append(rname)
+        seq_no[cid] += 1
         if not mask[i].any() or rname == "UNK":
             continue           # unresolved: a sequence position, not an atom row
         res = gemmi.Residue()
         res.name = rname
-        res.seqid = gemmi.SeqId(int(res_idx[i]) + 1, " ")
+        res.seqid = gemmi.SeqId(seq_no[cid], " ")
         res.het_flag = "A"
         for j, aname in enumerate(atom_types):
             if not mask[i, j]:

@@ -126,7 +126,10 @@ def main():
                          "non-deterministic, which a cache cannot absorb.")
     ap.add_argument("--compare-sigma", type=float, default=0.4,
                     help="second sigma to quantify against, in --check mode")
-    ap.add_argument("--crop-size", type=int, default=768)
+    # Padded chains are longer than APM's span (16vp: 311 -> 356). Measured over
+    # 600 chains the padded length tops out at 1204, so 1536 leaves the crop
+    # inactive; a crop here would silently drop residues a_token must cover.
+    ap.add_argument("--crop-size", type=int, default=1536)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", default="bf16")
     ap.add_argument("--limit", type=int, default=0)
@@ -232,7 +235,7 @@ def main():
           f"({type(net.training_noise_sampler).__name__}), "
           f"centre_only_augmentation={net.aa_centre_only_augmentation}", flush=True)
 
-    def a_token_for(cif, chain, sigma=None, clean=True, seed=0):
+    def a_token_for(cif, chain, sigma=None, clean=True, seed=0, keep_index=None):
         """One forward; returns (a_token [L, C], restype [L], sigma actually used).
 
         `clean=True` is the zero-coordinate-noise mode this cache is for.
@@ -270,7 +273,17 @@ def main():
         rt = fd["restype"].reshape(-1, fd["restype"].shape[-1]).argmax(-1).cpu()
         ri = fd["residue_index"].reshape(-1).cpu()
         used = o["sigma"].reshape(-1).float().cpu()
-        return a.reshape(-1, a.shape[-1]).float().cpu(), (rt, ri), used
+        a = a.reshape(-1, a.shape[-1]).float().cpu()
+        if keep_index is not None:
+            # Drop the UNK padding that stands in for residues the deposit does
+            # not contain, leaving exactly APM's span in APM's order.
+            idx = torch.as_tensor(keep_index, dtype=torch.long)
+            if int(idx.max()) >= a.shape[0]:
+                raise RuntimeError(
+                    f"{cif}: keep_index reaches {int(idx.max())} but only "
+                    f"{a.shape[0]} tokens came back -- the chain was cropped")
+            a, rt, ri = a[idx], rt[idx], ri[idx]
+        return a, (rt, ri), used
 
     if args.check:
         run_check(args, files, cif_dir, convert, featurise, a_token_for, torch)
@@ -292,7 +305,8 @@ def main():
                                            "C": int(a0.shape[1]), "cached": True})
                 continue
             rec = convert(f, cif_dir)
-            a, _ids, used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor)
+            a, _ids, used = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
+                                        keep_index=rec["keep_index"])
             if abs(float(used.max()) - args.sigma_floor) > 1e-9:
                 raise RuntimeError(f"forward ran at sigma {float(used.max()):g}, "
                                    f"not the pinned {args.sigma_floor:g}")
@@ -360,14 +374,15 @@ def run_check(args, files, cif_dir, convert, featurise, a_token_for, torch):
         apm_ri = feats["res_idx"].cpu()
         n_apm = int(apm_aat.shape[0])
 
-        a, (rt, ri), s_used = a_token_for(rec["cif"], rec["chain"],
+        ki = rec["keep_index"]
+        a, (rt, ri), s_used = a_token_for(rec["cif"], rec["chain"], keep_index=ki,
                                           sigma=args.sigma_floor, clean=True, seed=0)
-        a2, _, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
-                               clean=True, seed=0)
-        a_rot, _, _ = a_token_for(rec["cif"], rec["chain"], sigma=args.sigma_floor,
-                                  clean=True, seed=7)
-        a_hi, _, s_hi = a_token_for(rec["cif"], rec["chain"], sigma=args.compare_sigma,
-                                    clean=False, seed=0)
+        a2, _, _ = a_token_for(rec["cif"], rec["chain"], keep_index=ki,
+                               sigma=args.sigma_floor, clean=True, seed=0)
+        a_rot, _, _ = a_token_for(rec["cif"], rec["chain"], keep_index=ki,
+                                  sigma=args.sigma_floor, clean=True, seed=7)
+        a_hi, _, s_hi = a_token_for(rec["cif"], rec["chain"], keep_index=ki,
+                                    sigma=args.compare_sigma, clean=False, seed=0)
 
         # Read back, not echoed: proves the pin took effect on this forward.
         if abs(float(s_used.max()) - args.sigma_floor) > 1e-9:

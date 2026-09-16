@@ -101,14 +101,28 @@ def build_structure(d, name):
     names = {c: (chr(ord("A") + i) if i < 26 else f"A{i}") for i, c in enumerate(order)}
     chains = {c: gemmi.Chain(names[c]) for c in order}
     full_seq = {c: [] for c in order}
-    # Residues are numbered SEQUENTIALLY per chain, not by APM's residue_index.
-    # APM flattens insertion codes, so residue_index is not unique: 102l has an
-    # ASN and an ALA both at index 40. Writing that number into seqid makes
-    # gemmi merge them into one 16-atom residue, and the parse then dies far
-    # away in the symmetric-permutation table ("16 atoms vs 8 permutations").
-    # Nothing downstream reads auth_seq_id, and assign_label_seq_id rewrites
-    # label_seq_id regardless.
+    # Numbering has to satisfy two constraints that pull against each other.
+    #
+    # UNIQUE: APM flattens insertion codes, so residue_index repeats -- 102l has
+    # an ASN and an ALA both at index 40. Reuse the number and gemmi merges them
+    # into one 16-atom residue, and the parse dies in the symmetric-permutation
+    # table, several layers from the cause.
+    #
+    # GAP-PRESERVING: where the deposit is missing a stretch, residue_index
+    # jumps, and that jump is the only record that the two flanking residues are
+    # NOT neighbours. Protenix drops a whole chain when two residues that
+    # label_seq_id calls consecutive have CAs more than 10A apart
+    # (filter.py:146) -- and measured over the training set, EVERY such break
+    # coincides with a numbering jump (16vp: 349->395, 27.7A). Renumber
+    # sequentially and 7% of chains are silently discarded, while the rest get a
+    # relative-position encoding that has quietly closed their gaps.
+    #
+    # So: missing positions become UNK entries in the entity's full_sequence,
+    # which is what a real mmCIF does, and `keep_index` records where each of
+    # APM's residues landed so the padding can be dropped from a_token again.
     seq_no = {c: 0 for c in order}
+    prev_ri = {c: None for c in order}
+    keep_index = []
     serial = 0
     for i in range(len(aatype)):
         cid = int(chain_idx[i])
@@ -116,8 +130,16 @@ def build_structure(d, name):
         # aatype 20 is UNK; openfold has no atom set for it, so write it as the
         # unknown residue and let it be a token with no coordinates.
         rname = restype_1to3[restypes[t]] if 0 <= t < len(restypes) else "UNK"
+        gap = 0 if prev_ri[cid] is None else max(int(res_idx[i]) - prev_ri[cid] - 1, 0)
+        for _ in range(gap):
+            full_seq[cid].append("UNK")
+            seq_no[cid] += 1
+        prev_ri[cid] = int(res_idx[i])
         full_seq[cid].append(rname)
         seq_no[cid] += 1
+        # (chain, position within chain). Global offsets need the FINAL chain
+        # lengths, which are not known until the loop ends.
+        keep_index.append((cid, seq_no[cid] - 1))
         if not mask[i].any() or rname == "UNK":
             continue           # unresolved: a sequence position, not an atom row
         res = gemmi.Residue()
@@ -147,24 +169,34 @@ def build_structure(d, name):
             if names[c] in ent.subchains or names[c] == ent.name:
                 ent.full_sequence = full_seq[c]
                 break
-    return st, int(len(aatype)), serial, {names[c]: len(full_seq[c]) for c in order}
+    offset, acc = {}, 0
+    for c in order:
+        offset[c] = acc
+        acc += len(full_seq[c])
+    keep_index = [offset[c] + j for c, j in keep_index]
+    return (st, int(len(aatype)), serial,
+            {names[c]: len(full_seq[c]) for c in order}, keep_index)
 
 
 def convert(pkl_path, out_dir, revision_date="2021-01-01"):
     with open(pkl_path, "rb") as fh:
         d = pickle.load(fh)
     name = Path(pkl_path).stem
-    st, n_span, n_atom, chain_lens = build_structure(d, name)
+    st, n_span, n_atom, chain_lens, keep_index = build_structure(d, name)
     rec = structure_to_cif(st, Path(out_dir) / f"{name}.cif", name, revision_date,
                            keep_entity_poly_seq=True)
     rec["apm_span_res"] = n_span
     rec["written_atoms"] = int(n_atom)
     rec["chain_lengths"] = chain_lens
+    rec["n_tokens"] = int(sum(chain_lens.values()))
+    # Which of the CIF's tokens are APM's residues: everything else is UNK
+    # padding standing in for a stretch the deposit does not contain.
+    rec["keep_index"] = keep_index
     # `native_len` counts residues with coordinates, which is legitimately
     # smaller than the span whenever the chain has an interior gap. What must
     # never differ is the number of SEQUENCE positions, because that is what
     # becomes a token and therefore a row of a_token.
-    if sum(chain_lens.values()) != n_span:
+    if len(keep_index) != n_span:
         rec["span_mismatch"] = True
     return rec
 

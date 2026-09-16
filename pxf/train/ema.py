@@ -22,7 +22,7 @@ itself (Karras's sigma_rel to gamma mapping) is **not** implemented here, and
 picking a length up front via ``relative_length`` is the approximation this code
 makes. See :mod:`pxf.train.trainer` for how snapshots are written.
 """
-import copy
+
 import torch
 
 
@@ -37,8 +37,10 @@ class EMA:
         self.decay = None if decay is None else float(decay)
         self.relative_length = None if relative_length is None else float(relative_length)
         self.step = 0
-        self.shadow = {name: value.detach().clone().to(device or value.device)
-                       for name, value in self._floats(model)}
+        self.shadow = {
+            name: value.detach().clone().to(device or value.device)
+            for name, value in self._floats(model)
+        }
 
     @staticmethod
     def _floats(model):
@@ -76,9 +78,12 @@ class EMA:
         return _Swap(self, model)
 
     def state_dict(self):
-        return dict(step=self.step, decay=self.decay,
-                    relative_length=self.relative_length,
-                    shadow={k: v.cpu() for k, v in self.shadow.items()})
+        return dict(
+            step=self.step,
+            decay=self.decay,
+            relative_length=self.relative_length,
+            shadow={k: v.cpu() for k, v in self.shadow.items()},
+        )
 
     def load_state_dict(self, state):
         self.step = int(state["step"])
@@ -99,8 +104,9 @@ class _Swap:
         self.backup = None
 
     def __enter__(self):
-        self.backup = {name: value.detach().clone()
-                       for name, value in EMA._floats(self.model)}
+        self.backup = {
+            name: value.detach().clone() for name, value in EMA._floats(self.model)
+        }
         self.ema.copy_to(self.model)
         return self.model
 

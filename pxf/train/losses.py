@@ -20,6 +20,7 @@ protein sequence design with FAMPNN", bioRxiv 2025.02.13.637498.
 * Appendix D.4.1 -- the confidence head is a 33-way classifier over per-atom
   side-chain error binned evenly on [0, 4] Angstrom, trained with cross entropy.
 """
+
 import torch
 import torch.nn.functional as F
 
@@ -37,7 +38,11 @@ PSCE_BIN_WIDTH = (PSCE_MAX_BIN - PSCE_MIN_BIN) / (PSCE_NUM_BINS - 1)
 
 def psce_bin_spec(module=None):
     """Bin spec from the model's own config when available, else the pinned default."""
-    cfg = getattr(getattr(module, "cfg", None), "sce_bins", None) if module is not None else None
+    cfg = (
+        getattr(getattr(module, "cfg", None), "sce_bins", None)
+        if module is not None
+        else None
+    )
     if cfg is None:
         return PSCE_MIN_BIN, PSCE_MAX_BIN, PSCE_NUM_BINS
     return float(cfg.min_bin), float(cfg.max_bin), int(cfg.n_bins)
@@ -65,7 +70,9 @@ def sequence_mlm_loss(seq_logits, aatype, seq_mlm_mask, seq_mask):
     scored = (1.0 - seq_mlm_mask) * seq_mask
     per_residue = F.cross_entropy(
         seq_logits.reshape(-1, seq_logits.shape[-1]).float(),
-        aatype.reshape(-1).long(), reduction="none").reshape(aatype.shape)
+        aatype.reshape(-1).long(),
+        reduction="none",
+    ).reshape(aatype.shape)
     loss, count = _masked_mean(per_residue, scored)
     return loss, dict(masked_residues=count.detach())
 
@@ -80,17 +87,19 @@ def sidechain_diffusion_loss(x1_pred, x1_target, loss_weight, atom_mask):
     The weighted squared error is summed over xyz and averaged over supervised
     atoms, which is the standard EDM denoising objective.
     """
-    squared = (x1_pred.float() - x1_target.float()).pow(2).sum(-1)      # [..., A]
-    weight = loss_weight.reshape(*loss_weight.shape, *([1] * (squared.dim() - loss_weight.dim())))
+    squared = (x1_pred.float() - x1_target.float()).pow(2).sum(-1)  # [..., A]
+    weight = loss_weight.reshape(
+        *loss_weight.shape, *([1] * (squared.dim() - loss_weight.dim()))
+    )
     loss, count = _masked_mean(squared * weight, atom_mask)
     with torch.no_grad():
         unweighted, _ = _masked_mean(squared, atom_mask)
-    return loss, dict(scored_atoms=count.detach(),
-                      sidechain_mse_local=unweighted.detach())
+    return loss, dict(scored_atoms=count.detach(), sidechain_mse_local=unweighted.detach())
 
 
-def psce_bin_targets(x_pred, x_target, *, min_bin=PSCE_MIN_BIN,
-                     max_bin=PSCE_MAX_BIN, num_bins=PSCE_NUM_BINS):
+def psce_bin_targets(
+    x_pred, x_target, *, min_bin=PSCE_MIN_BIN, max_bin=PSCE_MAX_BIN, num_bins=PSCE_NUM_BINS
+):
     """Bin per-atom side-chain error onto the confidence head's classes.
 
     Bin ``k`` is the half-open interval ``[min + k*step, min + (k+1)*step)`` for
@@ -112,17 +121,23 @@ def confidence_loss(psce_logits, x_pred, x_target, atom_mask, *, bin_spec=None):
     """
     min_bin, max_bin, num_bins = bin_spec or (PSCE_MIN_BIN, PSCE_MAX_BIN, PSCE_NUM_BINS)
     if psce_logits.shape[-1] != num_bins:
-        raise ValueError(f"confidence head emits {psce_logits.shape[-1]} bins, expected {num_bins}")
-    target, error = psce_bin_targets(x_pred, x_target, min_bin=min_bin,
-                                     max_bin=max_bin, num_bins=num_bins)
+        raise ValueError(
+            f"confidence head emits {psce_logits.shape[-1]} bins, expected {num_bins}"
+        )
+    target, error = psce_bin_targets(
+        x_pred, x_target, min_bin=min_bin, max_bin=max_bin, num_bins=num_bins
+    )
     per_atom = F.cross_entropy(
         psce_logits.reshape(-1, psce_logits.shape[-1]).float(),
-        target.reshape(-1), reduction="none").reshape(target.shape)
+        target.reshape(-1),
+        reduction="none",
+    ).reshape(target.shape)
     loss, count = _masked_mean(per_atom, atom_mask)
     with torch.no_grad():
         mean_error, _ = _masked_mean(error, atom_mask)
-    return loss, dict(confidence_atoms=count.detach(),
-                      true_sidechain_error=mean_error.detach())
+    return loss, dict(
+        confidence_atoms=count.detach(), true_sidechain_error=mean_error.detach()
+    )
 
 
 def total_loss(loss_mlm, loss_diff, loss_confidence=None):

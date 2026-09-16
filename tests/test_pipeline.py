@@ -1,4 +1,5 @@
 """The pipeline must source the sequence explicitly and never let FaMPNN design it."""
+
 import pytest
 import torch
 
@@ -18,11 +19,14 @@ class StubPacker:
         self.calls.append(kwargs)
         coords = kwargs["coords_af2"]
         batch, length = coords.shape[0], coords.shape[1]
-        return dict(coords_af2=torch.full_like(coords, 9.0),
-                    atom_mask_af2=torch.ones(batch, length, 37, dtype=torch.bool),
-                    psce=torch.full((batch, length, 33), 0.25),
-                    aatype=kwargs["aatype"], backbone_shift=0.0,
-                    sequence=["A" * length] * batch)
+        return dict(
+            coords_af2=torch.full_like(coords, 9.0),
+            atom_mask_af2=torch.ones(batch, length, 37, dtype=torch.bool),
+            psce=torch.full((batch, length, 33), 0.25),
+            aatype=kwargs["aatype"],
+            backbone_shift=0.0,
+            sequence=["A" * length] * batch,
+        )
 
 
 def _batch(length=4, design=(False, False, True, True), samples=2, native="LQXX"):
@@ -32,9 +36,15 @@ def _batch(length=4, design=(False, False, True, True), samples=2, native="LQXX"
     mask[..., list(atom37.BACKBONE_SLOTS)] = True
     known = torch.tensor([letter in atom37.AA_ORDER for letter in native])
     return BackboneBatch(
-        sample_name="target", coords_af2=coords, atom_mask_af2=mask,
-        design_mask=torch.tensor(design), native_sequence=native, sequence_known=known,
-        residue_index=torch.arange(length), chain_index=torch.zeros(length, dtype=torch.long))
+        sample_name="target",
+        coords_af2=coords,
+        atom_mask_af2=mask,
+        design_mask=torch.tensor(design),
+        native_sequence=native,
+        sequence_known=known,
+        residue_index=torch.arange(length),
+        chain_index=torch.zeros(length, dtype=torch.long),
+    )
 
 
 def test_native_positions_need_no_sequence_argument():
@@ -81,8 +91,9 @@ def test_default_gives_no_sidechain_context():
 
 def test_keep_context_preserves_target_rotamers_only():
     stub = StubPacker()
-    FullAtomPipeline(None, stub, sequence="QQWY",
-                     scn_context="keep_context").run_batch(_batch())
+    FullAtomPipeline(None, stub, sequence="QQWY", scn_context="keep_context").run_batch(
+        _batch()
+    )
     # Context where NOT designed: the two native positions.
     assert stub.calls[0]["scn_context_mask"][0].tolist() == [1.0, 1.0, 0.0, 0.0]
 
@@ -115,6 +126,7 @@ def test_metrics_report_psce_overall_and_on_designed_positions():
 def test_identity_records_that_nothing_is_designed():
     class StubBackbone:
         identity = dict(backend="pxdesign")
+
     identity = FullAtomPipeline(StubBackbone(), StubPacker()).identity
     assert identity["pipeline"] == "pxdesign->fampnn(pack)"
     assert identity["designs_sequence"] is False

@@ -9,8 +9,10 @@ model has already been constructed and moved.
 
 :func:`select_device` settles the question by actually launching a kernel.
 """
+
 import os
 import warnings
+
 import torch
 
 _PROBE_CACHE = {}
@@ -67,5 +69,7 @@ def select_device(requested=None):
             f"Falling back to CPU: this torch build ({torch.__version__}) has no kernels "
             f"for {name} ({capability}); it supports {', '.join(supported)}. Install a "
             f"matching torch, move to a supported GPU, or set PXF_DEVICE=cuda to insist.",
-            RuntimeWarning, stacklevel=2)
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return torch.device("cpu")

@@ -14,16 +14,23 @@ FaMPNN ships no training dataset, so this implements the preprint's scheme:
 The per-example featurization itself is upstream's (``load_feats_from_pdb`` ->
 ``process_single_pdb``), so features match what inference produces.
 """
+
+import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
-import csv
+
 import torch
 from torch.utils.data import Dataset
 
 # What the training step consumes; everything else upstream computes is dropped.
-BATCH_KEYS = ("x", "aatype", "seq_mask", "missing_atom_mask",
-              "residue_index", "chain_index")
+BATCH_KEYS = (
+    "x",
+    "aatype",
+    "seq_mask",
+    "missing_atom_mask",
+    "residue_index",
+    "chain_index",
+)
 
 
 def contiguous_crop(length, size, *, generator=None):
@@ -56,11 +63,15 @@ def multimer_contiguous_crop(chain_lengths, size, *, generator=None):
     c2 = size - c1
     s1 = int(torch.randint(0, max(1, total - size + 1), (1,), generator=generator))
     keep = torch.zeros(total, dtype=torch.bool)
-    keep[s1:s1 + c1] = True
+    keep[s1 : s1 + c1] = True
     if c2 > 0:
         lo2, hi2 = s1 + c1, max(s1 + c1, total - c2)
-        s2 = int(torch.randint(lo2, hi2 + 1, (1,), generator=generator)) if hi2 >= lo2 else lo2
-        keep[s2:s2 + c2] = True
+        s2 = (
+            int(torch.randint(lo2, hi2 + 1, (1,), generator=generator))
+            if hi2 >= lo2
+            else lo2
+        )
+        keep[s2 : s2 + c2] = True
     return keep.nonzero(as_tuple=True)[0]
 
 
@@ -100,13 +111,17 @@ def add_structural_noise(x, sigma, *, generator=None):
 def pad_or_crop(example, indices, size):
     """Select ``indices`` from a per-residue example and pad out to ``size``."""
     from fampnn.data.data import pad_to_max_len
+
     selected = {key: example[key][indices] for key in BATCH_KEYS}
-    return pad_to_max_len({key: value.unsqueeze(0) for key, value in selected.items()}, size)
+    return pad_to_max_len(
+        {key: value.unsqueeze(0) for key, value in selected.items()}, size
+    )
 
 
 @dataclass
 class ClusterIndex:
     """Training members grouped by cluster, for one-sample-per-cluster epochs."""
+
     clusters: dict
 
     @classmethod
@@ -148,8 +163,16 @@ class StructureCropDataset(Dataset):
     ``noise`` is the structural noise sigma; the two released models used 0.0 and 0.3.
     """
 
-    def __init__(self, paths, *, crop_size=256, noise=0.0, spatial_crop_p=0.5,
-                 seed=0, noise_targets=True):
+    def __init__(
+        self,
+        paths,
+        *,
+        crop_size=256,
+        noise=0.0,
+        spatial_crop_p=0.5,
+        seed=0,
+        noise_targets=True,
+    ):
         self.paths = [Path(p) for p in paths]
         if not self.paths:
             raise ValueError("StructureCropDataset needs at least one structure")
@@ -177,7 +200,9 @@ class StructureCropDataset(Dataset):
 
     def __getitem__(self, index):
         from fampnn.data.data import load_feats_from_pdb, process_single_pdb
+
         from fampnn.data import residue_constants as rc
+
         generator = self._generator(index)
         path = self.paths[index]
         example = process_single_pdb(load_feats_from_pdb(str(path)))
@@ -185,9 +210,16 @@ class StructureCropDataset(Dataset):
 
         chain_index = example["chain_index"]
         chains = torch.unique(chain_index)
-        if len(chains) == 2 and float(torch.rand((), generator=generator)) < self.spatial_crop_p:
-            indices = spatial_crop(example["x"][:, rc.atom_order["CA"]], chain_index,
-                                   self.crop_size, generator=generator)
+        if (
+            len(chains) == 2
+            and float(torch.rand((), generator=generator)) < self.spatial_crop_p
+        ):
+            indices = spatial_crop(
+                example["x"][:, rc.atom_order["CA"]],
+                chain_index,
+                self.crop_size,
+                generator=generator,
+            )
         elif len(chains) == 2:
             counts = [int((chain_index == c).sum()) for c in chains]
             indices = multimer_contiguous_crop(counts, self.crop_size, generator=generator)
@@ -213,12 +245,29 @@ def collate(items):
     return batch
 
 
-def build_loader(paths, *, batch_size=1, crop_size=256, noise=0.0, seed=0,
-                 num_workers=0, shuffle=True, **kwargs):
+def build_loader(
+    paths,
+    *,
+    batch_size=1,
+    crop_size=256,
+    noise=0.0,
+    seed=0,
+    num_workers=0,
+    shuffle=True,
+    **kwargs,
+):
     """A DataLoader over fixed-size crops."""
     from torch.utils.data import DataLoader
-    dataset = StructureCropDataset(paths, crop_size=crop_size, noise=noise,
-                                   seed=seed, **kwargs)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                        num_workers=num_workers, collate_fn=collate, drop_last=False)
+
+    dataset = StructureCropDataset(
+        paths, crop_size=crop_size, noise=noise, seed=seed, **kwargs
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate,
+        drop_last=False,
+    )
     return dataset, loader

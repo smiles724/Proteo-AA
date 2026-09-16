@@ -9,9 +9,10 @@ The only tolerated source modification is the checked-in PXDesign embedders
 patch, which adapts PXDesign's ``InputFeatureEmbedder`` to the Protenix 2.0
 ``atom_attention_encoder`` signature. FaMPNN is required to be pristine.
 """
-from pathlib import Path
+
 import hashlib
 import subprocess
+from pathlib import Path
 
 PINNED = {
     "pxdesign": "f788441313c84c3074fe9596ac2433f96b15c763",
@@ -73,8 +74,10 @@ def _is_exactly_patched(root, patches):
     paths = [str(repo_root() / patch) for patch in patches]
     if any(not Path(path).is_file() for path in paths):
         return False
-    result = subprocess.run(["git", "-C", str(root), "apply", "--reverse", "--check",
-                             *paths], capture_output=True)
+    result = subprocess.run(
+        ["git", "-C", str(root), "apply", "--reverse", "--check", *paths],
+        capture_output=True,
+    )
     return result.returncode == 0
 
 
@@ -97,9 +100,15 @@ def component_record(name, *, strict=True):
                 f"Unrecorded modifications to {name} source. The working tree must be "
                 f"HEAD plus exactly {list(allowed) or '<no patches>'}; keep upstream "
                 "otherwise pristine and put compatibility fixes in pxf.compat-style "
-                "runtime shims where possible.")
-    return dict(component=name, revision=revision, path=str(root),
-                patch_sha256=hashlib.sha256(diff).hexdigest(), patched=bool(diff.strip()))
+                "runtime shims where possible."
+            )
+    return dict(
+        component=name,
+        revision=revision,
+        path=str(root),
+        patch_sha256=hashlib.sha256(diff).hexdigest(),
+        patched=bool(diff.strip()),
+    )
 
 
 def runtime_sources(*, strict=True, components=("pxdesign", "protenix", "fampnn")):
@@ -110,13 +119,16 @@ def runtime_sources(*, strict=True, components=("pxdesign", "protenix", "fampnn"
 def fampnn_checkpoint(variant=DEFAULT_FAMPNN_WEIGHTS, *, root=None):
     """Resolve a FaMPNN weight variant to its path inside the submodule."""
     if variant not in FAMPNN_WEIGHTS:
-        raise ValueError(f"Unknown FaMPNN weights {variant!r}; choose from {sorted(FAMPNN_WEIGHTS)}")
+        raise ValueError(
+            f"Unknown FaMPNN weights {variant!r}; choose from {sorted(FAMPNN_WEIGHTS)}"
+        )
     base = Path(root) if root is not None else repo_root() / "fampnn" / "weights"
     path = base / FAMPNN_WEIGHTS[variant]
     if not path.is_file():
         raise ValueError(
             f"FaMPNN checkpoint not found: {path}. The weights ship inside the fampnn "
-            "submodule; run scripts/setup.sh to initialize it.")
+            "submodule; run scripts/setup.sh to initialize it."
+        )
     return path
 
 
@@ -125,7 +137,9 @@ def weight_record(path, *, variant=None):
     resolved = Path(path).resolve()
     if not resolved.is_file():
         raise ValueError(f"Weight file not found: {resolved}")
-    record = dict(path=str(resolved), sha256=file_sha256(resolved), bytes=resolved.stat().st_size)
+    record = dict(
+        path=str(resolved), sha256=file_sha256(resolved), bytes=resolved.stat().st_size
+    )
     if variant is not None:
         record.update(variant=variant, filename=FAMPNN_WEIGHTS[variant])
     return record

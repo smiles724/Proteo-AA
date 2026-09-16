@@ -1,4 +1,5 @@
 """Put the repo and all three upstreams on sys.path."""
+
 import sys
 from pathlib import Path
 

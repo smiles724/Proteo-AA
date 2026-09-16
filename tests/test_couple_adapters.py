@@ -1,4 +1,5 @@
 """Adapters must start as an exact no-op and gate cleanly by phase."""
+
 import pytest
 import torch
 
@@ -61,8 +62,12 @@ def test_wrong_input_width_is_refused():
 def test_phase_gating_selects_the_right_adapter():
     pair = CouplingAdapters(384, 128)
     assert pair.is_identity()
-    expected = {"frozen": (False, False), "bb_to_sc": (True, False),
-                "sc_to_bb": (False, True), "joint": (True, True)}
+    expected = {
+        "frozen": (False, False),
+        "bb_to_sc": (True, False),
+        "sc_to_bb": (False, True),
+        "joint": (True, True),
+    }
     for phase, (bs, sb) in expected.items():
         record = pair.set_phase(phase)
         assert record["bb_to_sc"] is bs and record["sc_to_bb"] is sb
@@ -88,4 +93,5 @@ def test_a_disabled_direction_returns_none():
 
 def test_identity_record_is_serializable():
     import json
+
     json.loads(json.dumps(CouplingAdapters(64, 32).identity()))

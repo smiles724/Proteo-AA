@@ -1,4 +1,5 @@
 """Staged objectives: weighting, masking, alternation, and the feedback guard."""
+
 import pytest
 import torch
 
@@ -21,12 +22,13 @@ def test_edm_weighting_falls_with_sigma():
 def test_reported_rmsd_is_unweighted():
     target, predicted = torch.zeros(1, 8, 3), torch.ones(1, 8, 3)
     stats = L.backbone_denoising_loss(predicted, target, sigma=3.0).stats
-    assert float(stats["backbone_rmsd_angstrom"]) == pytest.approx(3 ** 0.5)
+    assert float(stats["backbone_rmsd_angstrom"]) == pytest.approx(3**0.5)
 
 
 def test_atom_mask_restricts_the_score():
     target, predicted = torch.zeros(1, 8, 3), torch.ones(1, 8, 3)
-    mask = torch.zeros(1, 8); mask[0, :4] = 1
+    mask = torch.zeros(1, 8)
+    mask[0, :4] = 1
     stats = L.backbone_denoising_loss(predicted, target, sigma=1.0, atom_mask=mask).stats
     assert float(stats["scored_atoms"]) == 4.0
 
@@ -46,7 +48,13 @@ def test_phase_one_and_two_are_single_objective():
 def test_joint_alternates_deterministically_by_step():
     """Reproducible from the step number alone, not sampled."""
     assert [L.loss_kind_for("joint", s) for s in range(6)] == [
-        "sidechain", "backbone", "sidechain", "backbone", "sidechain", "backbone"]
+        "sidechain",
+        "backbone",
+        "sidechain",
+        "backbone",
+        "sidechain",
+        "backbone",
+    ]
 
 
 def test_frozen_and_unknown_phases_are_refused():
@@ -58,10 +66,12 @@ def test_frozen_and_unknown_phases_are_refused():
 
 def test_feedback_loss_refuses_the_uncorrected_backbone():
     """Scoring bb0 would leave A_SB untrained while still drawing a loss curve."""
+
     class Cycle:
         bb1_flat = None
         bb0_flat = torch.ones(1, 4, 3)
         delta_a = None
+
     with pytest.raises(ValueError, match="leave A_SB untrained"):
         L.backbone_feedback_loss(Cycle(), torch.zeros(1, 4, 3), sigma=1.0)
 
@@ -71,8 +81,10 @@ def test_feedback_loss_can_be_told_to_score_bb0_deliberately():
         bb1_flat = None
         bb0_flat = torch.ones(1, 4, 3)
         delta_a = None
-    loss = L.backbone_feedback_loss(Cycle(), torch.zeros(1, 4, 3), sigma=1.0,
-                                    require_feedback=False)
+
+    loss = L.backbone_feedback_loss(
+        Cycle(), torch.zeros(1, 4, 3), sigma=1.0, require_feedback=False
+    )
     assert float(loss.stats["used_correction"]) == 0.0
 
 
@@ -81,6 +93,7 @@ def test_feedback_loss_reports_the_correction_it_used():
         bb1_flat = torch.zeros(1, 4, 3)
         bb0_flat = torch.ones(1, 4, 3)
         delta_a = torch.full((1, 4, 8), 0.5)
+
     loss = L.backbone_feedback_loss(Cycle(), torch.zeros(1, 4, 3), sigma=1.0)
     assert float(loss.total) == 0.0
     assert float(loss.stats["used_correction"]) == 1.0

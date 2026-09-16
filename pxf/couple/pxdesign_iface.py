@@ -16,13 +16,19 @@ the recorded embedders patch. Hooks keep that guarantee intact, and
 :class:`BackboneTap` is a context manager so they are always removed --- a
 leaked hook would silently perturb every later call, including evaluation.
 """
+
 from dataclasses import dataclass
-from typing import Optional
+
 import torch
 
-# Positional index of the token features in AtomAttentionDecoder.forward:
+# Where the token features sit in AtomAttentionDecoder.forward:
 #   forward(self, atom_to_token_idx, a, q_skip, c_skip, p_skip, ...)
+# Protenix calls this BOTH ways depending on activation checkpointing --
+# positionally through checkpoint_fn, and with a= as a keyword otherwise -- so the
+# hook has to handle each. Assuming one form silently stops injecting under the
+# other, which looks like an adapter that learned nothing.
 DECODER_A_ARG = 1
+DECODER_A_KWARG = "a"
 
 
 class BackboneTap:
@@ -59,24 +65,37 @@ class BackboneTap:
         self.calls += 1
         return None
 
-    def _inject(self, module, args):
+    def _inject(self, module, args, kwargs):
         if self.feedback is None:
             return None
-        if len(args) <= DECODER_A_ARG:
-            raise ValueError(
-                f"AtomAttentionDecoder was called with {len(args)} positional "
-                "arguments; the token features are no longer at index "
-                f"{DECODER_A_ARG}, so feedback injection would corrupt the call")
-        a = args[DECODER_A_ARG]
         delta = self.feedback
-        if delta.shape[-1] != a.shape[-1]:
-            raise ValueError(f"Feedback width {delta.shape[-1]} does not match token "
-                             f"features {a.shape[-1]}")
-        updated = list(args)
-        updated[DECODER_A_ARG] = a + delta.to(a.dtype).to(a.device).expand_as(a) \
-            if delta.shape != a.shape else a + delta.to(a.dtype).to(a.device)
-        self.injections += 1
-        return tuple(updated)
+        if DECODER_A_KWARG in kwargs:
+            target = kwargs[DECODER_A_KWARG]
+            updated_kwargs = dict(kwargs)
+            updated_kwargs[DECODER_A_KWARG] = self._add(target, delta)
+            self.injections += 1
+            return args, updated_kwargs
+        if len(args) > DECODER_A_ARG:
+            updated = list(args)
+            updated[DECODER_A_ARG] = self._add(args[DECODER_A_ARG], delta)
+            self.injections += 1
+            return tuple(updated), kwargs
+        raise ValueError(
+            f"AtomAttentionDecoder was called with {len(args)} positional and "
+            f"{sorted(kwargs)} keyword arguments; the token features are at "
+            f"neither index {DECODER_A_ARG} nor {DECODER_A_KWARG!r}, so feedback "
+            "injection would corrupt the call"
+        )
+
+    @staticmethod
+    def _add(target, delta):
+        if delta.shape[-1] != target.shape[-1]:
+            raise ValueError(
+                f"Feedback width {delta.shape[-1]} does not match token "
+                f"features {target.shape[-1]}"
+            )
+        delta = delta.to(target.dtype).to(target.device)
+        return target + (delta.expand_as(target) if delta.shape != target.shape else delta)
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -85,7 +104,7 @@ class BackboneTap:
             raise RuntimeError("BackboneTap is already installed")
         self._handles = [
             self.layernorm.register_forward_hook(self._capture),
-            self.decoder.register_forward_pre_hook(self._inject),
+            self.decoder.register_forward_pre_hook(self._inject, with_kwargs=True),
         ]
         return self
 
@@ -129,6 +148,7 @@ class Conditioning:
     every call, so a coupled controller that evaluates the denoiser itself must
     hold them too.
     """
+
     s_inputs: torch.Tensor
     s_trunk: torch.Tensor
     z_trunk: torch.Tensor
@@ -137,13 +157,27 @@ class Conditioning:
     @classmethod
     def build(cls, model, input_feature_dict, *, chunk_size=None):
         s_inputs, s_trunk, z_trunk = model.get_condition_embedding(
-            input_feature_dict=input_feature_dict, chunk_size=chunk_size)
-        return cls(s_inputs=s_inputs, s_trunk=s_trunk, z_trunk=z_trunk,
-                   input_feature_dict=input_feature_dict)
+            input_feature_dict=input_feature_dict, chunk_size=chunk_size
+        )
+        return cls(
+            s_inputs=s_inputs,
+            s_trunk=s_trunk,
+            z_trunk=z_trunk,
+            input_feature_dict=input_feature_dict,
+        )
 
 
-def denoise(model, conditioning, x_noisy, sigma, *, tap=None, feedback=None,
-            chunk_size=None, inplace_safe=False):
+def denoise(
+    model,
+    conditioning,
+    x_noisy,
+    sigma,
+    *,
+    tap=None,
+    feedback=None,
+    chunk_size=None,
+    inplace_safe=False,
+):
     """One denoiser evaluation, returning ``(x_denoised, a_token)``.
 
     Called with the same keyword set PXDesign's own sampler uses, so the coupled
@@ -163,7 +197,8 @@ def denoise(model, conditioning, x_noisy, sigma, *, tap=None, feedback=None,
             s_trunk=conditioning.s_trunk,
             z_trunk=conditioning.z_trunk,
             chunk_size=chunk_size,
-            inplace_safe=inplace_safe)
+            inplace_safe=inplace_safe,
+        )
         return x_denoised, tap.a_token
     finally:
         if owned:

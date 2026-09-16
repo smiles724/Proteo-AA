@@ -4,6 +4,7 @@ This cluster mixes GPU generations. A torch build compiled through ``sm_90``
 reports a newer card as "available" and then dies on the first kernel launch, so
 the default path probes before committing.
 """
+
 import pytest
 import torch
 

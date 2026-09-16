@@ -15,24 +15,37 @@ Two invariants are enforced rather than trusted:
 * **The backbone is never moved.** Only the 33 side-chain slots may change; the
   backbone is restored from the input and the deviation is reported.
 """
+
 from pathlib import Path
+
 import torch
 from torch import nn
 
 from pxf import atom37, provenance
 
 # Upstream configs/pack.yaml defaults, kept in one place so drift is visible.
-DEFAULT_DIFFUSION = dict(num_steps=50, step_scale=1.5, timestep_mode="linear",
-                         t_start=0.0, t_end=1.0)
+DEFAULT_DIFFUSION = dict(
+    num_steps=50, step_scale=1.5, timestep_mode="linear", t_start=0.0, t_end=1.0
+)
 DEFAULT_CHURN = dict(s_churn=0, s_noise=1.0, s_t_min=0.01, s_t_max=50.0)
 
 
 class FaMPNNSideChainPacker(nn.Module):
     """Published FaMPNN, frozen, packing side chains onto a supplied sequence."""
 
-    def __init__(self, checkpoint=None, *, variant=provenance.DEFAULT_FAMPNN_WEIGHTS,
-                 num_steps=None, step_scale=None, timestep_mode=None,
-                 t_start=None, t_end=None, churn=None, strict_sources=True):
+    def __init__(
+        self,
+        checkpoint=None,
+        *,
+        variant=provenance.DEFAULT_FAMPNN_WEIGHTS,
+        num_steps=None,
+        step_scale=None,
+        timestep_mode=None,
+        t_start=None,
+        t_end=None,
+        churn=None,
+        strict_sources=True,
+    ):
         super().__init__()
         self.source = provenance.component_record("fampnn", strict=strict_sources)
         rc = atom37.assert_upstream_mapping()
@@ -44,6 +57,7 @@ class FaMPNNSideChainPacker(nn.Module):
         self.checkpoint_path = path
 
         from fampnn.model.sd_model import SeqDenoiser
+
         bundle = torch.load(path, map_location="cpu", weights_only=False)
         for key in ("state_dict", "model_cfg"):
             if key not in bundle:
@@ -57,22 +71,34 @@ class FaMPNNSideChainPacker(nn.Module):
         self.model_cfg = bundle["model_cfg"]
 
         self.diffusion = dict(DEFAULT_DIFFUSION)
-        for key, value in dict(num_steps=num_steps, step_scale=step_scale,
-                               timestep_mode=timestep_mode, t_start=t_start,
-                               t_end=t_end).items():
+        for key, value in dict(
+            num_steps=num_steps,
+            step_scale=step_scale,
+            timestep_mode=timestep_mode,
+            t_start=t_start,
+            t_end=t_end,
+        ).items():
             if value is not None:
                 self.diffusion[key] = value
         self.churn = dict(DEFAULT_CHURN, **(churn or {}))
 
         from omegaconf import OmegaConf
+
         self.identity = dict(
-            backend="fampnn", mode="sidechain_pack", designs_sequence=False,
-            variant=variant, weights=provenance.weight_record(path, variant=variant),
-            upstream=self.source, diffusion=dict(self.diffusion),
-            churn=dict(self.churn), stochastic=True,
+            backend="fampnn",
+            mode="sidechain_pack",
+            designs_sequence=False,
+            variant=variant,
+            weights=provenance.weight_record(path, variant=variant),
+            upstream=self.source,
+            diffusion=dict(self.diffusion),
+            churn=dict(self.churn),
+            stochastic=True,
             atom_mapping=atom37.mapping_record(),
             model_config=OmegaConf.to_container(self.model_cfg, resolve=True)
-            if OmegaConf.is_config(self.model_cfg) else dict(self.model_cfg))
+            if OmegaConf.is_config(self.model_cfg)
+            else dict(self.model_cfg),
+        )
 
     @property
     def device(self):
@@ -92,23 +118,40 @@ class FaMPNNSideChainPacker(nn.Module):
 
     def _timesteps(self, batch):
         from fampnn import sampling_utils
+
         steps = sampling_utils.get_timesteps_from_schedule(
-            mode=self.diffusion["timestep_mode"], num_steps=self.diffusion["num_steps"],
-            t_start=self.diffusion["t_start"], t_end=self.diffusion["t_end"])
+            mode=self.diffusion["timestep_mode"],
+            num_steps=self.diffusion["num_steps"],
+            t_start=self.diffusion["t_start"],
+            t_end=self.diffusion["t_end"],
+        )
         return steps[None].expand(batch, -1).to(self.device)
 
     def _scd_inputs(self, batch):
-        return {"num_steps": self.diffusion["num_steps"],
-                "timesteps": self._timesteps(batch),
-                "step_scale": self.diffusion["step_scale"],
-                "churn_cfg": dict(self.churn, num_steps=self.diffusion["num_steps"])}
+        return {
+            "num_steps": self.diffusion["num_steps"],
+            "timesteps": self._timesteps(batch),
+            "step_scale": self.diffusion["step_scale"],
+            "churn_cfg": dict(self.churn, num_steps=self.diffusion["num_steps"]),
+        }
 
     # ---- packing ----------------------------------------------------------
 
     @torch.no_grad()
-    def forward(self, *, coords_af2, aatype, atom_mask, seq_mask=None,
-                residue_index=None, chain_index=None, scn_context_mask=None,
-                batch_size=None, keep_input_backbone=True, seed=None):
+    def forward(
+        self,
+        *,
+        coords_af2,
+        aatype,
+        atom_mask,
+        seq_mask=None,
+        residue_index=None,
+        chain_index=None,
+        scn_context_mask=None,
+        batch_size=None,
+        keep_input_backbone=True,
+        seed=None,
+    ):
         """Pack side chains onto ``coords_af2`` for the supplied ``aatype``.
 
         ``coords_af2`` is ``[B, L, 37, 3]`` in the shared AF2 atom37 order and
@@ -130,15 +173,18 @@ class FaMPNNSideChainPacker(nn.Module):
         """
         if seed is not None:
             torch.manual_seed(int(seed))
-        (coords_af2, aatype, atom_mask, seq_mask, residue_index, chain_index,
-         unbatched) = self._normalize(coords_af2, aatype, atom_mask, seq_mask,
-                                      residue_index, chain_index)
+        (coords_af2, aatype, atom_mask, seq_mask, residue_index, chain_index, unbatched) = (
+            self._normalize(
+                coords_af2, aatype, atom_mask, seq_mask, residue_index, chain_index
+            )
+        )
         batch, length = aatype.shape
         if scn_context_mask is None:
             context = torch.zeros_like(seq_mask)
         else:
-            context = self._as_batched(scn_context_mask, "scn_context_mask",
-                                       batch, length).to(self.device)
+            context = self._as_batched(
+                scn_context_mask, "scn_context_mask", batch, length
+            ).to(self.device)
 
         chunk = int(batch_size) if batch_size else batch
         coords_out, psce_out = [], []
@@ -150,13 +196,17 @@ class FaMPNNSideChainPacker(nn.Module):
             # Chunking changes how noise is drawn, so a seeded run must fix the
             # grouping too; batch_size is recorded in the identity for that reason.
             packed, echoed, aux = self.model.sidechain_pack(
-                coords_af2[piece], aatype[piece],
-                seq_mask=seq_mask[piece], missing_atom_mask=missing,
-                residue_index=residue_index[piece], chain_index=chain_index[piece],
+                coords_af2[piece],
+                aatype[piece],
+                seq_mask=seq_mask[piece],
+                missing_atom_mask=missing,
+                residue_index=residue_index[piece],
+                chain_index=chain_index[piece],
                 # Every position's identity is supplied: the model designs nothing.
                 aatype_override_mask=seq_mask[piece].long(),
                 scn_override_mask=context[piece].long(),
-                scd_inputs=self._scd_inputs(size))
+                scd_inputs=self._scd_inputs(size),
+            )
             self._assert_sequence_untouched(aatype[piece], echoed, seq_mask[piece])
             coords_out.append(packed)
             psce_out.append(aux["psce"])
@@ -166,10 +216,14 @@ class FaMPNNSideChainPacker(nn.Module):
         backbone_shift = self._backbone_shift(coords_af2, packed, atom_mask)
         if keep_input_backbone:
             packed = self._restore_backbone(packed, coords_af2, atom_mask)
-        result = dict(coords_af2=packed, aatype=aatype, psce=psce,
-                      atom_mask_af2=self._output_atom_mask(aatype, atom_mask),
-                      backbone_shift=backbone_shift,
-                      sequence=[atom37.sequence_from_aatype(row) for row in aatype])
+        result = dict(
+            coords_af2=packed,
+            aatype=aatype,
+            psce=psce,
+            atom_mask_af2=self._output_atom_mask(aatype, atom_mask),
+            backbone_shift=backbone_shift,
+            sequence=[atom37.sequence_from_aatype(row) for row in aatype],
+        )
         if unbatched:
             # Mirror the caller's layout: a single structure in, a single one out.
             for key in ("coords_af2", "aatype", "psce", "atom_mask_af2"):
@@ -191,7 +245,8 @@ class FaMPNNSideChainPacker(nn.Module):
         if rows not in (1, batch):
             raise ValueError(
                 f"{name} with shape {tuple(tensor.shape)} does not match coordinates "
-                f"[{batch}, {length}{''.join(f', {s}' for s in trailing)}]")
+                f"[{batch}, {length}{''.join(f', {s}' for s in trailing)}]"
+            )
         tensor = tensor.reshape(rows, length, *trailing)
         if rows == 1 and batch > 1:
             tensor = tensor.expand(batch, length, *trailing)
@@ -203,7 +258,9 @@ class FaMPNNSideChainPacker(nn.Module):
         if unbatched:
             coords = coords.unsqueeze(0)
         if coords.dim() != 4 or coords.shape[-2:] != (atom37.NUM_ATOM37, 3):
-            raise ValueError(f"Expected [B, L, 37, 3] coordinates, got {tuple(coords.shape)}")
+            raise ValueError(
+                f"Expected [B, L, 37, 3] coordinates, got {tuple(coords.shape)}"
+            )
         batch, length = coords.shape[0], coords.shape[1]
 
         aatype = self._as_batched(aatype, "aatype", batch, length, dtype=torch.long)
@@ -212,20 +269,43 @@ class FaMPNNSideChainPacker(nn.Module):
             raise ValueError(
                 "aatype contains unknown residues at (batch, position) "
                 f"{offenders}. FaMPNN packs a *given* sequence and will not design one; "
-                "supply a canonical identity at every position.")
-        atom_mask = self._as_batched(atom_mask, "atom_mask", batch, length,
-                                     trailing=(atom37.NUM_ATOM37,))
-        seq_mask = (torch.ones(batch, length) if seq_mask is None
-                    else self._as_batched(seq_mask, "seq_mask", batch, length))
-        residue_index = (torch.arange(length).expand(batch, length) if residue_index is None
-                         else self._as_batched(residue_index, "residue_index", batch, length,
-                                               dtype=torch.long))
-        chain_index = (torch.zeros(batch, length, dtype=torch.long) if chain_index is None
-                       else self._as_batched(chain_index, "chain_index", batch, length,
-                                             dtype=torch.long))
-        move = lambda t: t.contiguous().to(self.device)
-        return (move(coords.float()), move(aatype), move(atom_mask), move(seq_mask),
-                move(residue_index), move(chain_index), unbatched)
+                "supply a canonical identity at every position."
+            )
+        atom_mask = self._as_batched(
+            atom_mask, "atom_mask", batch, length, trailing=(atom37.NUM_ATOM37,)
+        )
+        seq_mask = (
+            torch.ones(batch, length)
+            if seq_mask is None
+            else self._as_batched(seq_mask, "seq_mask", batch, length)
+        )
+        residue_index = (
+            torch.arange(length).expand(batch, length)
+            if residue_index is None
+            else self._as_batched(
+                residue_index, "residue_index", batch, length, dtype=torch.long
+            )
+        )
+        chain_index = (
+            torch.zeros(batch, length, dtype=torch.long)
+            if chain_index is None
+            else self._as_batched(
+                chain_index, "chain_index", batch, length, dtype=torch.long
+            )
+        )
+
+        def move(tensor):
+            return tensor.contiguous().to(self.device)
+
+        return (
+            move(coords.float()),
+            move(aatype),
+            move(atom_mask),
+            move(seq_mask),
+            move(residue_index),
+            move(chain_index),
+            unbatched,
+        )
 
     @staticmethod
     def _assert_sequence_untouched(supplied, echoed, seq_mask):
@@ -235,7 +315,8 @@ class FaMPNNSideChainPacker(nn.Module):
             changed = int((supplied[real].long() != echoed[real].long()).sum())
             raise ValueError(
                 f"FaMPNN altered the sequence at {changed} position(s); this pipeline packs "
-                "a given sequence and must not design one. Refusing the result.")
+                "a given sequence and must not design one. Refusing the result."
+            )
 
     @staticmethod
     def _backbone_shift(before, after, atom_mask):
@@ -244,15 +325,16 @@ class FaMPNNSideChainPacker(nn.Module):
         if not bool(present.any()):
             return None
         delta = (before[..., slots, :] - after[..., slots, :])[present]
-        return float(torch.sqrt((delta ** 2).sum(-1).mean()))
+        return float(torch.sqrt((delta**2).sum(-1).mean()))
 
     @staticmethod
     def _restore_backbone(packed, original, atom_mask):
         slots = list(atom37.BACKBONE_SLOTS)
         present = atom_mask[..., slots].bool()
         packed = packed.clone()
-        packed[..., slots, :] = torch.where(present[..., None], original[..., slots, :],
-                                            packed[..., slots, :])
+        packed[..., slots, :] = torch.where(
+            present[..., None], original[..., slots, :], packed[..., slots, :]
+        )
         return packed
 
     def _output_atom_mask(self, aatype, atom_mask):

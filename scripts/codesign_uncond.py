@@ -17,6 +17,7 @@ Outputs, per sample: a full-atom PDB (psCE in the B-factor column), the designed
 sequence as FASTA, and a manifest row. Residue numbering is carried over from the
 input so the scorer's residue pairing joins correctly.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,12 +36,18 @@ SAMPLE_RE = re.compile(r"^L(?P<length>\d+)_s(?P<index>\d+)$")
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--samples-dir", required=True, help="directory of backbone-only CIFs")
     p.add_argument("--out", required=True)
-    p.add_argument("--lengths", type=int, nargs="*", default=None,
-                   help="restrict to these lengths (default: all present)")
+    p.add_argument(
+        "--lengths",
+        type=int,
+        nargs="*",
+        default=None,
+        help="restrict to these lengths (default: all present)",
+    )
     p.add_argument("--max-per-length", type=int, default=0, help="0 = all")
     p.add_argument("--fampnn-weights", default="0.3", choices=("0.0", "0.3", "0.3-cath"))
     p.add_argument("--fampnn-checkpoint", default=None)
@@ -65,8 +72,9 @@ def backbone_from_record(record, atom37_order, backbone_slots):
     names = {name: slot for slot, name in enumerate(atom37_order)}
     wanted = {atom37_order[i] for i in backbone_slots}
     residues, order = {}, []
-    for res_id, atom_name, coord in zip(record["res_id"], record["atom_name"],
-                                        record["coord"]):
+    for res_id, atom_name, coord in zip(
+        record["res_id"], record["atom_name"], record["coord"]
+    ):
         if atom_name not in wanted:
             continue
         key = int(res_id)
@@ -89,6 +97,7 @@ def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from fampnn.model.sd_model import SeqDenoiser
+
     from pxf import atom37
     from pxf.device import select_device
     from pxf.eval.canonical import load as load_canonical
@@ -117,22 +126,29 @@ def main(argv=None):
                 seen[length] = seen.get(length, 0) + 1
         entries = kept
     if args.shard_count > 1:
-        entries = entries[args.shard_index::args.shard_count]
+        entries = entries[args.shard_index :: args.shard_count]
     per_length = {}
     for length, _, _ in entries:
         per_length[length] = per_length.get(length, 0) + 1
-    logger.info("%d sample(s) to co-design: %s", len(entries),
-                ", ".join(f"L{k}={v}" for k, v in sorted(per_length.items())))
+    logger.info(
+        "%d sample(s) to co-design: %s",
+        len(entries),
+        ", ".join(f"L{k}={v}" for k, v in sorted(per_length.items())),
+    )
 
-    canonical = load_canonical()          # for load_structure (cif reader)
+    canonical = load_canonical()  # for load_structure (cif reader)
     designer = FaMPNNFullAtomDesigner(
-        args.fampnn_checkpoint, variant=args.fampnn_weights, seq_steps=args.seq_steps,
+        args.fampnn_checkpoint,
+        variant=args.fampnn_weights,
+        seq_steps=args.seq_steps,
         temperature=args.temperature,
         psce_threshold=None if args.psce_threshold < 0 else args.psce_threshold,
-        strict_sources=not args.allow_unpinned_sources)
+        strict_sources=not args.allow_unpinned_sources,
+    )
     designer = designer.to(select_device(args.device))
-    logger.info("FaMPNN %s (%s) on %s", designer.variant, designer.identity["mode"],
-                designer.device)
+    logger.info(
+        "FaMPNN %s (%s) on %s", designer.variant, designer.identity["mode"], designer.device
+    )
 
     backbone_slots = list(atom37.BACKBONE_SLOTS)
     manifest, failures = [], []
@@ -141,19 +157,26 @@ def main(argv=None):
         try:
             record = canonical.uncond.load_structure(str(path))
             coords, mask, residue_index = backbone_from_record(
-                record, atom37.ATOM37, backbone_slots)
+                record, atom37.ATOM37, backbone_slots
+            )
             if coords.shape[0] != length:
-                raise ValueError(f"file holds {coords.shape[0]} residues, name says {length}")
+                raise ValueError(
+                    f"file holds {coords.shape[0]} residues, name says {length}"
+                )
             present = mask[:, backbone_slots].sum(-1)
             if not bool((present == len(backbone_slots)).all()):
-                raise ValueError(f"{int((present < len(backbone_slots)).sum())} residue(s) "
-                                 "lack a complete N/CA/C/O backbone")
+                raise ValueError(
+                    f"{int((present < len(backbone_slots)).sum())} residue(s) "
+                    "lack a complete N/CA/C/O backbone"
+                )
 
             result = designer.design(
-                coords_af2=coords[None], atom_mask=mask[None],
+                coords_af2=coords[None],
+                atom_mask=mask[None],
                 residue_index=residue_index[None],
                 chain_index=torch.zeros(1, length, dtype=torch.long),
-                seed=args.seed + 1000 * index + length)
+                seed=args.seed + 1000 * index + length,
+            )
             design = result["designs"][0]
 
             pdb_path = out / "samples" / f"{name}.pdb"
@@ -170,23 +193,37 @@ def main(argv=None):
             fasta_path = out / "samples" / f"{name}.fasta"
             fasta_path.write_text(f">{name}\n{design.sequence}\n")
 
-            manifest.append(dict(
-                sample_id=name, length=length, index=index,
-                backbone_cif=str(path), pdb=str(pdb_path.relative_to(out)),
-                fasta=str(fasta_path.relative_to(out)),
-                sequence=design.sequence,
-                mean_psce=float(design.psce.mean()),
-                n_atoms=int(design.atom_mask_af2.sum()),
-                backbone_shift_angstrom=result["backbone_shift"]))
+            manifest.append(
+                dict(
+                    sample_id=name,
+                    length=length,
+                    index=index,
+                    backbone_cif=str(path),
+                    pdb=str(pdb_path.relative_to(out)),
+                    fasta=str(fasta_path.relative_to(out)),
+                    sequence=design.sequence,
+                    mean_psce=float(design.psce.mean()),
+                    n_atoms=int(design.atom_mask_af2.sum()),
+                    backbone_shift_angstrom=result["backbone_shift"],
+                )
+            )
             if position % 10 == 0 or position == len(entries) - 1:
-                logger.info("[%d/%d] %s L=%d psce %.3f shift %.4f A",
-                            position + 1, len(entries), name, length,
-                            manifest[-1]["mean_psce"],
-                            manifest[-1]["backbone_shift_angstrom"])
-        except Exception as error:                      # one bad sample must not end the draw
+                logger.info(
+                    "[%d/%d] %s L=%d psce %.3f shift %.4f A",
+                    position + 1,
+                    len(entries),
+                    name,
+                    length,
+                    manifest[-1]["mean_psce"],
+                    manifest[-1]["backbone_shift_angstrom"],
+                )
+        except Exception as error:  # one bad sample must not end the draw
             logger.warning("%s FAILED: %s: %s", name, type(error).__name__, error)
-            failures.append(dict(sample_id=name, length=length,
-                                 error=f"{type(error).__name__}: {error}"))
+            failures.append(
+                dict(
+                    sample_id=name, length=length, error=f"{type(error).__name__}: {error}"
+                )
+            )
 
     combined = out / f"codesign_shard{args.shard_index:03d}of{args.shard_count:03d}.fasta"
     with combined.open("w") as stream:
@@ -194,16 +231,30 @@ def main(argv=None):
             stream.write(f">{row['sample_id']}\n{row['sequence']}\n")
 
     record = dict(
-        samples_dir=str(samples_dir), n_requested=len(entries), n_designed=len(manifest),
-        n_failed=len(failures), per_length=per_length, failures=failures,
+        samples_dir=str(samples_dir),
+        n_requested=len(entries),
+        n_designed=len(manifest),
+        n_failed=len(failures),
+        per_length=per_length,
+        failures=failures,
         combined_fasta=str(combined.relative_to(out)),
-        provenance=dict(task="pxdesign backbone -> fampnn sequence + side chains",
-                        sidechain=designer.identity, metrics=canonical.record()),
-        arguments=vars(args), designs=manifest)
+        provenance=dict(
+            task="pxdesign backbone -> fampnn sequence + side chains",
+            sidechain=designer.identity,
+            metrics=canonical.record(),
+        ),
+        arguments=vars(args),
+        designs=manifest,
+    )
     suffix = f"_shard{args.shard_index:03d}of{args.shard_count:03d}"
     (out / f"codesign{suffix}.json").write_text(json.dumps(record, indent=2, default=str))
-    logger.info("co-designed %d/%d sample(s) into %s (%d failed)",
-                len(manifest), len(entries), out, len(failures))
+    logger.info(
+        "co-designed %d/%d sample(s) into %s (%d failed)",
+        len(manifest),
+        len(entries),
+        out,
+        len(failures),
+    )
     return 0 if manifest else 1
 
 

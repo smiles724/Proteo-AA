@@ -1,4 +1,5 @@
 """Provenance must pin both components and tolerate only the recorded patch."""
+
 import pytest
 
 from pxf import provenance
@@ -55,7 +56,10 @@ def test_weight_record_digests_the_file(tmp_path):
     target = tmp_path / "w.pt"
     target.write_bytes(b"abc")
     record = provenance.weight_record(target)
-    assert record["sha256"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    assert (
+        record["sha256"]
+        == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    )
     assert record["bytes"] == 3
 
 

@@ -1,4 +1,5 @@
 """Both modules must agree on atom37, or coordinates scramble silently."""
+
 import pytest
 import torch
 
@@ -33,6 +34,7 @@ def test_a_reordered_upstream_is_rejected():
         restypes = tuple(atom37.AA_ORDER)
         restype_order_with_x = {"X": 20}
         non_bb_idxs = atom37.SIDECHAIN_SLOTS
+
     with pytest.raises(ValueError, match="atom37 order differs"):
         atom37.assert_upstream_mapping(Fake)
 
@@ -43,6 +45,7 @@ def test_a_reordered_residue_vocabulary_is_rejected():
         restypes = tuple("ACDEFGHIKLMNPQRSTVWY")  # alphabetical, not AF2
         restype_order_with_x = {"X": 20}
         non_bb_idxs = atom37.SIDECHAIN_SLOTS
+
     with pytest.raises(ValueError, match="residue order differs"):
         atom37.assert_upstream_mapping(Fake)
 
@@ -69,6 +72,7 @@ def test_unknown_index_decodes_to_x():
 
 def test_mapping_record_states_no_permutation_and_serializes():
     import json
+
     record = atom37.mapping_record()
     assert record["permutation_required"] is False
     assert record["mapping_version"] == atom37.MAPPING_VERSION

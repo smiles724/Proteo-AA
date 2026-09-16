@@ -22,3 +22,25 @@ include = ["pxf*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+# 92 rather than the default 88: it is where this code already sits, so the
+# style is enforced without a mass reflow that would bury real changes in diffs.
+line-length = 92
+target-version = "py310"
+# Upstream submodules are vendored commit pointers and must stay pristine.
+extend-exclude = ["PXDesign", "Protenix", "fampnn"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = [
+    "E501",    # line length is handled by the formatter, not the linter
+    "B008",    # argparse/torch idioms call in defaults
+    "B905",    # zip(strict=): adding it changes runtime behaviour (raises on
+               # length mismatch) rather than formatting, so it is a separate
+               # decision from tidying the code. Most call sites here validate
+               # lengths explicitly just above the zip.
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pxf"]

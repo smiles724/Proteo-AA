@@ -6,6 +6,7 @@ comparable to the earlier side-chain runs. What is tested here is therefore the
 slot were misaddressed the numbers would still look plausible, so the identity
 case (native scored against itself) is the load-bearing check.
 """
+
 import pytest
 import torch
 
@@ -25,7 +26,9 @@ def canonical():
 @pytest.fixture(scope="module")
 def native():
     from fampnn.data.data import load_feats_from_pdb, process_single_pdb
+
     from pxf.provenance import repo_root
+
     single = process_single_pdb(load_feats_from_pdb(str(repo_root() / TARGET)))
     return single["x"], single["atom_mask"], single["aatype"].long()
 
@@ -40,6 +43,7 @@ def test_metrics_are_loaded_not_reimplemented(canonical):
 def test_loading_does_not_pull_in_the_training_model_stack(canonical):
     # pxdesign_train/__init__.py would build the PXDesign/Protenix training model.
     import sys
+
     assert "pxdesign_train" in sys.modules
     assert not hasattr(sys.modules["pxdesign_train"], "ProtenixDesignTrain")
 
@@ -54,8 +58,11 @@ def test_slot_table_addresses_the_right_atoms(canonical):
     assert table.shape == (20, canonical.instantiate.MAX_SC)
     for index, name3 in enumerate(canonical.instantiate.STD_AA_3):
         expected = canonical.instantiate.sidechain_atoms(name3)
-        got = [atom37.ATOM37[slot] for slot, ok in
-               zip(table[index].tolist(), valid[index].tolist()) if ok]
+        got = [
+            atom37.ATOM37[slot]
+            for slot, ok in zip(table[index].tolist(), valid[index].tolist())
+            if ok
+        ]
         assert got == expected, name3
     # Glycine has no side chain; tryptophan fills all ten slots.
     assert not valid[atom37.AA_ORDER.index("G")].any()
@@ -107,8 +114,9 @@ def test_residue_mask_restricts_scoring(native, canonical):
     half = torch.zeros(length, dtype=torch.bool)
     half[: length // 2] = True
     _, whole = score(coords, mask, coords, mask, aatype, canonical=canonical)
-    _, part = score(coords, mask, coords, mask, aatype, canonical=canonical,
-                    residue_mask=half)
+    _, part = score(
+        coords, mask, coords, mask, aatype, canonical=canonical, residue_mask=half
+    )
     assert part["scored_residues"] == length // 2 < whole["scored_residues"]
     assert float(part["observed_atoms"]) < float(whole["observed_atoms"])
 
@@ -129,23 +137,29 @@ def test_aggregate_is_atom_weighted_not_a_mean_of_means(native, canonical):
     noisy = coords.clone()
     noisy[:, SIDECHAIN] += 0.4 * torch.randn_like(noisy[:, SIDECHAIN])
 
-    small = torch.zeros(length, dtype=torch.bool); small[:8] = True
-    large = torch.zeros(length, dtype=torch.bool); large[8:] = True
-    counts_small, summary_small = score(noisy, mask, coords, mask, aatype,
-                                        canonical=canonical, residue_mask=small)
-    counts_large, summary_large = score(noisy, mask, coords, mask, aatype,
-                                       canonical=canonical, residue_mask=large)
+    small = torch.zeros(length, dtype=torch.bool)
+    small[:8] = True
+    large = torch.zeros(length, dtype=torch.bool)
+    large[8:] = True
+    counts_small, summary_small = score(
+        noisy, mask, coords, mask, aatype, canonical=canonical, residue_mask=small
+    )
+    counts_large, summary_large = score(
+        noisy, mask, coords, mask, aatype, canonical=canonical, residue_mask=large
+    )
     combined = aggregate([counts_small, counts_large], canonical=canonical)
 
     assert combined["n_targets"] == 2
     # The pooled RMSD must sit within the two, and near the larger group.
     low, high = sorted((summary_small["symmetry_rmsd"], summary_large["symmetry_rmsd"]))
     assert low - 1e-6 <= combined["symmetry_rmsd"] <= high + 1e-6
-    assert abs(combined["symmetry_rmsd"] - summary_large["symmetry_rmsd"]) < \
-           abs(combined["symmetry_rmsd"] - summary_small["symmetry_rmsd"])
+    assert abs(combined["symmetry_rmsd"] - summary_large["symmetry_rmsd"]) < abs(
+        combined["symmetry_rmsd"] - summary_small["symmetry_rmsd"]
+    )
     # Counts are additive; ratios are formed once at the end.
     assert float(combined["observed_atoms"]) == pytest.approx(
-        float(counts_small["observed_atoms"]) + float(counts_large["observed_atoms"]))
+        float(counts_small["observed_atoms"]) + float(counts_large["observed_atoms"])
+    )
 
 
 def test_aggregate_pools_lddt_by_pair_count(native, canonical):

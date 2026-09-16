@@ -1,10 +1,11 @@
 """Weight averaging, the schedule, and checkpoint/resume semantics."""
+
 import pytest
 import torch
 from torch import nn
 
 from pxf.train.ema import EMA
-from pxf.train.trainer import OptimSettings, TrainSettings, Trainer, learning_rate
+from pxf.train.trainer import OptimSettings, Trainer, TrainSettings, learning_rate
 
 
 def tiny():
@@ -16,6 +17,7 @@ def tiny():
 
 
 # ---- EMA -------------------------------------------------------------------
+
 
 def test_constant_decay_averages_as_expected():
     model = tiny()
@@ -29,7 +31,7 @@ def test_constant_decay_averages_as_expected():
 
 
 def test_relative_length_decay_rises_toward_one():
-    """"EMA length of 25%" means a window that grows with training."""
+    """ "EMA length of 25%" means a window that grows with training."""
     ema = EMA(tiny(), relative_length=0.25)
     decays = []
     for step in (10, 100, 1000, 10000):
@@ -54,7 +56,7 @@ def test_relative_length_is_range_checked():
 
 def test_swap_restores_the_live_weights():
     model = tiny()
-    ema = EMA(model, decay=0.0)          # shadow tracks the model exactly
+    ema = EMA(model, decay=0.0)  # shadow tracks the model exactly
     with torch.no_grad():
         model.weight.fill_(7.0)
     ema.update(model)
@@ -100,6 +102,7 @@ def test_snapshot_is_plain_cpu_weights():
 
 # ---- schedule --------------------------------------------------------------
 
+
 def test_warmup_is_linear_and_reaches_the_target():
     settings = OptimSettings(lr=1e-3, warmup_steps=100, schedule="constant")
     assert learning_rate(0, settings, 1000) == pytest.approx(1e-5)
@@ -123,22 +126,38 @@ def test_unknown_schedule_is_rejected():
 
 # ---- checkpoints -----------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def trained(tmp_path_factory):
     """A very short real run, so checkpoint semantics are tested on real state."""
     from fampnn.model.sd_model import SeqDenoiser
+
     from pxf.provenance import fampnn_checkpoint, repo_root
     from pxf.train.data import build_loader
+
     bundle = torch.load(fampnn_checkpoint("0.0"), map_location="cpu", weights_only=False)
     model = SeqDenoiser(bundle["model_cfg"])
     model.load_state_dict(bundle["state_dict"], strict=True)
-    paths = [str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1033")]
+    paths = [
+        str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1033")
+    ]
     dataset, loader = build_loader(paths, batch_size=2, crop_size=48, shuffle=False)
     out = tmp_path_factory.mktemp("run")
-    trainer = Trainer(model, bundle["model_cfg"], loader, out_dir=out, dataset=dataset,
-                      optim=OptimSettings(lr=3e-4, warmup_steps=2),
-                      train=TrainSettings(max_steps=4, log_every=2, checkpoint_every=0,
-                                          ema_relative_length=0.25, train_confidence=False))
+    trainer = Trainer(
+        model,
+        bundle["model_cfg"],
+        loader,
+        out_dir=out,
+        dataset=dataset,
+        optim=OptimSettings(lr=3e-4, warmup_steps=2),
+        train=TrainSettings(
+            max_steps=4,
+            log_every=2,
+            checkpoint_every=0,
+            ema_relative_length=0.25,
+            train_confidence=False,
+        ),
+    )
     result = trainer.train(progress=None)
     return trainer, result, bundle
 
@@ -149,6 +168,7 @@ def test_a_short_run_completes_and_logs(trained):
     log = trainer.out_dir / "train_log.jsonl"
     assert log.is_file() and log.read_text().strip()
     import json
+
     record = json.loads(log.read_text().splitlines()[0])
     assert "loss_main" in record and "grad_norm" in record and "window_steps" in record
 
@@ -168,19 +188,26 @@ def test_checkpoint_serves_inference_and_resume(trained):
 
 def test_trained_checkpoint_loads_into_upstream_inference(trained):
     from fampnn.model.sd_model import SeqDenoiser
+
     _, result, _ = trained
     state = torch.load(result["checkpoint"], map_location="cpu", weights_only=False)
     model = SeqDenoiser(state["model_cfg"])
-    model.load_state_dict(state["state_dict"], strict=True)   # must be strict
+    model.load_state_dict(state["state_dict"], strict=True)  # must be strict
     assert hasattr(model, "sidechain_pack")
 
 
 def test_resume_restores_step_and_optimizer(trained):
     trainer, result, bundle = trained
     from fampnn.model.sd_model import SeqDenoiser
+
     fresh = SeqDenoiser(bundle["model_cfg"])
-    twin = Trainer(fresh, bundle["model_cfg"], trainer.loader, out_dir=trainer.out_dir,
-                   train=TrainSettings(ema_relative_length=0.25))
+    twin = Trainer(
+        fresh,
+        bundle["model_cfg"],
+        trainer.loader,
+        out_dir=trainer.out_dir,
+        train=TrainSettings(ema_relative_length=0.25),
+    )
     assert twin.resume(result["checkpoint"]) == 4
     assert twin.step == 4
     assert twin.optimizer.state_dict()["state"], "optimizer moments should be restored"
@@ -190,6 +217,7 @@ def test_released_weights_cannot_be_resumed(trained):
     """They carry only state_dict + model_cfg, so say so instead of half-resuming."""
     trainer, _, bundle = trained
     from pxf.provenance import fampnn_checkpoint
+
     with pytest.raises(ValueError, match="cannot be resumed"):
         trainer.resume(fampnn_checkpoint("0.0"))
 
@@ -202,23 +230,35 @@ def test_training_actually_reduces_the_loss(tmp_path):
     or a detached target would pass all the contract tests and fail this one.
     """
     import json
+
     from fampnn.model.sd_model import SeqDenoiser
+
     from pxf.provenance import fampnn_checkpoint, repo_root
     from pxf.train.data import build_loader
 
     bundle = torch.load(fampnn_checkpoint("0.0"), map_location="cpu", weights_only=False)
     model = SeqDenoiser(bundle["model_cfg"])
     model.load_state_dict(bundle["state_dict"], strict=True)
-    paths = [str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1033")]
+    paths = [
+        str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1033")
+    ]
     dataset, loader = build_loader(paths, batch_size=2, crop_size=64, shuffle=False, seed=0)
-    trainer = Trainer(model, bundle["model_cfg"], loader, out_dir=tmp_path, dataset=dataset,
-                      optim=OptimSettings(lr=3e-4, warmup_steps=5),
-                      train=TrainSettings(max_steps=60, log_every=10, checkpoint_every=0,
-                                          train_confidence=False, seed=0))
+    trainer = Trainer(
+        model,
+        bundle["model_cfg"],
+        loader,
+        out_dir=tmp_path,
+        dataset=dataset,
+        optim=OptimSettings(lr=3e-4, warmup_steps=5),
+        train=TrainSettings(
+            max_steps=60, log_every=10, checkpoint_every=0, train_confidence=False, seed=0
+        ),
+    )
     trainer.train(progress=None)
 
-    records = [json.loads(line) for line in
-               (tmp_path / "train_log.jsonl").read_text().splitlines()]
+    records = [
+        json.loads(line) for line in (tmp_path / "train_log.jsonl").read_text().splitlines()
+    ]
     assert len(records) >= 4
     first, last = records[0]["loss_main"], records[-1]["loss_main"]
     assert last < first / 3, f"loss_main only moved {first:.4f} -> {last:.4f}"

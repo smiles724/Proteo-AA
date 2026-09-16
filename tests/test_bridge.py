@@ -1,4 +1,5 @@
 """PXDesign's ragged atom list must densify into atom37 without losing an atom."""
+
 import pytest
 import torch
 
@@ -34,7 +35,9 @@ def test_empty_slots_stay_zero():
 
 def test_leading_dimensions_are_preserved():
     names, tokens, _, coords = _two_residues()
-    dense, mask, _ = bridge.atoms_to_atom37(coords.expand(3, len(names), 3), names, tokens, 2)
+    dense, mask, _ = bridge.atoms_to_atom37(
+        coords.expand(3, len(names), 3), names, tokens, 2
+    )
     assert dense.shape == (3, 2, 37, 3)
     assert mask.shape == (3, 2, 37)
 

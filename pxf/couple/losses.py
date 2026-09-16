@@ -15,31 +15,45 @@ side-chain sampler into A_BS would make the two adapters compete through a
 50-step rollout, which is expensive and gives poor credit assignment; alternating
 keeps each adapter's gradient attributable to one objective.
 """
+
 from dataclasses import dataclass
-from typing import Optional
+
 import torch
 
 from pxf.couple import fampnn_iface as iface
-from pxf.train import losses as base
 from pxf.train import step as train_step
 
 
 @dataclass
 class CoupledLoss:
     """One phase's loss and its diagnostics."""
+
     total: torch.Tensor
     kind: str
     stats: dict
 
     def scalars(self):
         out = {"loss": float(self.total), "loss_kind": self.kind}
-        out.update({k: float(v) for k, v in self.stats.items()
-                    if isinstance(v, (int, float)) or torch.is_tensor(v)})
+        out.update(
+            {
+                k: float(v)
+                for k, v in self.stats.items()
+                if isinstance(v, (int, float)) or torch.is_tensor(v)
+            }
+        )
         return out
 
 
-def sidechain_coupling_loss(model, batch, features, *, delta_h=None,
-                            multiplier=None, self_cond_p=None, generator=None):
+def sidechain_coupling_loss(
+    model,
+    batch,
+    features,
+    *,
+    delta_h=None,
+    multiplier=None,
+    self_cond_p=None,
+    generator=None,
+):
     """``L_SC``: FaMPNN's own diffusion objective, conditioned through ``A_BS``.
 
     ``features`` is the encoder's feature dict for the *generated* backbone;
@@ -50,16 +64,21 @@ def sidechain_coupling_loss(model, batch, features, *, delta_h=None,
     """
     conditioned = iface.with_residual(features, delta_h)
     loss, stats = train_step.diffusion_loss(
-        model, batch, conditioned, multiplier=multiplier,
-        self_cond_p=self_cond_p, generator=generator)
+        model,
+        batch,
+        conditioned,
+        multiplier=multiplier,
+        self_cond_p=self_cond_p,
+        generator=generator,
+    )
     stats = dict(stats)
-    stats["delta_h_norm"] = (torch.tensor(0.0) if delta_h is None
-                             else delta_h.detach().norm(dim=-1).mean())
+    stats["delta_h_norm"] = (
+        torch.tensor(0.0) if delta_h is None else delta_h.detach().norm(dim=-1).mean()
+    )
     return CoupledLoss(total=loss, kind="sidechain", stats=stats)
 
 
-def backbone_denoising_loss(predicted, target, *, sigma, sigma_data=16.0,
-                            atom_mask=None):
+def backbone_denoising_loss(predicted, target, *, sigma, sigma_data=16.0, atom_mask=None):
     """``L_BB``: EDM-weighted denoising loss on the corrected backbone.
 
     ``predicted`` and ``target`` are coordinates on the same axis (PXDesign's
@@ -74,9 +93,9 @@ def backbone_denoising_loss(predicted, target, *, sigma, sigma_data=16.0,
     sigma = torch.as_tensor(sigma, dtype=torch.float32, device=predicted.device)
     if sigma.dim() == 0:
         sigma = sigma.reshape(1)
-    squared = (predicted.float() - target.float()).pow(2).sum(-1)     # [..., N_atom]
+    squared = (predicted.float() - target.float()).pow(2).sum(-1)  # [..., N_atom]
     # c_out(sigma) = sigma * sigma_data / sqrt(sigma^2 + sigma_data^2)
-    c_out = sigma * sigma_data / torch.sqrt(sigma ** 2 + sigma_data ** 2)
+    c_out = sigma * sigma_data / torch.sqrt(sigma**2 + sigma_data**2)
     weight = 1.0 / c_out.clamp_min(1e-8) ** 2
     while weight.dim() < squared.dim():
         weight = weight[..., None]
@@ -84,14 +103,20 @@ def backbone_denoising_loss(predicted, target, *, sigma, sigma_data=16.0,
     total = (squared * weight * mask).sum() / mask.sum().clamp_min(1.0)
     with torch.no_grad():
         rmsd = ((squared * mask).sum() / mask.sum().clamp_min(1.0)).sqrt()
-    return CoupledLoss(total=total, kind="backbone",
-                       stats=dict(scored_atoms=mask.sum().detach(),
-                                  backbone_rmsd_angstrom=rmsd,
-                                  sigma=sigma.mean().detach()))
+    return CoupledLoss(
+        total=total,
+        kind="backbone",
+        stats=dict(
+            scored_atoms=mask.sum().detach(),
+            backbone_rmsd_angstrom=rmsd,
+            sigma=sigma.mean().detach(),
+        ),
+    )
 
 
-def backbone_feedback_loss(cycle, target, *, sigma, sigma_data=16.0, atom_mask=None,
-                           require_feedback=True):
+def backbone_feedback_loss(
+    cycle, target, *, sigma, sigma_data=16.0, atom_mask=None, require_feedback=True
+):
     """``L_BB`` on a cycle's corrected backbone ``X_BB^1``.
 
     Refuses to fall back to the uncorrected proposal: scoring ``bb0`` would train
@@ -102,14 +127,19 @@ def backbone_feedback_loss(cycle, target, *, sigma, sigma_data=16.0, atom_mask=N
             raise ValueError(
                 "The cycle produced no corrected backbone, so this loss would "
                 "score the uncorrected proposal and leave A_SB untrained. Enable "
-                "the SC->BB adapter, or pass require_feedback=False deliberately.")
+                "the SC->BB adapter, or pass require_feedback=False deliberately."
+            )
         predicted = cycle.bb0_flat
     else:
         predicted = cycle.bb1_flat
-    loss = backbone_denoising_loss(predicted, target, sigma=sigma,
-                                   sigma_data=sigma_data, atom_mask=atom_mask)
-    loss.stats["delta_a_norm"] = (torch.tensor(0.0) if cycle.delta_a is None
-                                  else cycle.delta_a.detach().norm(dim=-1).mean())
+    loss = backbone_denoising_loss(
+        predicted, target, sigma=sigma, sigma_data=sigma_data, atom_mask=atom_mask
+    )
+    loss.stats["delta_a_norm"] = (
+        torch.tensor(0.0)
+        if cycle.delta_a is None
+        else cycle.delta_a.detach().norm(dim=-1).mean()
+    )
     loss.stats["used_correction"] = torch.tensor(float(cycle.bb1_flat is not None))
     return loss
 

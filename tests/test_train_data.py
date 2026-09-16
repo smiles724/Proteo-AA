@@ -1,4 +1,5 @@
 """Cropping, padding and structural noise, per Appendix B.1 / B.3."""
+
 import pytest
 import torch
 
@@ -47,7 +48,8 @@ def test_spatial_crop_seeds_at_the_interface():
     # Two well-separated blobs; the crop should straddle the closest pair.
     a = torch.randn(100, 3) + torch.tensor([0.0, 0, 0])
     b = torch.randn(100, 3) + torch.tensor([50.0, 0, 0])
-    a[-1] = torch.tensor([24.0, 0, 0]); b[0] = torch.tensor([26.0, 0, 0])
+    a[-1] = torch.tensor([24.0, 0, 0])
+    b[0] = torch.tensor([26.0, 0, 0])
     coords = torch.cat([a, b])
     chains = torch.cat([torch.zeros(100), torch.ones(100)]).long()
     indices = D.spatial_crop(coords, chains, 40)
@@ -80,16 +82,21 @@ def test_cluster_index_samples_one_member_per_cluster(tmp_path):
 
 
 def test_cluster_index_rejects_an_empty_file(tmp_path):
-    empty = tmp_path / "e.csv"; empty.write_text("cluster,path\n")
+    empty = tmp_path / "e.csv"
+    empty.write_text("cluster,path\n")
     with pytest.raises(ValueError, match="No cluster,path rows"):
         D.ClusterIndex.from_csv(empty)
 
 
 def test_dataset_produces_fixed_size_batches_with_padding_marked():
     from pxf.provenance import repo_root
-    paths = [str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1024")]
-    dataset, loader = D.build_loader(paths, batch_size=2, crop_size=96, noise=0.3,
-                                     shuffle=False)
+
+    paths = [
+        str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1024")
+    ]
+    dataset, loader = D.build_loader(
+        paths, batch_size=2, crop_size=96, noise=0.3, shuffle=False
+    )
     batch = next(iter(loader))
     for key in D.BATCH_KEYS:
         assert batch[key].shape[:2] == (2, 96), key
@@ -100,8 +107,11 @@ def test_dataset_produces_fixed_size_batches_with_padding_marked():
 
 def test_epoch_changes_the_crop():
     from pxf.provenance import repo_root
-    path = str(repo_root() / "fampnn/data/casp14/pdbs/T1024.pdb")   # 391 residues
+
+    path = str(repo_root() / "fampnn/data/casp14/pdbs/T1024.pdb")  # 391 residues
     dataset = D.StructureCropDataset([path], crop_size=64, seed=0)
-    dataset.set_epoch(0); first = dataset[0]["x"].clone()
-    dataset.set_epoch(1); second = dataset[0]["x"]
+    dataset.set_epoch(0)
+    first = dataset[0]["x"].clone()
+    dataset.set_epoch(1)
+    second = dataset[0]["x"]
     assert not torch.equal(first, second), "a new epoch should resample the crop"

@@ -1,4 +1,5 @@
 """The conversion layer owns every representation mismatch; each is checked."""
+
 import pytest
 import torch
 
@@ -34,7 +35,10 @@ def test_design_tokens_become_unknown_identities(converter):
     inputs = converter.px_backbone_to_fampnn(coords, names, tokens, 2, res_names=res_names)
     assert inputs.design_mask.tolist() == [False, True]
     assert inputs.sequence_known.tolist() == [True, False]
-    assert inputs.aatype[0].tolist() == [atom37.AA_ORDER.index("L"), atom37.UNKNOWN_AA_INDEX]
+    assert inputs.aatype[0].tolist() == [
+        atom37.AA_ORDER.index("L"),
+        atom37.UNKNOWN_AA_INDEX,
+    ]
 
 
 def test_sample_axis_folds_into_the_batch(converter):
@@ -60,8 +64,9 @@ def test_backbone_is_preserved_when_placing_side_chains(converter):
     inputs = converter.px_backbone_to_fampnn(coords, names, tokens, 2, res_names=res_names)
     block = torch.full((2, 33, 3), 9.0)
     out = converter.fampnn_sidechains_to_px(block, inputs.coords_af2[0])
-    assert torch.equal(out[:, converter.backbone_slots],
-                       inputs.coords_af2[0][:, converter.backbone_slots])
+    assert torch.equal(
+        out[:, converter.backbone_slots], inputs.coords_af2[0][:, converter.backbone_slots]
+    )
     assert bool((out[:, converter.sidechain_slots] == 9.0).all())
 
 
@@ -89,7 +94,8 @@ def test_unknown_atom_names_are_marked_invalid_not_placed(converter):
 
 def test_chain_ids_are_compacted_and_numbering_kept(converter):
     residue, chain = converter.map_chain_and_residue_indices(
-        4, chain_index=[7, 7, 9, 9], residue_index=[10, 11, 3, 4])
+        4, chain_index=[7, 7, 9, 9], residue_index=[10, 11, 3, 4]
+    )
     assert chain.tolist() == [0, 0, 1, 1]
     assert residue.tolist() == [10, 11, 3, 4]
 
@@ -109,4 +115,9 @@ def test_fampnn_kwargs_cover_the_module_signature(converter):
     names, tokens, res_names, coords = _two_residues()
     inputs = converter.px_backbone_to_fampnn(coords, names, tokens, 2, res_names=res_names)
     assert set(inputs.fampnn_kwargs()) == {
-        "coords_af2", "atom_mask", "seq_mask", "residue_index", "chain_index"}
+        "coords_af2",
+        "atom_mask",
+        "seq_mask",
+        "residue_index",
+        "chain_index",
+    }

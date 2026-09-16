@@ -219,6 +219,10 @@ def main():
     ap.add_argument("--plm-checkpoint", default=ESM2_650M)
     ap.add_argument("--max-epochs", type=int, default=200)
     ap.add_argument("--accum", type=int, default=8, help="stands in for APM's 8 GPUs")
+    # APM's sampler settings for 80GB GPUs (pretrain_sidechain.yaml). Exposed so
+    # a smoke run can shrink them without editing the sampler.
+    ap.add_argument("--max-batch-size", type=int, default=64)
+    ap.add_argument("--max-num-res-squared", type=int, default=400_000)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--clip", type=float, default=5.0)
     ap.add_argument("--seed", type=int, default=123)
@@ -261,7 +265,9 @@ def main():
     files = [root / f"{n}.pkl" for n in meta["pdb_name"].astype(str)]
 
     train = APMPackingDataset(files, crop_size=None, seed=args.seed)
-    sampler = LengthBatcher(meta, seed=args.seed)
+    sampler = LengthBatcher(meta, seed=args.seed,
+                            max_batch_size=args.max_batch_size,
+                            max_num_res_squared=args.max_num_res_squared)
     val = post2021_val_files(APM_TEST_DIR, APM_TEST_IDS)
 
     packer = build_model(args.arm, args.plm_checkpoint, device)
@@ -274,6 +280,8 @@ def main():
                   filtered_out=n_raw - len(files), clusters=int(meta.cluster.nunique()),
                   batches_per_epoch=len(list(iter(sampler))), accum=args.accum,
                   val_chains=len(val), lr=args.lr, clip=args.clip,
+                  max_batch_size=args.max_batch_size,
+                  max_num_res_squared=args.max_num_res_squared,
                   max_epochs=args.max_epochs, seed=args.seed,
                   loss="supervised_chi_loss(1.0, norm 0.02) + sidechain_fape (APM, weight 1.0)",
                   diffuse_mask="APM packing convention: 1 for every modelled residue",

@@ -253,3 +253,189 @@ log-normal(−1.2, 1.5)，中位数 σ=0.301，`feature_sigma=0.4` 正落在 57.
 3. **前向是随机的**（照搬 APM 的随机扭转输入）。
 4. 坐标损失不是 FAPE（见上）。
 5. 只有一个 seed。
+
+---
+
+# 第二轮：完全沿用 APM 的 architecture + code 逻辑，换成 yfsun 新生成的 data
+
+（2026-09-15 起。上面那一轮跑在 PXDesign 的数据和我们自己的损失上；这一轮的目标是让
+**除了序列条件这一路以外，一切都是 APM 的**。）
+
+## 先说结论：这一轮不"移植"损失，而是直接调 APM 的代码
+
+上一轮的损失是我们自己的 `sidechain_global_frame_aligned_loss`。APM 在
+`train_packing_only` 下的损失是（`flow_module.py:model_step`）：
+
+```
+train_loss = supervised_chi_loss(chi_weight=1, angle_norm_weight=0.02)   # openfold
+           + cal_sidechain_fape_loss(...)                                # flow_module:461
+```
+
+两项权重都是 1.0——`torsions_loss_weight: 0.5` 在 `pretrain_sidechain.yaml` 里确实写了，
+但它只作用于 `line 415` 的 multiflow 式 `torsions_vf_loss`，走不到这个分支。
+
+`cal_sidechain_fape_loss` 依赖 openfold 的 rigid-group 表、`atom14_*` ground truth 和
+原子改名（`compute_renamed_ground_truth`）。本来打算移植，后来发现**不需要**：
+apm_reference 里 vendored 了完整的 openfold，缺的只有三个导入期依赖。补上之后，
+APM 的 featuriser 和 loss 在我们的 env 里直接可调。
+
+```
+pip install --no-deps --target /hai/scratch/shenjm/pyextra dm-tree lightning-utilities torchmetrics
+/hai/scratch/shenjm/pyextra/torch_scatter.py    # 纯 torch 的 scatter/scatter_add 垫片
+PYTHONPATH=...:/hai/scratch/shenjm/apm_reference:/hai/scratch/shenjm/pyextra
+```
+
+装在 env **旁边**而不是 env 里，所以 proteoaa 本身没被改动。
+（`torch_scatter` 只在 `apm/data/utils.py` 的模块级 import 和 batch-OT 代码里用到，
+走不到 featurisation 路径；垫片仍然写了真实实现，因为一个"能 import 但算错"的
+stub 比 import 失败更糟。）
+
+## 这一轮各部分的来源
+
+| 部分 | 来源 | 文件 |
+|---|---|---|
+| 网络 | 我们的移植（已证明等价，max\|diff\| 1.0e-05 rad） | `pxdesign_train/sidechain/packer.py` |
+| featurisation | **APM 本人** `_process_csv_row_FAESM` | `pxdesign_train/sidechain/apm_dataset.py`（只是包一层） |
+| L_chi | **openfold 本人** `supervised_chi_loss` | `pxdesign_train/sidechain/apm_loss.py` |
+| sidechain FAPE | APM 的 glue 逐行誊写，每个张量操作仍是 openfold 的函数 | 同上 |
+| batch sampler | `LengthBatcher_nonRep` 的单副本复刻 | `scripts/training/train_packer_apm_data.py` |
+| 过滤 | **APM 本人** `_length_filter` / `_max_coil_filter` / `_rog_filter` | 同上 |
+| 优化器 | AdamW(1e-4, β=0.95/0.999)，clip 5.0 norm | 同上 |
+
+## 一个刻意保留的 APM bug
+
+`apm/data/datasets.py:247`：
+
+```python
+torsions_1    = torsion_angles[:, -4:]     # chi1..chi4
+bb_torsion_1  = torsions_1[:, :3]          # 于是 bb_torsions_1 = chi1..chi3
+```
+
+而 `cal_sidechain_fape_loss` 把 `bb_torsions_1` 拼到 `torsion_angles_to_frames`
+读作 omega/phi/psi 的前三个槽位。也就是说：**APM 把 chi1-3 当成 omega/phi/psi 喂进去了。**
+
+影响范围有限：这三个角只驱动 rigid group 1-3，atom14 里只有 O 原子属于 group 3(psi)，
+所以后果是主链 O 的 frame 错了、给 FAPE 贡献一个近似常数项，侧链本身没被污染。
+
+**我们照抄了这个 bug。** 理由：released checkpoint 就是在这个目标函数下训出来的，
+在这里"修好"就意味着新的 run 优化的东西和 reference 从来不是同一个。
+
+## 数据
+
+`/hai/scratch/yfsun/apm/extracted/data_APM`
+
+| 目录 | 数量 | 这一轮是否用 |
+|---|---|---|
+| `pdb_monomer` | 18,684 | **是** |
+| `pdb_multimer` | 11,620 | 否 |
+| `afdb` | 235,692 | 否 |
+
+`meta_data.csv` 里 `train_set` 那 18,684 行和 `pdb_monomer` 一一对应，且已经是
+APM 的过滤结果（60–384 残基、coil ≤ 0.5、monomeric、单链）。跑一遍 APM 自己的
+过滤函数确认，只有 rog_quantile 会再掉一点。
+
+**AFDB 和 multimer 是有意排除的偏离**，APM 的 `pdb_dataset` 里 `use_AFDB: True` /
+`use_multimer: True`。排除理由：AFDB 的侧链是 AlphaFold 的预测，用它训 packer 学到的是
+"复现 AF2 的 packing"而不是晶体学；multimer 排除是为了让训练集和 monomeric 的
+post-2021 验证集口径一致。四个 arm 用同一份数据，所以 arm 之间的比较不受影响。
+
+一个 epoch = 每个 cluster 采 1 条 = 3,694 条 = 540 个 batch（单副本）。
+APM 用 8 卡、accumulate 1，所以一次 optimizer step 吃 8 个 batch；我们单卡 `--accum 8`
+对齐有效 batch，代价是梯度是累积出来的而不是 all-reduce 出来的。
+
+**一个 batch 里全是同长度的链**（按 `modeled_seq_len` 分组），所以全程没有 padding。
+batch size = `min(64, 400000 // L² + 1)`，因此 L=384 时只有 3 条、L≤79 时才吃到 64。
+
+还有一条 APM 的行为值得记下来：当某个长度组凑不满 batch 时，
+`batch_repeats = bs // len(batch)` 会把这些样本**重复**填满。实测一个真实 epoch：
+540 个 batch、3,694 条 unique、6,373 个 forward slot，**平均重复 1.73 倍**。
+也就是说名义 batch size 高估了每步看到的不同蛋白数。这是他们的代码，照抄。
+
+## 参数量的实话
+
+移植对齐到 released 配置之后：
+
+| | 参数 |
+|---|---|
+| 我们的模块，合计（四臂相同） | **17,498,890** |
+| 其中和 APM checkpoint 同名同形状 | 16,896,244（546 张量，逐个核对过） |
+| 我们自己多出来的 | `a_proj` 196,864 + `plm_conditioner` 396,322 + `atom_embed` 9,472 |
+| checkpoint 里在我们这边是 buffer 而非参数的 | 两个 `torsion_embedding.freq_bands`，各 6 个常数 |
+
+（之前记的 10.28M 是对齐之前那个更小的默认配置，不是这个。）
+
+四个 arm 构造**同一套参数**是刻意的——消融要改的是信息不是容量，
+所以 `none` 臂上 `a_proj` 也照样构造，只是乘 0。代价是 `plm_conditioner`
+在非 PLM 臂上永远拿不到梯度。一度把它改成按需构造，被
+`test_the_four_arms_share_one_parameter_set` 拦下来了；那个测试是对的，已回退。
+改成训练时**实测**并打印：
+
+```
+PARAMS {"total": 17498890, "receiving_gradient": 17093096,
+        "inert_modules": ["atom_embed", "plm_conditioner"]}
+```
+
+让容量报告诚实，而不是为了报告好看去改模型。
+（`atom_embed` 不吃梯度是因为这一轮的损失只读扭转角，不读它喂给
+Protenix diffusion head 的那两路原子特征。）
+
+## a_token 的特征桥：noise 到底是多少
+
+用户要求 noise = 0 而不是 0.4。这里必须把两件都叫"noise"的事分开：
+
+1. **加在坐标上的高斯扰动** —— 设成**严格的 0**。用的是已经存在的
+   `residue_type.clean_coordinate_input`，trunk 看到的是原生 backbone。
+
+2. **写进 time channel 的那个数** —— EDM 的条件量是
+   `c_noise = ln(σ/σ_data)/4`（`Protenix/protenix/model/modules/diffusion.py:162`），
+   **σ=0 时是 −∞**。所以 σ=0 不是"要不要"的问题，是这个网络根本无法表示的输入。
+   条件 σ 因此钉在 `--sigma-floor`，默认 **4e-4**，即 Protenix 自己的 `s_min`
+   （`configs_base.py:172`）——采样 schedule 的终点噪声，也就是 trunk 被要求
+   条件化过的最干净状态。它带来的 `c_in = 1/sqrt(σ²+σ_data²)` 与 σ=0 处相差
+   3e-10（相对）。
+
+实际用的数字写进 cache manifest，不让任何读者去猜。
+
+`--check` 模式在训练前验四件事，因为它们各有各的"静默出错"方式：
+
+- **长度**：a_token 的行数 == packer 看到的残基数
+- **对齐**：第 i 行是不是 packer 的第 i 个残基（按三字母名比对；光看长度会漏掉
+  "一个插入配一个删除"）
+- **确定性**：重复 forward 是否复现
+- **σ**：regime A（坐标零噪声 + σ_floor）和 regime B（有噪声 + σ=0.4，即上一轮
+  a_token 臂训练时的设定）之间 a_token 到底差多少 —— 这是测出来的，不是断言的
+
+### 桥为什么要绕 mmCIF
+
+trunk 吃的是 Protenix 的 feature dict，APM 的 pkl 只有裸数组。走
+`APM pkl → mmCIF → CifFileProvider → DesignSourceDataset` 是因为这条路
+CASP benchmark 和 design run 已经在用，命名/顺序/entity 的约定都被跑过了。
+
+一个必须处理的细节：`_process_csv_row_FAESM` 切的是
+`modeled_idx.min() .. .max()` 这个**连续区间**，不是 `modeled_idx` 本身。
+抽样 300 条，11% 的链区间里有没有坐标的残基（占残基总数 0.19%）。
+只写有坐标的残基会让 a_token 比其它张量短几行，并且每个 gap 之后整条链错位一格。
+所以这些残基通过 `entity.full_sequence` 进 `_entity_poly_seq`，被 Protenix
+tokenise 成 unresolved —— 它们本来就是 unresolved，`res_mask` 也已经这么说了。
+
+坐标先过 APM 的 `parse_chain_feats`（CA 质心平移、未观测原子置零），
+让 trunk 读到的数和 packer 建 frame 用的数是同一份，而不是它的一个平移。
+
+## 现在的状态
+
+- `none` / `plm` 两臂：已具备提交条件，等 smoke（job 117525）确认后提交正式 run。
+- a_token 桥：job 117532 在跑一致性检查；通过之后才会预算 a_token / both 两臂。
+- 评测：`eval_on_apm_testset.py` 新增 `apmdata_<arm>` 方法名，和旧的 `ours_<arm>`
+  分开列——它们是不同的模型，合在一个标签下会分不清。新臂在评测时拿 APM 的
+  `diffuse_mask` 语义（每个 modelled 残基都是 1），旧臂拿它们训练时的语义
+  （侧链归属，GLY=0），因为这是网络输入不是记账掩码。
+
+## 代码在哪里
+
+| | 路径 |
+|---|---|
+| 我们的代码 | `/hai/scratch/shenjm/wt_torsion_packer`（branch `sjm/sc-apm-torsion-packer`） |
+| APM 原始代码 | `/hai/scratch/shenjm/apm_reference`（`github.com/bytedance/apm` @ `a98e59b1`） |
+| APM 权重 / 测试集 | `/hai/scratch/shenjm/apm_weights` |
+| 新数据 | `/hai/scratch/yfsun/apm/extracted/data_APM` |
+| 旁装依赖 | `/hai/scratch/shenjm/pyextra` |

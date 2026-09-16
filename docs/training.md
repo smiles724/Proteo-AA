@@ -206,3 +206,83 @@ given and a change in the loss could no longer be read as a change in packing.
 Not verified: a full-scale 100k/300k run, or that these settings reproduce the
 paper's reported numbers. The optimizer is our choice, so reproduction is not
 expected without tuning.
+
+## Does the coupling work? The held-out measurement
+
+`train_couple.py` reports `L_SC` — FaMPNN's diffusion loss, at randomly drawn
+noise levels, **on the structures it is fitting**. That curve cannot answer the
+question phase 1 poses. It says the adapter fit something; it does not say the
+packing improved, and it says nothing about structures the adapter never saw.
+Phase 1 as shipped produced no validation of any kind.
+
+`scripts/eval_couple.py` is the measurement:
+
+```bash
+# export the held-out set once (val split; the phase 1 manifest is train split)
+python scripts/export_afdb_cifs.py --count 256 --split val \
+    --out-dir /hai/scratch/yfsun/afdb_laproteina/cif_val \
+    --manifest configs/val_structures_afdb.txt
+
+CHECKPOINT=.../phase1_<jobid>/checkpoints/final.pt \
+    OUT=/hai/scratch/yfsun/proteo_aa_runs/pxf_eval_couple/phase1 \
+    sbatch scripts/slurm/eval_couple.sh
+```
+
+The split is disjoint by construction and checked: 2,000 train ids against 256
+val ids, intersection 0.
+
+### Two arms, and why that is the right control
+
+Every structure is packed twice — once with the adapters live, once with
+`enable_bb_to_sc=False` — at the same σ_B, from the same noise draw, under the
+same RNG seed. Because the adapters are **zero-initialized**, the disabled arm
+does not approximate the pretrained system, it *is* the pretrained system. And
+in phase 1 the backbone proposal is computed before `A_BS` is applied, so both
+arms see a bit-identical backbone and the proposal's own error cancels out of the
+delta.
+
+Running with no `--checkpoint` is the pipeline's self-test rather than a wasted
+job: with untrained adapters the two arms must come out identical to the last
+digit. They do.
+
+### σ_B is swept, not sampled
+
+Both adapters take log σ_B as input, so one evaluation point licenses a claim
+only at that point. The sweep walks the same window the schedule draws from in
+training, and the report is per-σ as well as pooled — an adapter that helps at
+low noise and hurts at high noise is a real outcome that pooling hides.
+
+### The frame correction, which is not optional
+
+`sidechain_metrics.score` builds one set of residue frames from the reference and
+uses it for both structures, on the stated grounds that the backbone is shared.
+That is true for `eval_protenix_sidechain.py`, which packs onto the deposited
+backbone. **It is false here, twice over:** the featurizer centers the structure
+while FaMPNN's parse of the same file does not, so the two are not in a common
+frame at all; and the backbone being packed is a diffusion proposal, not the
+deposited one. Scoring without correcting for this reports ~20 Å RMSD on a
+perfectly good packing — which is how the problem was found.
+
+`place_on_native_backbone` transfers each residue's side chain through its own
+backbone frame, making the shared-backbone assumption true by construction. What
+is then measured is side-chain conformation relative to its own backbone: the
+standard side-chain accuracy quantity, invariant to global pose, isolating
+packing from backbone error. Backbone error is reported separately, per σ, as
+Kabsch-superposed `backbone_rmsd`, so "packing improved while the proposal
+drifted" stays distinguishable from "both improved".
+`test_a_rigidly_moved_prediction_scores_as_its_own_geometry` pins the invariance.
+
+### Smoke-tested end to end
+
+One 34-residue val structure, CPU, 20 pack steps, untrained adapters:
+
+| σ_B | backbone RMSD | side-chain RMSD | rotamer recovery | bad bonds |
+|---:|---:|---:|---:|---:|
+| 0.010 | 0.014 Å | 1.563 Å | 0.621 | 0.000 |
+| 4.881 | 1.101 Å | 2.693 Å | 0.414 | 0.079 |
+
+Both arms identical at every σ, as they must be with zero adapters. The
+monotone degradation with σ_B, and a backbone that lands at 0.014 Å when there is
+almost no noise to remove, are what say the cycle and the frame handling are
+wired up correctly. These are not performance numbers — one short protein, a
+truncated rollout.

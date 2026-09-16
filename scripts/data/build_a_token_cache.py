@@ -109,7 +109,7 @@ def main():
     ap.add_argument("--cif-dir", default="", help="where CIFs go (default <out>/cif)")
     ap.add_argument("--checkpoint",
                     default="/hai/scratch/shenjm/pxdesign_official/pxdesign_v0.1.0.pt")
-    ap.add_argument("--data-root", default="/hai/scratch/yfsun")
+    ap.add_argument("--data-root", default="/hai/scratch/yfsun/protenix_data")
     ap.add_argument("--sigma-floor", type=float, default=PROTENIX_S_MIN)
     ap.add_argument("--compare-sigma", type=float, default=0.4,
                     help="second sigma to quantify against, in --check mode")

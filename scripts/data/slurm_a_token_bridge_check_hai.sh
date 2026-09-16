@@ -16,7 +16,7 @@ set -euo pipefail
 REPO=${PROTEOAA_REPO:-/hai/scratch/shenjm/wt_torsion_packer}
 export PYTHONPATH="$REPO:$REPO/PXDesign:$REPO/Protenix:${APM_REFERENCE:-/hai/scratch/shenjm/apm_reference}:${PYEXTRA:-/hai/scratch/shenjm/pyextra}"
 export LAYERNORM_TYPE=torch OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1
-export PROTENIX_ROOT_DIR=${PROTENIX_ROOT_DIR:-/hai/scratch/yfsun}
+export PROTENIX_ROOT_DIR=${PROTENIX_ROOT_DIR:-/hai/scratch/yfsun/protenix_data}
 cd "$REPO"
 mkdir -p logs/data
 

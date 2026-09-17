@@ -36,14 +36,11 @@ def structure():
         seed=0,
     )
     item = collate([dataset[0]])
-    available = (
-        torch.as_tensor(
-            __import__(
-                "fampnn.data.residue_constants", fromlist=["x"]
-            ).STANDARD_ATOM_MASK_WITH_X
-        )[item["aatype"].long()]
-        * (1.0 - item["missing_atom_mask"])
-    )
+    available = torch.as_tensor(
+        __import__(
+            "fampnn.data.residue_constants", fromlist=["x"]
+        ).STANDARD_ATOM_MASK_WITH_X
+    )[item["aatype"].long()] * (1.0 - item["missing_atom_mask"])
     return dict(coords=item["x"], aatype=item["aatype"].long(), available=available)
 
 
@@ -82,9 +79,7 @@ def test_chi_is_recovered_after_a_known_rotation(structure, rc):
     delta = math.radians(37.0)
     deltas = torch.zeros(*aatype.shape, torsions.MAX_CHI)
     deltas[..., 0] = delta
-    moved = torsions.perturb_chi(
-        coords, aatype, deltas, available=available, tables=tables
-    )
+    moved = torsions.perturb_chi(coords, aatype, deltas, available=available, tables=tables)
     after, valid_after = torsions.chi_angles(
         moved, aatype, available=available, tables=tables
     )
@@ -105,9 +100,7 @@ def test_a_rotation_preserves_the_backbone_and_the_covalent_geometry(structure, 
         generator=torch.Generator().manual_seed(0),
         tables=tables,
     )
-    moved = torsions.perturb_chi(
-        coords, aatype, deltas, available=available, tables=tables
-    )
+    moved = torsions.perturb_chi(coords, aatype, deltas, available=available, tables=tables)
     backbone = list(atom37.BACKBONE_SLOTS)
     assert torch.allclose(moved[..., backbone, :], coords[..., backbone, :], atol=1e-5)
 
@@ -145,9 +138,7 @@ def test_a_perturbation_actually_moves_the_side_chains(structure, rc):
         generator=torch.Generator().manual_seed(1),
         tables=tables,
     )
-    moved = torsions.perturb_chi(
-        coords, aatype, deltas, available=available, tables=tables
-    )
+    moved = torsions.perturb_chi(coords, aatype, deltas, available=available, tables=tables)
     sidechain = list(atom37.SIDECHAIN_SLOTS)
     shift = (moved[..., sidechain, :] - coords[..., sidechain, :]).norm(dim=-1)
     assert float(shift.max()) > 0.5, "a 60 degree chi rotation moved nothing"
@@ -188,3 +179,47 @@ def test_chi_is_invariant_to_a_rigid_motion(structure, rc):
     moved = (coords.double() @ q + torch.tensor([3.0, -7.0, 11.0])).to(coords.dtype)
     after, _ = torsions.chi_angles(moved, aatype, available=available)
     assert torch.allclose(before[valid], after[valid], atol=1e-3)
+
+
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the device mismatch only exists on a GPU"
+)
+
+
+@needs_cuda
+def test_a_cpu_generator_drives_a_cuda_draw(rc):
+    """The bug the evaluator's smoke run found.
+
+    A ``torch.Generator`` is bound to a device and torch refuses to mix, so a
+    CPU generator against CUDA tensors raised "Expected a 'cuda' device type for
+    generator but found 'cpu'". Callers hold CPU generators on purpose -- seeding
+    one per example is how the evaluation stays reproducible -- so the draw moves
+    to the generator rather than the other way round.
+    """
+    aatype = torch.tensor([[1, 11, 18, 7]], device="cuda")
+    for generator in (torch.Generator(), torch.Generator(device="cuda")):
+        generator.manual_seed(0)
+        deltas = torsions.random_chi_deltas(aatype, 1.0, generator=generator)
+        assert deltas.device.type == "cuda"
+        assert (
+            deltas.shape
+            == (1, 4, torsions.MAX_CHI)[0:1]
+            + (
+                4,
+                torsions.MAX_CHI,
+            )[1:]
+        )
+        coords = torch.randn(1, 4, 37, 3, device="cuda")
+        moved = torsions.perturb_chi(coords, aatype, deltas)
+        assert moved.device.type == "cuda"
+
+
+@needs_cuda
+def test_the_same_cpu_seed_gives_the_same_cuda_perturbation(rc):
+    """Reproducibility has to survive the device hop, or the arms diverge."""
+    aatype = torch.tensor([[1, 11, 18, 4]], device="cuda")
+    draws = []
+    for _ in range(2):
+        generator = torch.Generator().manual_seed(7)
+        draws.append(torsions.random_chi_deltas(aatype, 0.5, generator=generator))
+    assert torch.equal(draws[0], draws[1])

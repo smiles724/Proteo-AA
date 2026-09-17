@@ -178,6 +178,17 @@ def _availability(aatype, seq_mask, supplied, coords, sidechains):
     ).available
 
 
+def _draw_on(generator, default):
+    """Where a generator-backed draw has to happen.
+
+    A ``torch.Generator`` is bound to a device and torch refuses to mix: a CPU
+    generator cannot produce a CUDA tensor and a CUDA one cannot produce a CPU
+    tensor. Callers hold whichever they hold, so every draw below happens on the
+    generator's device and is moved afterwards.
+    """
+    return generator.device if generator is not None else default
+
+
 def _rigid_motion(coords, *, generator=None):
     """A random rotation and translation of a whole structure.
 
@@ -186,12 +197,14 @@ def _rigid_motion(coords, *, generator=None):
     the encoder's own noise floor and would make the invariance check fail for
     the wrong reason.
     """
-    a = torch.randn(3, 3, generator=generator, dtype=torch.float64)
+    draw_on = _draw_on(generator, torch.device("cpu"))
+    a = torch.randn(3, 3, generator=generator, dtype=torch.float64, device=draw_on)
     q, r = torch.linalg.qr(a)
     q = q * torch.sign(torch.diagonal(r))[None, :]
     if float(torch.det(q)) < 0:
         q[:, 0] = -q[:, 0]
-    shift = torch.randn(3, generator=generator, dtype=torch.float64) * 10.0
+    shift = torch.randn(3, generator=generator, dtype=torch.float64, device=draw_on) * 10.0
+    q, shift = q.to(coords.device), shift.to(coords.device)
     moved = coords.double() @ q + shift
     return moved.to(coords.dtype), q, shift
 
@@ -294,6 +307,7 @@ def sidechain_sensitivity(
     # atoms and the side chain consistently.
     full = coords_af2.clone()
     full[..., rc.non_bb_idxs, :] = block.to(full.dtype)
+    draw_on = _draw_on(generator, device)
     tables = torsions.chi_tables(device=device)
     chi, chi_valid = torsions.chi_angles(full, aatype, available=available, tables=tables)
     report.stats["chis_measurable"] = int(chi_valid.sum())
@@ -325,8 +339,8 @@ def sidechain_sensitivity(
     exists = exists[aatype.clamp(0, atom37.UNKNOWN_AA_INDEX).long()][..., rc.non_bb_idxs]
     for sigma in perturbations:
         noise = torch.randn(
-            block.shape, generator=generator, dtype=block.dtype, device=block.device
-        )
+            block.shape, generator=generator, dtype=block.dtype, device=draw_on
+        ).to(block.device)
         moved = block + noise * float(sigma) * exists[..., None]
         h_moved, _ = encode(coords_af2, moved)
         report.responses[f"gaussian_{sigma}A"] = _relative_change(
@@ -344,8 +358,8 @@ def sidechain_sensitivity(
     scrambled = coords_af2.clone()
     scrambled_block = block.clone()
     noise = torch.randn(
-        block.shape, generator=generator, dtype=block.dtype, device=block.device
-    )
+        block.shape, generator=generator, dtype=block.dtype, device=draw_on
+    ).to(block.device)
     scrambled_block = scrambled_block + noise * 50.0 * (1.0 - exists[..., None])
     h_scrambled, _ = encode(scrambled, scrambled_block)
     report.invariants["nonexistent_atoms_scrambled"] = _relative_change(
@@ -392,10 +406,10 @@ def sidechain_sensitivity(
         block_pad = padded_block.clone()
         coords_pad[:, length:] = (
             torch.randn(batch, pad, atom37.NUM_ATOM37, 3, generator=junk) * scale
-        ).to(coords_pad.dtype)
+        ).to(coords_pad)
         block_pad[:, length:] = (
             torch.randn(batch, pad, block.shape[-2], 3, generator=junk) * scale
-        ).to(block_pad.dtype)
+        ).to(block_pad)
         h, _ = encode(
             coords_pad,
             block_pad,

@@ -50,6 +50,13 @@ information, not capacity. `test_the_controls_cannot_see_a_rotamer_change`
 rotates chis with the backbone and sequence fixed and asserts both controls' `z`
 is bit-identical while the candidate's moves.
 
+Measured, so "approximately parameter count" can be stated exactly: `full` and
+`bb_only` have all 262,560 parameters receiving gradient; `generic` has 261,632
+(99.65%), the missing 928 being the readout's LayerNorm and sequence embedding,
+which `z ≡ 0` makes unreachable. That is the correct behaviour for a σ-only
+control — it *should* be unable to use the node features or the sequence — and
+0.35% is not a capacity difference that could explain a result.
+
 Same receiving hook, same fixed pool of 512 examples, same optimizer budget,
 same seeded frozen half. The upstream cache is shared, so the packing each arm
 reads is the same file, not merely the same distribution.

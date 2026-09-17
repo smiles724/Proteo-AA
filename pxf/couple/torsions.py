@@ -225,14 +225,25 @@ def random_chi_deltas(
     residue, which is the closer analogue of a rotamer flip than moving all four
     at once; the latter compounds into a large displacement that no packer would
     produce.
+
+    **Draws happen on the generator's device, not the data's.** A
+    ``torch.Generator`` is bound to a device and torch refuses to mix them
+    ("Expected a 'cuda' device type for generator but found 'cpu'"). Callers
+    legitimately hold a CPU generator -- seeding one per example is how the
+    evaluation stays reproducible across machines -- so the draw is made where
+    the generator lives and the result is moved, rather than making every caller
+    match. Found by the evaluator's smoke run, which is what it was for.
     """
     tables = tables or chi_tables(device=aatype.device)
     aatype_c = aatype.clamp(min=0, max=atom37.UNKNOWN_AA_INDEX).long()
     rotatable = tables.rotatable[aatype_c]  # [..., 4]
+    device = aatype.device
+    draw_on = generator.device if generator is not None else device
+
     sign = (
-        torch.randint(
-            0, 2, rotatable.shape, generator=generator, device=aatype.device
-        ).float()
+        torch.randint(0, 2, rotatable.shape, generator=generator, device=draw_on)
+        .to(device)
+        .float()
         * 2.0
         - 1.0
     )
@@ -241,6 +252,10 @@ def random_chi_deltas(
         return deltas
     weights = rotatable.float() + 1e-9
     flat = weights.reshape(-1, MAX_CHI)
-    pick = torch.multinomial(flat, 1, generator=generator).reshape(*rotatable.shape[:-1], 1)
+    pick = (
+        torch.multinomial(flat.to(draw_on), 1, generator=generator)
+        .to(device)
+        .reshape(*rotatable.shape[:-1], 1)
+    )
     chosen = torch.zeros_like(rotatable).scatter_(-1, pick, True) & rotatable
     return deltas * chosen.float()

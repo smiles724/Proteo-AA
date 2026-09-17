@@ -530,6 +530,16 @@ class CoupledTrainer:
                         record[f"{name}_steps"] = len(rows)
                         record[f"{name}_sigma_b_mean"] = sum(sigmas) / len(sigmas)
                         record[f"{name}_sigma_b_range"] = [min(sigmas), max(sigmas)]
+                        # The feedback diagnostics the readout reports -- how big
+                        # the residual is, absolutely and relative to the token
+                        # features it is added to. Computed per step all along
+                        # but previously dropped before the log, so the only
+                        # place to see them was the held-out evaluation.
+                        for key in sorted(
+                            {k for r in rows for k in r if k.startswith("fb_")}
+                        ):
+                            values = [r[key] for r in rows if key in r]
+                            record[key] = sum(values) / len(values)
                 self._log(record)
                 if progress:
                     parts = [f"step {self.step:>7d}", f"phase {self.settings.phase}"]

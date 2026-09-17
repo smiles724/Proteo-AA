@@ -106,13 +106,38 @@ def backbone_denoising_loss(predicted, target, *, sigma, sigma_data=16.0, atom_m
     """``L_BB``: EDM-weighted denoising loss on the corrected backbone.
 
     ``predicted`` and ``target`` are coordinates on the same axis (PXDesign's
-    flat atom axis, or a dense block) and are compared *without* superposition:
-    a denoiser predicts in the frame it was given, so aligning first would hide
-    exactly the error the loss is meant to penalize.
+    flat atom axis, or a dense block).
 
-    The weight is EDM's ``1 / c_out(sigma)^2``, matching how the backbone module
-    was trained. ``sigma_data`` defaults to Protenix's coordinate scale; pass the
-    value from the backbone config to be exact.
+    **What matches the donor's objective, checked rather than assumed.** The
+    weight is EDM's ``1 / c_out(sigma)^2``, and that is exactly Protenix's
+    ``diffusion_per_sample_scale``::
+
+        (sigma**2 + sigma_data**2) / (sigma_data * sigma)**2
+                                          -- protenix/model/loss.py:1638
+
+    which equals ``1 / c_out**2`` for ``c_out = sigma * sigma_data /
+    sqrt(sigma**2 + sigma_data**2)``. ``sigma_data`` should be the donor's;
+    PXDesign's published config sets 16.0 and the loaded donor reports 16.0.
+
+    **What does not match, and is a deliberate difference.** This is an
+    EDM-weighted coordinate objective, not the donor's complete diffusion loss:
+
+    * Protenix **rigid-aligns the target to the prediction** (under no_grad,
+      element-type-weighted) before the MSE, making its loss superposition-
+      invariant. This one does not align. A correction evaluated at a fixed
+      noisy state should not be credited for re-posing the whole structure, and
+      the sampler's update consumes the estimate in the frame it was produced
+      in. The consequence is that the absolute value here is **not comparable**
+      to a PXDesign training curve.
+    * Protenix adds ``SmoothLDDTLoss`` and ``BondLoss``, scaled by the same
+      per-sample factor. Neither is included.
+    * Its ``weight_mse = 1/3`` constant is absent, which rescales the effective
+      learning rate and nothing else.
+    * Its element-type weights (DNA 5x, RNA 5x, ligand 10x) are all 1 for a
+      protein monomer, so they do not apply either way.
+
+    ``atom_mask`` is what decides which atoms are supervised; see
+    :func:`pxf.couple.pilot.backbone_supervision_mask`.
     """
     sigma = torch.as_tensor(sigma, dtype=torch.float32, device=predicted.device)
     if sigma.dim() == 0:

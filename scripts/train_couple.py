@@ -483,7 +483,19 @@ def main(argv=None):
             seed=int(couple_cfg.get("seed", 0)),
         )
 
-    couple_cfg.setdefault("sigma_data_backbone", sigma_data)
+    # The donor's sigma_data wins over the config's. `setdefault` let a stale
+    # config value stand: the EDM weight is 1/c_out(sigma_data)^2, so a
+    # mismatch silently reweights every noise level. They agree today (both
+    # 16.0), which is exactly when a precedence bug is invisible.
+    configured = couple_cfg.get("sigma_data_backbone")
+    if configured is not None and abs(float(configured) - float(sigma_data)) > 1e-9:
+        logger.warning(
+            "config sigma_data_backbone=%s but the loaded donor reports %s; "
+            "using the donor's, since the EDM loss weight is defined by it",
+            configured,
+            sigma_data,
+        )
+    couple_cfg["sigma_data_backbone"] = sigma_data
     # The schedule's sigma_data must be the donor's, or the discrete sigma values
     # trajectory mode draws from are not the ones the sampler visits.
     if args.backbone == "pxdesign" and sigma_schedule.sigma_data != sigma_data:
@@ -892,6 +904,18 @@ def main(argv=None):
                     if cycle.bb1_flat is not None
                     else row["bb0"]
                 )
+                # How far the correction actually moved the coordinates. At
+                # step 0 this is the equivalence check, and it has to be read
+                # instead of `fraction_improved`: two invocations of the same
+                # PXDesign forward on a GPU differ in the last bits, so a
+                # strict `bb1 < bb0` count is a coin flip over ties even when
+                # delta_a is exactly zero -- which is why step 0 reports 12.5%
+                # improved with an improvement of 0.0000 and a delta_a norm of 0.
+                row["max_abs_change"] = (
+                    float((cycle.bb1_flat - cycle.bb0_flat).abs().max())
+                    if cycle.bb1_flat is not None
+                    else 0.0
+                )
                 row["delta_a_norm"] = float(cycle.feedback_stats.get("delta_a_norm", 0.0))
                 row["relative_residual"] = float(
                     cycle.feedback_stats.get("relative_residual", 0.0)
@@ -911,6 +935,7 @@ def main(argv=None):
                 val_fraction_improved=improved / len(rows),
                 val_delta_a_norm=mean("delta_a_norm"),
                 val_relative_residual=mean("relative_residual"),
+                val_max_abs_change=max(r["max_abs_change"] for r in rows),
             )
 
         return validate

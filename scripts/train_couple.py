@@ -716,23 +716,66 @@ def main(argv=None):
         return out
 
     def build_pool(paths, *, per_structure, limit, seed_offset, label):
+        """The pool, with unfeaturizable structures dropped rather than fatal.
+
+        ``DesignSourceDataset`` refuses a structure whose design region exceeds
+        ``--crop-size`` -- it does not crop the binder, it raises ("binder has
+        278 tokens but crop_size=256"). One such entry must not take a 2,000-step
+        run with it, so each is tried, skipped and recorded. The pool is
+        over-drawn first and truncated after, so the requested size survives a
+        few skips.
+        """
+        # Ask for more than needed, so skips do not shrink the pool below the
+        # requested size; `limit` is applied to what actually featurizes.
         examples = pilot_examples(
-            paths, per_structure=per_structure, limit=limit, seed_offset=seed_offset
+            paths,
+            per_structure=per_structure,
+            limit=int(limit) * 2 if limit else None,
+            seed_offset=seed_offset,
         )
-        wanted = {entry["path"] for entry in examples}
-        featurized_by_name = {
-            sample_id: source
-            for sample_id, source in featurize_structures(
-                sorted(wanted), crop_size=args.crop_size, proteoaa_root=args.proteoaa_root
-            )
-        }
+        featurized_by_name, dropped = {}, []
+        kept = []
+        for entry in examples:
+            if limit and len(kept) >= int(limit):
+                break
+            name = entry["name"]
+            if name in dropped:
+                continue
+            if name not in featurized_by_name:
+                try:
+                    _sample_id, source = featurize_structures(
+                        [entry["path"]],
+                        crop_size=args.crop_size,
+                        proteoaa_root=args.proteoaa_root,
+                    )[0]
+                    # The refusal happens when the item is accessed, not when
+                    # the dataset is built, so it has to be touched here or the
+                    # failure surfaces mid-training instead.
+                    _ = source[0]
+                except Exception as error:  # noqa: BLE001 - upstream raises broadly
+                    dropped.append(name)
+                    logger.warning(
+                        "%s pool: dropping %s (%s)", label, name, str(error)[:160]
+                    )
+                    continue
+                featurized_by_name[name] = source
+            kept.append(entry)
         logger.info(
-            "%s pool: %d example(s) over %d structure(s)",
+            "%s pool: %d example(s) over %d structure(s), %d structure(s) dropped",
             label,
-            len(examples),
-            len(wanted),
+            len(kept),
+            len(featurized_by_name),
+            len(dropped),
         )
-        return examples, featurized_by_name
+        if dropped and len(dropped) > 0.5 * (len(dropped) + len(featurized_by_name)):
+            raise SystemExit(
+                f"{len(dropped)} of {len(dropped) + len(featurized_by_name)} "
+                f"structures could not be featurized at --crop-size "
+                f"{args.crop_size}. The featurizer refuses a design region "
+                "larger than the crop rather than cropping it, so raise "
+                "--crop-size to at least the longest structure in the manifest."
+            )
+        return kept, featurized_by_name
 
     def prepared(entry, featurized_by_name):
         """Featurize, bind the denoiser, and build the supervised BB mask."""

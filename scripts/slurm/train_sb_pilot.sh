@@ -54,12 +54,14 @@ DONOR="${DONOR:-/hai/users/y/f/yfsun/Proteo-AA old/Proteo-AA-official-pxdesign-f
 TAG="${TAG:-$VARIANT}"
 RUNS="${RUNS:-/hai/scratch/yfsun/proteo_aa_runs/pxf_sb_pilot}"
 OUT="${OUT:-$RUNS/${TAG}_${SLURM_JOB_ID:-local}}"
-# Crop is safe to set below the longest structure here, unlike phase 1: the
-# pilot's backbone target and its noisy state both come from the SAME
-# featurization, so a crop is self-consistent. Phase 1 refuses a crop because it
-# reads side-chain targets from an independent parse of the file, where a crop
-# breaks the residue correspondence.
-CROP_SIZE="${CROP_SIZE:-256}"
+# Must cover the longest structure in the manifest. Not because a crop would be
+# inconsistent -- the pilot's target and its noisy state come from the same
+# featurization, unlike phase 1 -- but because the featurizer does not crop the
+# design region at all: with the whole chain designed it raises "binder has 278
+# tokens but crop_size=256". 512 covers both AFDB manifests (longest 510 train,
+# 485 val) and costs nothing for short structures, since num_tokens is the real
+# length and nothing is padded to the crop.
+CROP_SIZE="${CROP_SIZE:-512}"
 # A FIXED pool with known backbone targets, so every arm trains on the same
 # examples and the frozen half is paid for once per example, not per step.
 POOL_SIZE="${POOL_SIZE:-512}"

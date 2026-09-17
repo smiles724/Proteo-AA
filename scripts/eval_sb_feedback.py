@@ -96,6 +96,17 @@ GPU_NONDETERMINISM = 4.8e-6  # measured, for the report to quote
 # packing and then zero the features derived from it. Charging them for that
 # would price an artefact of the parameter-matching rather than the method.
 NEEDS_PACKING = ("full", "perturbed")
+
+
+def needs_packing(variant):
+    """Does a readout of this variant need the packing rollout, deployed?
+
+    Keyed on the *variant* the checkpoint records rather than on the arm's
+    label, so an arm named anything at all is priced by what it reads.
+    """
+    return variant in NEEDS_PACKING
+
+
 SIDECHAIN_KEYS = (
     "symmetry_rmsd",
     "chi_recovery_20deg",
@@ -608,12 +619,17 @@ def main(argv=None):
                         upstream.packed, sigma, reference=reference
                     )
                     corrected, _a = controller.backbone(x_noisy, sigma, feedback=delta)
+                    # One decision drives both the charge and the flag.
+                    needs = needs_packing(arm["variant"])
                     produced[label] = (
                         corrected,
-                        denoise_seconds + packing_seconds + (time.perf_counter() - clock),
+                        denoise_seconds
+                        + (packing_seconds if needs else 0.0)
+                        + (time.perf_counter() - clock),
                         2,
                         dict(
                             variant=arm["variant"],
+                            needs_packing=needs,
                             delta_a_norm=stats.get("delta_a_norm"),
                             relative_residual=stats.get("relative_residual"),
                         ),
@@ -652,6 +668,7 @@ def main(argv=None):
                         denoise_seconds + packing_seconds + (time.perf_counter() - clock),
                         2,
                         dict(
+                            needs_packing=True,
                             source_arm=label,
                             perturb_degrees=args.perturb_degrees,
                             delta_a_norm=stats.get("delta_a_norm"),
@@ -772,7 +789,11 @@ def main(argv=None):
             (r.get("variant") for r in arm_rows if r.get("variant")), None
         )
         entry["denoiser_calls"] = arm_rows[0]["denoiser_calls"]
-        entry["needs_packing"] = name in NEEDS_PACKING
+        # Read off the rows rather than recomputed from the arm name: the flag
+        # and the seconds it explains have to come from one decision, or the
+        # table can say "no packing" in one column while charging for it in the
+        # next -- which is exactly what happened when they were separate.
+        entry["needs_packing"] = bool(arm_rows[0].get("needs_packing", False))
         total, count = timing[name]
         entry["seconds_per_event"] = total / count if count else float("nan")
         if name == "zero":

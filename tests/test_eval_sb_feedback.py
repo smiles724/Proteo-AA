@@ -233,6 +233,10 @@ def test_only_the_feedback_arms_are_charged_for_the_packing(mod):
     assert set(mod.NEEDS_PACKING) == {"full", "perturbed"}
     for arm in ("bb0", "zero", "refine", "bb_only", "generic"):
         assert arm not in mod.NEEDS_PACKING
+    # Keyed on the recorded variant, so an arm labelled anything is priced by
+    # what its readout reads.
+    assert mod.needs_packing("full") and mod.needs_packing("perturbed")
+    assert not mod.needs_packing("bb_only") and not mod.needs_packing("generic")
 
 
 def test_the_perturbed_arm_is_reported_as_evidence_not_a_gate(mod):

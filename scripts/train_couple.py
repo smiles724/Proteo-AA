@@ -466,8 +466,9 @@ def main(argv=None):
         px_driver = PXDesignBackboneDriver(px_model)
         c_token = px_driver.c_token
         sigma_data = px_driver.sigma_data
+        px_record = dict(px_record, driver_settings=px_driver.identity())
         logger.info(
-            "PXDesign donor loaded: c_token=%d sigma_data=%.1f", c_token, sigma_data
+            "PXDesign donor loaded: %s", json.dumps(px_driver.identity(), default=str)
         )
         featurized = featurize_structures(
             structures, crop_size=args.crop_size, proteoaa_root=args.proteoaa_root

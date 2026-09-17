@@ -77,6 +77,26 @@ def test_a_mismatched_donor_is_refused(tmp_path):
 
 
 @needs_donor
+def test_the_driver_records_how_many_checkpoint_flags_it_cleared(driver_and_structure):
+    """A default is not evidence that a run actually ran without checkpointing.
+
+    A feedback residual trained against a recomputed forward would be hard to
+    diagnose after the fact, so the count goes into the run's provenance
+    alongside c_token and sigma_data rather than being inferred from the
+    constructor's default.
+    """
+    driver, _structure, _record = driver_and_structure
+    identity = driver.identity()
+    assert identity["activation_checkpointing"] is False
+    assert identity["blocks_cleared"] > 0, (
+        "no blocks_per_ckpt flag was found to clear, so either Protenix stopped "
+        "using them or the driver is looking in the wrong place"
+    )
+    assert identity["c_token"] == driver.c_token
+    assert identity["sigma_data"] == driver.sigma_data
+
+
+@needs_donor
 def test_activation_checkpointing_is_off_by_default(driver_and_structure):
     driver, _, _ = driver_and_structure
     assert not any(getattr(m, "blocks_per_ckpt", None) for m in driver.model.modules())

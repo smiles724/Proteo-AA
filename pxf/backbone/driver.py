@@ -126,6 +126,8 @@ class PXDesignBackboneDriver:
         self, model, *, chunk_size=None, inplace_safe=False, activation_checkpointing=False
     ):
         self.model = model
+        self.activation_checkpointing = bool(activation_checkpointing)
+        self.blocks_cleared = 0
         if not activation_checkpointing:
             # Activation checkpointing recomputes the forward during backward, and
             # the feedback injection hook makes the recomputation diverge from the
@@ -134,7 +136,7 @@ class PXDesignBackboneDriver:
             #   the original forward and recomputation.
             # The adapters are small and the backbone is frozen, so the memory
             # saving is not needed; correctness is.
-            disable_activation_checkpointing(model)
+            self.blocks_cleared = disable_activation_checkpointing(model)
         self.chunk_size = chunk_size
         self.inplace_safe = bool(inplace_safe)
         self.c_token = token_feature_dim(model)
@@ -143,6 +145,25 @@ class PXDesignBackboneDriver:
         # three are optional caches computed on demand; older revisions do not
         # have them at all. Pass exactly what this build expects.
         self._cache_args = {name: None for name in _denoiser_accepts(model)}
+
+    def identity(self):
+        """What a run should record about how the backbone was driven.
+
+        ``blocks_cleared`` in particular: "checkpointing is off" is a default,
+        and a default is not evidence. A run whose feedback silently trained
+        against a recomputed forward would be hard to diagnose after the fact,
+        so the count of ``blocks_per_ckpt`` flags actually cleared is recorded
+        rather than assumed.
+        """
+        return dict(
+            c_token=self.c_token,
+            sigma_data=self.sigma_data,
+            activation_checkpointing=self.activation_checkpointing,
+            blocks_cleared=self.blocks_cleared,
+            chunk_size=self.chunk_size,
+            inplace_safe=self.inplace_safe,
+            cache_args=sorted(self._cache_args),
+        )
 
     @property
     def device(self):

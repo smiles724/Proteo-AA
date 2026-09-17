@@ -44,6 +44,7 @@ driver is expected to change. Any callable with the
 """
 
 import logging
+import time
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -507,20 +508,39 @@ class CoupledDenoiser:
         """
         from pxf.couple.pilot import UpstreamState
 
+        # Timed per stage, because the arms need different subsets of it and a
+        # cost comparison that charges every arm for the packing is wrong in the
+        # direction that flatters feedback: a BB-only alternative needs `bb0`
+        # and nothing else, while a feedback arm needs the 50-step rollout and
+        # the re-encode too.
+        clock = time.perf_counter()
         proposal = self.propose(topology, x_noisy, sigma, aatype, seq_mask=seq_mask)
+        denoise_seconds = time.perf_counter() - clock
+
+        clock = time.perf_counter()
         packing = self.pack_proposal(
             proposal,
             a_token_override=a_token_override,
             run_feedback=False,
             delta_h=bs_delta_h,
         )
+        pack_seconds = time.perf_counter() - clock
+
+        clock = time.perf_counter()
         packed = self.encode_predicted_packing(
             proposal.inputs,
             packing.sidechains,
             h_base=proposal.h_base,
             psce=(packing.aux.get("pack") or {}).get("psce"),
         )
+        reencode_seconds = time.perf_counter() - clock
+
         return UpstreamState(
+            timings=dict(
+                denoise=denoise_seconds,
+                pack=pack_seconds,
+                reencode=reencode_seconds,
+            ),
             packed=packed.detach(),
             bb0_flat=proposal.bb0_flat.detach(),
             a_token=proposal.a_token.detach(),

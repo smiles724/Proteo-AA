@@ -52,12 +52,16 @@ class UpstreamState:
     sigma: torch.Tensor
     pack_steps: int | None = None
     bs_policy: str = "bypass"
+    # Seconds for the three stages, so an evaluator can charge each arm for the
+    # work it actually needs rather than for the whole frozen half.
+    timings: dict = field(default_factory=dict)
 
     def identity(self):
         return dict(
             sigma=float(torch.as_tensor(self.sigma).float().mean()),
             pack_steps=self.pack_steps,
             bs_policy=self.bs_policy,
+            timings=dict(self.timings),
             residues=int(self.packed.seq_mask.sum()),
             visibility=self.packed.visibility.record(),
         )

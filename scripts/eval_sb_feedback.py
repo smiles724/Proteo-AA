@@ -81,6 +81,10 @@ MIN_RELATIVE_GAIN = 0.03  # fraction of the baseline RMSD
 WIRING_TOLERANCE = 1e-4
 GPU_NONDETERMINISM = 4.8e-6  # measured, for the report to quote
 # Side-chain metrics carried through to the no-regression half of the criterion.
+# Which arms need the 50-step packing and the re-encode. A BB-only alternative
+# needs bb0 and nothing else; charging it for the rollout makes the feedback
+# arms look cost-matched when they are not.
+NEEDS_PACKING = ("full", "bb_only", "generic", "perturbed")
 SIDECHAIN_KEYS = (
     "symmetry_rmsd",
     "chi_recovery_20deg",
@@ -299,13 +303,22 @@ def report(record):
         )
         print(f"  {name:14s} {str(arm.get('variant') or '-'):10s} {cells}")
     print()
-    print(f"  {'arm':14s} {'calls':>6s} {'seconds/event':>14s}")
+    print(
+        f"  {'arm':14s} {'calls':>6s} {'packing':>8s} {'seconds/event':>14s} {'vs bb0':>9s}"
+    )
+    baseline_seconds = record["arms"]["bb0"].get("seconds_per_event") or float("nan")
     for name, arm in record["arms"].items():
+        seconds = arm.get("seconds_per_event", float("nan"))
         print(
             f"  {name:14s} {arm.get('denoiser_calls', 0):6d} "
-            f"{arm.get('seconds_per_event', float('nan')):14.3f}"
+            f"{'yes' if arm.get('needs_packing') else 'no':>8s} {seconds:14.3f} "
+            f"{seconds / baseline_seconds:8.2f}x"
         )
-    print()
+    print(
+        "\n  The BB-only alternatives need bb0 and nothing else; the feedback\n"
+        "  arms also pay for the packing rollout and the re-encode. Equal\n"
+        "  denoiser-call counts do not mean equal cost.\n"
+    )
     passed, lines = verdict(record)
     for line in lines:
         print(f"  {line}")
@@ -546,10 +559,15 @@ def main(argv=None):
                     structure.topology, x_noisy, sigma, aatype, bs_delta_h=bs_delta_h
                 )
             frozen_seconds = time.perf_counter() - clock
+            stages = upstream.timings
+            # bb0 costs one denoise. The feedback arms additionally need the
+            # packing rollout and the re-encode; the BB-only alternatives do not.
+            denoise_seconds = stages.get("denoise", frozen_seconds)
+            packing_seconds = stages.get("pack", 0.0) + stages.get("reencode", 0.0)
             reference = controller._per_residue(upstream.a_token, int(aatype.shape[0]))
 
             produced = {}  # arm -> (flat coords, seconds, calls, extra)
-            produced["bb0"] = (upstream.bb0_flat, frozen_seconds, 1, {})
+            produced["bb0"] = (upstream.bb0_flat, denoise_seconds, 1, {})
 
             with torch.no_grad():
                 # Wiring: a second identical call with the feedback forced to
@@ -562,7 +580,7 @@ def main(argv=None):
                 repeat, _a = controller.backbone(x_noisy, sigma, feedback=zeros)
                 produced["zero"] = (
                     repeat,
-                    frozen_seconds + (time.perf_counter() - clock),
+                    denoise_seconds + (time.perf_counter() - clock),
                     2,
                     dict(
                         deviation_from_bb0=float((repeat - upstream.bb0_flat).abs().max())
@@ -578,7 +596,7 @@ def main(argv=None):
                     corrected, _a = controller.backbone(x_noisy, sigma, feedback=delta)
                     produced[label] = (
                         corrected,
-                        frozen_seconds + (time.perf_counter() - clock),
+                        denoise_seconds + packing_seconds + (time.perf_counter() - clock),
                         2,
                         dict(
                             variant=arm["variant"],
@@ -617,7 +635,7 @@ def main(argv=None):
                     corrected, _a = controller.backbone(x_noisy, sigma, feedback=delta)
                     produced["perturbed"] = (
                         corrected,
-                        frozen_seconds + (time.perf_counter() - clock),
+                        denoise_seconds + packing_seconds + (time.perf_counter() - clock),
                         2,
                         dict(
                             source_arm=label,
@@ -650,7 +668,7 @@ def main(argv=None):
                 )
                 produced["refine"] = (
                     refined,
-                    frozen_seconds + (time.perf_counter() - clock),
+                    denoise_seconds + (time.perf_counter() - clock),
                     2,
                     dict(refine_sigma=lower, refine_eta=args.refine_eta),
                 )
@@ -740,6 +758,7 @@ def main(argv=None):
             (r.get("variant") for r in arm_rows if r.get("variant")), None
         )
         entry["denoiser_calls"] = arm_rows[0]["denoiser_calls"]
+        entry["needs_packing"] = name in NEEDS_PACKING
         total, count = timing[name]
         entry["seconds_per_event"] = total / count if count else float("nan")
         if name == "zero":

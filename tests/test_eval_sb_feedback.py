@@ -219,6 +219,19 @@ def test_no_comparable_cost_alternative_cannot_pass(mod):
     assert any("only the weak comparison" in line for line in lines)
 
 
+def test_only_the_feedback_arms_are_charged_for_the_packing(mod):
+    """Equal denoiser-call counts are not equal cost.
+
+    A BB-only alternative needs bb0 and nothing else; a feedback arm also pays
+    for the 50-step rollout and the re-encode. Charging every arm for the whole
+    frozen half made them look cost-matched, in the direction that flatters
+    feedback.
+    """
+    assert set(mod.NEEDS_PACKING) == {"full", "bb_only", "generic", "perturbed"}
+    for arm in ("bb0", "zero", "refine"):
+        assert arm not in mod.NEEDS_PACKING
+
+
 def test_the_perturbed_arm_is_reported_as_evidence_not_a_gate(mod):
     blob = record(
         arms={

@@ -81,10 +81,21 @@ MIN_RELATIVE_GAIN = 0.03  # fraction of the baseline RMSD
 WIRING_TOLERANCE = 1e-4
 GPU_NONDETERMINISM = 4.8e-6  # measured, for the report to quote
 # Side-chain metrics carried through to the no-regression half of the criterion.
-# Which arms need the 50-step packing and the re-encode. A BB-only alternative
-# needs bb0 and nothing else; charging it for the rollout makes the feedback
-# arms look cost-matched when they are not.
-NEEDS_PACKING = ("full", "bb_only", "generic", "perturbed")
+# Which arms genuinely need the 50-step packing and the re-encode, i.e. what
+# each would cost *deployed*:
+#
+#   full, perturbed  read h_packed, the re-encoding of bb0 + sc0. Need both.
+#   bb_only          reads h_base, the side-chain-masked encoding, which
+#                    `propose` already produces alongside bb0. Needs neither.
+#   generic          reads nothing at all. Needs neither.
+#   bb0, zero, refine  no readout.
+#
+# Note this is the deployed cost, not the wall-clock of the arm as run: all
+# three variants share one code path -- deliberately, so their parameter counts
+# match exactly -- so the bb_only and generic arms as executed do compute a
+# packing and then zero the features derived from it. Charging them for that
+# would price an artefact of the parameter-matching rather than the method.
+NEEDS_PACKING = ("full", "perturbed")
 SIDECHAIN_KEYS = (
     "symmetry_rmsd",
     "chi_recovery_20deg",
@@ -315,9 +326,12 @@ def report(record):
             f"{seconds / baseline_seconds:8.2f}x"
         )
     print(
-        "\n  The BB-only alternatives need bb0 and nothing else; the feedback\n"
-        "  arms also pay for the packing rollout and the re-encode. Equal\n"
-        "  denoiser-call counts do not mean equal cost.\n"
+        "\n  Deployed cost. Only the arms reading h_packed need the packing\n"
+        "  rollout and the re-encode; bb_only reads h_base, which comes free\n"
+        "  with bb0, and generic reads nothing. Equal denoiser-call counts do\n"
+        "  not mean equal cost. (All variants share one code path so their\n"
+        "  parameter counts match, so the controls as RUN do compute a packing\n"
+        "  and discard it; that is an artefact of the matching, not the method.)\n"
     )
     passed, lines = verdict(record)
     for line in lines:

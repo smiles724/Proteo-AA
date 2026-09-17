@@ -227,8 +227,11 @@ def test_only_the_feedback_arms_are_charged_for_the_packing(mod):
     frozen half made them look cost-matched, in the direction that flatters
     feedback.
     """
-    assert set(mod.NEEDS_PACKING) == {"full", "bb_only", "generic", "perturbed"}
-    for arm in ("bb0", "zero", "refine"):
+    # Only the arms that read h_packed. bb_only reads h_base, which `propose`
+    # produces alongside bb0, and generic reads nothing -- so neither needs the
+    # 50-step rollout when deployed, however the shared code path executes them.
+    assert set(mod.NEEDS_PACKING) == {"full", "perturbed"}
+    for arm in ("bb0", "zero", "refine", "bb_only", "generic"):
         assert arm not in mod.NEEDS_PACKING
 
 

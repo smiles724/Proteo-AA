@@ -43,6 +43,7 @@ driver is expected to change. Any callable with the
 :class:`BackboneDenoiser` protocol works, including a stub in tests.
 """
 
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -51,6 +52,8 @@ import torch
 from pxf.couple import fampnn_iface as iface
 from pxf.couple import visibility as vis
 from pxf.couple.converter import PXFaRepresentationConverter
+
+logger = logging.getLogger("pxf.couple.controller")
 
 PHASES = ("frozen", "bb_to_sc", "sc_to_bb", "joint")
 
@@ -409,6 +412,21 @@ class CoupledDenoiser:
             inputs.coords_af2,
             sidechains=sidechains,
         )
+        padded = int((inputs.seq_mask <= 0).sum())
+        if padded:
+            # pxf.couple.probes measures a 2.6e-4 to 1.2e-3 relative leak from
+            # padded rows into real residues' node features, upstream in
+            # FaMPNN's encoder, plus a larger shift on whichever residue is no
+            # longer the terminus. One structure per forward at its own length
+            # avoids both, which is what the converter does; say so if that ever
+            # changes.
+            logger.warning(
+                "%d padded residue(s) in the re-encode. FaMPNN's encoder leaks "
+                "~1e-3 of their coordinates into real residues' features (see "
+                "pxf.couple.probes), so the feedback features are no longer a "
+                "function of this structure alone.",
+                padded,
+            )
         _, h_packed, features = iface.encode(
             self.fampnn,
             inputs.coords_af2,

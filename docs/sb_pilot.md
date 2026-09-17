@@ -63,15 +63,23 @@ reads is the same file, not merely the same distribution.
 
 ## Measured before training
 
-`pxf.couple.probes` on T1031, native side chains:
+`pxf.couple.probes` on T1031 with native side chains, and
+`scripts/probe_sb_feedback.py` on the real val panel with **predicted** packings
+on **denoised** backbones — the realization the feedback actually reads:
 
-| quantity | relative change |
-|---|---|
-| floor (identical input re-encoded) | 0.0 |
-| ceiling (masked → visible side chains) | 0.77 |
-| chi rotation, 10° | 0.06 |
-| chi rotation, 60° | 0.27 |
-| chi rotation, 120° | 0.41 |
+| quantity | T1031, native | val panel, predicted (16 targets, 48 probes) |
+|---|---|---|
+| floor (identical input re-encoded) | 0.0 (CPU) | 1.7e-7 (GPU) |
+| ceiling (masked → visible side chains) | 0.77 | 0.73 |
+| chi rotation, 10° | 0.06 | 0.057 |
+| chi rotation, 30° | — | 0.164 |
+| chi rotation, 60° | 0.27 | 0.291 |
+| chi rotation, 120° | 0.41 | 0.432 |
+
+Verdict **informative on all 48 probes**. The floor is exactly zero on a CPU and
+~1.7e-7 on a GPU, because re-encoding identical input is bit-identical only if
+the reductions are; every response and invariant is read against it rather than
+against zero.
 
 Torsion rotations are the probe that matters: they preserve every bond length,
 every bond angle, the backbone and the sequence, so they land on another *valid*

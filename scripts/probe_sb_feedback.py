@@ -236,6 +236,9 @@ def main(argv=None):
         f"{record['sidechains']} side chains, {args.pack_steps} pack steps\n"
     )
     print(f"  {'quantity':34s} {'mean relative change':>22s}")
+    # On a GPU the floor is ~1.7e-7 rather than the exact 0.0 a CPU gives:
+    # re-encoding identical input twice is bit-identical only if the reductions
+    # are. Every response and invariant below is read against it.
     print(f"  {'floor (identical input)':34s} {pooled['floor']:22.3e}")
     print(f"  {'ceiling (masked -> visible)':34s} {pooled['ceiling']:22.3e}")
     for key in keys:
@@ -245,9 +248,22 @@ def main(argv=None):
     for key in keys:
         if key.startswith("invariant_"):
             name = key[len("invariant_") :]
-            limit = probes.INVARIANT_TOLERANCE.get(name, 0.0)
+            # The same rule SensitivityReport.invariance_failures uses: an
+            # absolute budget OR a multiple of the encoder's own floor,
+            # whichever is larger. Comparing against the absolute budget alone
+            # flags "exactly invariant" as a failure wherever the floor is not
+            # exactly zero -- which it is not on a GPU, where non-deterministic
+            # reduction order puts it at ~1.7e-7 rather than the 0.0 seen on a
+            # CPU. Scrambling nonexistent atoms lands *at* that floor, which is
+            # the correct result and was being reported as "OVER TOLERANCE".
+            absolute = probes.INVARIANT_TOLERANCE.get(name, 0.0)
+            limit = max(pooled["floor"] * probes.INVARIANCE_MARGIN, absolute, 1e-9)
             flag = "  OVER TOLERANCE" if pooled[key] > limit else ""
-            print(f"  invariant {name:26s} {pooled[key]:22.3e}  (<= {limit:g}){flag}")
+            print(
+                f"  invariant {name:26s} {pooled[key]:22.3e}  "
+                f"(<= {limit:.3e}, {'floor-scaled' if limit > absolute else 'absolute'})"
+                f"{flag}"
+            )
     print(f"\n  verdicts: {verdicts}")
     if failures:
         print(f"  INVARIANCE FAILURES on some probes: {failures}")

@@ -216,12 +216,18 @@ class CoupledDenoiser:
         phase="joint",
         pack_steps=None,
         gradient_policy=None,
+        bs_gate=None,
     ):
         self.backbone = backbone
         self.fampnn = fampnn
         self.adapters = adapters
         self.converter = converter or PXFaRepresentationConverter()
         self.pack_steps = pack_steps
+        # The selected Phase-1 BB->SC policy's gate. Held fixed across every
+        # SC->BB comparison, so it belongs to the controller rather than being
+        # re-chosen per call. `pxf.couple.bs_policy.Gate` shapes; None is
+        # ungated, and the bypass is `delta_h=None` at the call site.
+        self.bs_gate = bs_gate
         self.set_phase(phase)
         if gradient_policy is not None:
             self.policy = gradient_policy
@@ -392,6 +398,140 @@ class CoupledDenoiser:
             out.bb1_dense = self.densify(out.bb1_flat, proposal.topology, proposal.aatype)
         return out
 
+    # ---- one corrective event, with the gradient boundary stated ---------
+
+    def corrective_event(
+        self,
+        topology,
+        x_noisy,
+        sigma,
+        aatype,
+        *,
+        seq_mask=None,
+        bs_delta_h=UNSET,
+        a_token_override=None,
+        upstream=None,
+    ):
+        """One SC -> BB correction at a *fixed* noisy state. Returns the cycle.
+
+        The gradient boundary is written out rather than left to whichever
+        ``detach()`` happens to be reached first:
+
+            with no_grad:                  frozen, cacheable
+                bb0, a0 = D(x_sigma, sigma; 0)
+                sc0     = P(bb0, s; selected BB->SC policy)
+                packed  = E(bb0, sc0, s)
+            z       = R(packed)            trainable
+            delta_a = A_SB(z, sigma)       trainable
+            bb1, _  = D(x_sigma, sigma; delta_a)     NOT under no_grad
+
+        The corrective call must stay outside ``no_grad``: PXDesign's parameters
+        are frozen, but its atom decoder has to differentiate with respect to
+        ``delta_a`` or the loss reaches nothing. That is the failure mode this
+        method exists to make impossible, and it is asserted below rather than
+        trusted.
+
+        Both denoiser calls receive the same ``x_noisy``, the same ``sigma`` and
+        the same conditioning. ``bs_delta_h`` is the selected Phase-1 BB->SC
+        policy, held fixed across every SC->BB comparison; pass ``None`` for the
+        bypass.
+
+        ``upstream`` supplies a previously computed (and detached) frozen half,
+        so a pilot can pay for the packing once per example rather than once per
+        step. See :mod:`pxf.couple.pilot`.
+        """
+        if upstream is None:
+            upstream = self.frozen_half(
+                topology,
+                x_noisy,
+                sigma,
+                aatype,
+                seq_mask=seq_mask,
+                bs_delta_h=bs_delta_h,
+                a_token_override=a_token_override,
+            )
+
+        out = CycleOutput(
+            bb0_flat=upstream.bb0_flat,
+            bb0_dense=upstream.packed.coords37,
+            a_token=upstream.a_token,
+            h_base=upstream.packed.h_base,
+            delta_h=upstream.delta_h,
+            sidechains=upstream.sidechains,
+            packed=upstream.packed,
+            h_packed=upstream.packed.h_packed,
+            aux=dict(inputs=upstream.inputs, upstream=upstream.identity()),
+        )
+        # bb0_dense carries sc0 in its side-chain slots, which is what the
+        # readout reads; the *backbone* stages are bb0_flat and bb1_flat.
+        out.delta_a, out.feedback_stats = self._delta_a(
+            upstream.packed, sigma, upstream.a_token
+        )
+        if out.delta_a is None:
+            return out
+        if torch.is_grad_enabled() and not out.delta_a.requires_grad:
+            trainable = [
+                name
+                for name, p in getattr(self.adapters, "named_parameters", lambda: [])()
+                if p.requires_grad
+            ]
+            if trainable:
+                raise RuntimeError(
+                    "delta_a does not require grad although "
+                    f"{len(trainable)} adapter parameter(s) do (e.g. "
+                    f"{trainable[:3]}). The trainable half has been captured by a "
+                    "no_grad context, so L_BB would reach nothing while still "
+                    "producing a loss curve."
+                )
+        out.bb1_flat, _ = self.backbone(x_noisy, sigma, feedback=out.delta_a)
+        out.bb1_dense = self.densify(out.bb1_flat, topology, aatype)
+        return out
+
+    @torch.no_grad()
+    def frozen_half(
+        self,
+        topology,
+        x_noisy,
+        sigma,
+        aatype,
+        *,
+        seq_mask=None,
+        bs_delta_h=UNSET,
+        a_token_override=None,
+    ):
+        """The frozen, cacheable half of a corrective event, fully detached.
+
+        Decorated rather than wrapped at the call site so there is one place
+        where "this is the part that does not train" is stated, and so a caller
+        cannot forget it.
+        """
+        from pxf.couple.pilot import UpstreamState
+
+        proposal = self.propose(topology, x_noisy, sigma, aatype, seq_mask=seq_mask)
+        packing = self.pack_proposal(
+            proposal,
+            a_token_override=a_token_override,
+            run_feedback=False,
+            delta_h=bs_delta_h,
+        )
+        packed = self.encode_predicted_packing(
+            proposal.inputs,
+            packing.sidechains,
+            h_base=proposal.h_base,
+            psce=(packing.aux.get("pack") or {}).get("psce"),
+        )
+        return UpstreamState(
+            packed=packed.detach(),
+            bb0_flat=proposal.bb0_flat.detach(),
+            a_token=proposal.a_token.detach(),
+            delta_h=None if packing.delta_h is None else packing.delta_h.detach(),
+            sidechains=packing.sidechains.detach(),
+            inputs=proposal.inputs,
+            sigma=torch.as_tensor(sigma).detach().clone(),
+            pack_steps=self.pack_steps,
+            bs_policy="bypass" if packing.delta_h is None else "residual",
+        )
+
     # ---- the four stages -------------------------------------------------
 
     def encode_predicted_packing(self, inputs, sidechains, *, h_base=None, psce=None):
@@ -528,6 +668,16 @@ class CoupledDenoiser:
         delta = self.adapters.delta_h(self._per_residue(a_token, h_base.shape[1]), sigma)
         if delta is None:
             return None
+        if self.bs_gate is not None:
+            scale = self.bs_gate(
+                float(sigma.reshape(-1)[0]) if torch.is_tensor(sigma) else float(sigma)
+            )
+            if scale == 0.0:
+                # Exactly the bypass, not a scaled-to-zero approximation of it:
+                # `with_residual(features, None)` takes the same path the
+                # uncoupled packing does.
+                return None
+            delta = delta * scale
         return self._match(delta, h_base)
 
     def _delta_a(self, packed, sigma, a_token):
@@ -572,6 +722,9 @@ class CoupledDenoiser:
             phase=self.phase,
             policy=vars(self.policy),
             pack_steps=self.pack_steps,
+            bs_gate=(
+                self.bs_gate.identity() if hasattr(self.bs_gate, "identity") else None
+            ),
             adapters=self.adapters.identity() if hasattr(self.adapters, "identity") else {},
             converter=self.converter.identity(),
         )

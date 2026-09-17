@@ -1,0 +1,83 @@
+# SC -> BB pilot: one corrective event, fixed sequence, frozen donors
+#
+# A dedicated configuration rather than couple_phase2.yaml with flags. That one
+# asks for 20,000 steps and a 10-step packing; this asks a narrower question and
+# the difference should be legible from the file rather than from a launcher's
+# environment.
+#
+# What the pilot tests: whether predicted side-chain information improves
+# backbone denoising beyond a *trained* BB-only control. Not whether it improves
+# on the untrained proposal -- that is the weaker comparison, and passing it
+# alone does not license an SC-specific claim. The controls are the same code
+# path with feature groups zeroed (--sb-variant bb_only / generic), so they match
+# in receiving hook, training examples, optimizer budget and parameter count
+# exactly rather than approximately.
+#
+# Only the SC readout and A_SB train. PXDesign, FaMPNN and A_BS are frozen, and
+# A_SB's output projection is zero-initialized, so step 0 reproduces PXDesign
+# bit-for-bit -- which the step-0 evaluation measures rather than assumes.
+couple:
+  phase: sc_to_bb
+  max_steps: 2000         # extend to 5000 only if promising
+  grad_accum_steps: 1
+  # 50, not phase 2's 10: the feedback reads a packing, and a 10-step rollout is
+  # a different (worse) packing than the one the evaluator will score. The cost
+  # is paid once per example, not once per step -- the frozen half is cached.
+  pack_steps: 50
+  corrective_event: true  # explicit gradient boundary, cacheable frozen half
+  # No Phase-1 BB->SC policy has been selected, so the plan's fallback applies:
+  # bypass, consistently. Not because Phase 1 failed -- its effect is partly
+  # sample-specific -- but because how much of it is has not settled into a
+  # choice. Measured retention under the shuffled-donor control, chi_recovery_20deg:
+  #
+  #   AFDB val (n=256, in distribution)   D_real +0.041   retained  20%
+  #   CASP14/15 (n=56, out of dist.)      D_real +0.027   retained  53%
+  #   CASP16 (n=43, out of dist.)         D_real +0.020   retained  69%
+  #
+  # and the gate sweep (A/B/C) that would repair the low-noise harm is likewise
+  # unpicked. Bypassing does not prevent testing A_SB; it only means the packing
+  # the feedback reads is pretrained FaMPNN's, which is reproducible without any
+  # Phase-1 dependency. Held FIXED across every SC->BB arm -- that is what makes
+  # them comparable to each other.
+  bs_policy: bypass
+  sigma_data_backbone: 16.0
+  sidechain_reduction: per_residue
+  log_every: 25
+  checkpoint_every: 500
+  eval_steps: [500, 1000, 2000]   # step 0 is always included
+  ema_relative_length: 0.25
+  seed: 0
+# The active sigma window, verified against PXDesign's own schedule rather than
+# assumed: with sigma_data = 16 A and x_noisy = x + sigma * eps, sigma is in
+# Angstroms of per-coordinate noise, and [0.1, 2.0] is steps 305-363 of the
+# published 400-step trajectory -- 59 discrete values, 15% of the trajectory,
+# late enough that the fold is decided and the geometry is not.
+#
+# Narrower than phase 2's [0.01, 5.0] on purpose. At 5 A the backbone is a real
+# perturbation and the side chains packed into it say little about where it
+# should have been; below 0.1 A there is almost nothing left to correct. A_SB's
+# gate is exactly 1 across this window and tapers outside it.
+sigma:
+  mode: trajectory
+  sigma_min: 0.1
+  sigma_max: 2.0
+  n_step: 400
+adapters:
+  d_hidden: 256           # A_SB hidden width
+  d_noise: 64
+sb_feedback:
+  variant: full           # full | bb_only | generic -- overridden by --sb-variant
+  # The gate's active region. Equal to the sigma window above, so the
+  # correction is applied at full strength exactly where it was trained.
+  gate:
+    sigma_min: 0.1
+    sigma_max: 2.0
+    taper: 2.0
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  # Short next to a 2000-step run, and the point is only to avoid a first-step
+  # transient: the zero-initialized projection has nothing to warm up from.
+  warmup_steps: 100
+  max_grad_norm: 1.0
+  schedule: constant

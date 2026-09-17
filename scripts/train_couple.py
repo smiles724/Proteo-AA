@@ -54,6 +54,13 @@ from pxf.couple import schedule
 logger = logging.getLogger("pxf.train_couple")
 
 
+def readout_variants():
+    """The SC->BB arms, imported lazily so ``--help`` does not load torch."""
+    from pxf.couple.readout import VARIANTS
+
+    return set(VARIANTS)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -125,7 +132,78 @@ def parse_args(argv=None):
     p.add_argument("--fampnn-checkpoint", default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--pack-steps", type=int, default=None)
-    p.add_argument("--resume", default=None)
+    p.add_argument(
+        "--resume",
+        default=None,
+        help="continue THIS experiment: adapters, optimizer, step, EMA and RNG. "
+        "Not for starting a new phase from a previous one -- use "
+        "--init-from-phase1 for that",
+    )
+    p.add_argument(
+        "--init-from-phase1",
+        default=None,
+        help="weights-only initialization: load and freeze the selected A_BS "
+        "from a phase-1 checkpoint, start A_SB fresh, and reset the optimizer, "
+        "step counter and EMA. A 2k pilot must start at step 0",
+    )
+    p.add_argument(
+        "--sb-variant",
+        default=None,
+        choices=sorted(readout_variants()),
+        help="which SC->BB arm to train. full: the candidate. bb_only: the "
+        "trained BB/sequence-only control, reading the side-chain-masked "
+        "encoding with every SC-derived group zeroed. generic: the trained "
+        "sigma-only control, z identically zero. All three have the same "
+        "parameter count, so they differ in information and not in capacity",
+    )
+    p.add_argument(
+        "--bs-policy",
+        default=None,
+        choices=("bypass", "matched"),
+        help="the Phase-1 BB->SC policy, held fixed across every SC->BB arm",
+    )
+    p.add_argument(
+        "--bs-gate",
+        default=None,
+        choices=("off", "A", "B", "C", "one"),
+        help="sigma gate on the BB->SC residual; only read with --bs-policy matched",
+    )
+    p.add_argument(
+        "--pool-size",
+        type=int,
+        default=None,
+        help="how many (structure, sigma) examples the pilot trains on. A FIXED "
+        "pool with known backbone targets, precomputed once, so the frozen half "
+        "is paid for per example rather than per step",
+    )
+    p.add_argument(
+        "--sigmas-per-structure",
+        type=int,
+        default=4,
+        help="sigma draws per structure when building the pilot pool",
+    )
+    p.add_argument(
+        "--val-structures",
+        default=None,
+        help="held-out structures for the in-loop bb0-vs-bb1 score, reported at "
+        "initialization and at every couple.eval_steps",
+    )
+    p.add_argument("--val-pool-size", type=int, default=32)
+    p.add_argument(
+        "--cache-upstream",
+        default=None,
+        help="path to save/load the frozen upstream states. Refuses to load a "
+        "cache built from different donors, packing length or BB->SC policy",
+    )
+    p.add_argument(
+        "--conditioning-cache",
+        type=int,
+        default=8,
+        help="how many structures' PXDesign conditioning to keep in memory. The "
+        "corrective call needs it every step and it does not depend on sigma, so "
+        "caching it is the difference between recomputing the trunk per step and "
+        "per structure",
+    )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None)
     p.add_argument(
@@ -193,6 +271,63 @@ def make_stub_backbone(length, channels):
     return backbone
 
 
+def _masked_rmsd(predicted, reference, keep):
+    """RMSD over the supervised atoms, **un-superposed**.
+
+    Matching the loss on purpose: a denoiser predicts in the frame it was given,
+    so aligning first would hide exactly the error the correction is supposed to
+    remove. The superposed numbers are the evaluator's job
+    (:mod:`pxf.eval.backbone_metrics`), where they are the right quantity.
+    """
+    delta = predicted.reshape(-1, 3)[keep] - reference
+    return float(delta.pow(2).sum(-1).mean().sqrt())
+
+
+class ConditioningCache:
+    """PXDesign conditioning per structure, least-recently-used.
+
+    The corrective call needs ``(s_inputs, s_trunk, z_trunk)`` every step, and
+    they are a function of the structure alone -- not of sigma, not of the
+    feedback. Recomputing the trunk 2,000 times for a pool of a few dozen
+    structures is the single largest avoidable cost in the pilot.
+
+    ``z_trunk`` is the large one (``[1, L, L, c_z]``, ~33 MB at L = 256), so the
+    cache is bounded and evicts rather than growing.
+    """
+
+    def __init__(self, driver, *, capacity=8):
+        self.driver = driver
+        self.capacity = max(0, int(capacity))
+        self._items = {}
+        self._order = []
+        self.hits = self.misses = 0
+
+    def get(self, sample_id, feature_dict):
+        if self.capacity and sample_id in self._items:
+            self.hits += 1
+            self._order.remove(sample_id)
+            self._order.append(sample_id)
+            return self._items[sample_id]
+        self.misses += 1
+        conditioning = self.driver.conditioning(feature_dict)
+        if self.capacity:
+            self._items[sample_id] = conditioning
+            self._order.append(sample_id)
+            while len(self._order) > self.capacity:
+                del self._items[self._order.pop(0)]
+        return conditioning
+
+    def stats(self):
+        total = self.hits + self.misses
+        return dict(
+            capacity=self.capacity,
+            entries=len(self._items),
+            hits=self.hits,
+            misses=self.misses,
+            hit_rate=(self.hits / total if total else 0.0),
+        )
+
+
 def _native_atom37(structures, sample_id, structure):
     """Side-chain targets in atom37, from the same file the backbone came from.
 
@@ -241,6 +376,7 @@ def main(argv=None):
 
     from fampnn.data import residue_constants as rc
     from pxf import atom37, provenance
+    from pxf.couple import pilot
     from pxf.couple.adapters import CouplingAdapters
     from pxf.couple.controller import CoupledDenoiser, Topology
     from pxf.couple.trainer import CoupledBatch, CoupledTrainer, CoupleSettings
@@ -258,14 +394,25 @@ def main(argv=None):
     couple_cfg = dict(config.get("couple", {}))
     optim_cfg = dict(config.get("optim", {}))
     adapter_cfg = dict(config.get("adapters", {}))
+    sb_cfg = dict(config.get("sb_feedback", {}))
     for key, value in (
         ("phase", args.phase),
         ("max_steps", args.max_steps),
         ("seed", args.seed),
         ("pack_steps", args.pack_steps),
+        ("bs_policy", args.bs_policy),
     ):
         if value is not None:
             couple_cfg[key] = value
+    if args.sb_variant is not None:
+        sb_cfg["variant"] = args.sb_variant
+    run_pilot = bool(couple_cfg.get("corrective_event"))
+    if run_pilot and args.backbone != "pxdesign":
+        raise SystemExit(
+            "the SC->BB pilot needs --backbone pxdesign: the whole question is "
+            "whether the correction reaches the real decoder, and the stub's "
+            "feedback path is a scalar shim that cannot answer it"
+        )
     if args.lr is not None:
         optim_cfg["lr"] = args.lr
     # The sigma_B distribution: config block, overridden by any flag that is set.
@@ -343,16 +490,31 @@ def main(argv=None):
         sigma_schedule = replace(sigma_schedule, sigma_data=sigma_data)
     couple_cfg["sigma_schedule"] = sigma_schedule.identity()
     logger.info("%s", sigma_schedule.describe())
-    adapters = CouplingAdapters(c_token, c_h_V, **adapter_cfg).to(device)
+    sb_module = None
+    if sb_cfg:
+        from pxf.couple.readout import FeedbackPath, SigmaWindow
+
+        gate_cfg = dict(sb_cfg.get("gate") or {})
+        gate = SigmaWindow(**gate_cfg) if gate_cfg else None
+        sb_module = FeedbackPath(
+            c_h_V,
+            c_token,
+            d_hidden=int(adapter_cfg.get("d_hidden", 256)),
+            d_noise=int(adapter_cfg.get("d_noise", 64)),
+            variant=sb_cfg.get("variant", "full"),
+            gate=gate,
+        )
+        logger.info("SC->BB arm: %s", json.dumps(sb_module.identity(), default=str))
+    adapters = CouplingAdapters(c_token, c_h_V, sc_to_bb=sb_module, **adapter_cfg).to(
+        device
+    )
     if args.train_fampnn:
         # No adapter may train or be applied: the control has to isolate the
         # fine-tune. CoupledTrainer._assert_adapters_are_inert re-checks both.
         adapters.requires_grad_(False)
         adapters.enable_bb_to_sc = False
         adapters.enable_sc_to_bb = False
-        logger.info(
-            "CONTROL ARM: training FaMPNN weights, adapters frozen and not applied"
-        )
+        logger.info("CONTROL ARM: training FaMPNN weights, adapters frozen and not applied")
     if px_driver is None:
         backbone = make_stub_backbone(args.crop_size, c_token)
     else:
@@ -364,12 +526,23 @@ def main(argv=None):
                 "the controller was called before any batch arrived"
             )
 
+    bs_gate = None
+    if args.bs_gate and args.bs_gate != "off":
+        from pxf.couple import bs_policy
+
+        if couple_cfg.get("bs_policy", "bypass") != "matched":
+            raise SystemExit(
+                f"--bs-gate {args.bs_gate} is only read with --bs-policy matched; "
+                "the bypass applies no BB->SC residual for a gate to scale"
+            )
+        bs_gate = bs_policy.gate_by_name(args.bs_gate)
     controller = CoupledDenoiser(
         backbone,
         fampnn,
         adapters,
         phase=couple_cfg.get("phase", "bb_to_sc"),
         pack_steps=couple_cfg.get("pack_steps"),
+        bs_gate=bs_gate,
     )
     frozen = dict(
         fampnn=provenance.weight_record(checkpoint, variant=args.fampnn_weights),
@@ -390,6 +563,15 @@ def main(argv=None):
         fampnn_finetune=bool(args.train_fampnn),
         fampnn_model_cfg=bundle["model_cfg"] if args.train_fampnn else None,
     )
+    if args.resume and args.init_from_phase1:
+        raise SystemExit(
+            "--resume and --init-from-phase1 do different things and cannot be "
+            "combined: resume continues this experiment from its own state, "
+            "initialization starts a new one from a previous phase's weights"
+        )
+    if args.init_from_phase1:
+        record = trainer.initialize_from(args.init_from_phase1)
+        logger.info("initialized A_BS from phase 1: %s", json.dumps(record, default=str))
     if args.resume:
         logger.info("resumed at step %d", trainer.resume(args.resume))
 
@@ -399,6 +581,9 @@ def main(argv=None):
                 couple=couple_cfg,
                 optim=optim_cfg,
                 adapters=adapter_cfg,
+                sb_feedback=sb_cfg,
+                sb_identity=(sb_module.identity() if sb_module is not None else None),
+                bs_gate=(bs_gate.identity() if bs_gate is not None else None),
                 n_structures=len(structures),
                 sigma_schedule=sigma_schedule.identity(),
                 backbone=args.backbone,
@@ -489,9 +674,232 @@ def main(argv=None):
                 )
             epoch += 1
 
-    batches = pxdesign_batches if args.backbone == "pxdesign" else stub_batches
+    # ---- the SC->BB pilot ------------------------------------------------
+
+    def pilot_examples(paths, *, per_structure, limit, seed_offset):
+        """A FIXED pool of ``(structure, sigma, seed)`` with known BB targets.
+
+        Fixed, not streamed: every arm must train on the same examples, the
+        frozen half is expensive and cacheable, and a reconstructible noisy
+        state is what makes the cache key mean anything. The sigma draws are
+        derived from the structure's name rather than from loop position, so
+        ``--pool-size`` truncates the pool without changing which examples
+        survive.
+        """
+        from pxf.eval.couple import target_seed
+
+        base = int(couple_cfg.get("seed", 0)) + int(seed_offset)
+        # Sampled across the manifest rather than taken from the front: a
+        # prefix of a 2,000-entry export is whatever order the exporter used,
+        # and `--pool-size 512` would then train every arm on the same
+        # arbitrary corner of it. Seeded, so the pool is still reproducible and
+        # every arm gets the identical examples.
+        order = torch.randperm(
+            len(paths), generator=torch.Generator().manual_seed(base)
+        ).tolist()
+        out = []
+        for path in [paths[i] for i in order]:
+            name = Path(path).stem
+            generator = torch.Generator().manual_seed(target_seed(base, name, 0.0, 0))
+            sigmas = sigma_schedule.sample(int(per_structure), generator=generator)
+            for replicate, sigma in enumerate(sigmas.tolist()):
+                out.append(
+                    dict(
+                        path=str(path),
+                        name=name,
+                        sigma=float(sigma),
+                        seed=target_seed(base, name, sigma, replicate),
+                    )
+                )
+        if limit:
+            out = out[: int(limit)]
+        return out
+
+    def build_pool(paths, *, per_structure, limit, seed_offset, label):
+        examples = pilot_examples(
+            paths, per_structure=per_structure, limit=limit, seed_offset=seed_offset
+        )
+        wanted = {entry["path"] for entry in examples}
+        featurized_by_name = {
+            sample_id: source
+            for sample_id, source in featurize_structures(
+                sorted(wanted), crop_size=args.crop_size, proteoaa_root=args.proteoaa_root
+            )
+        }
+        logger.info(
+            "%s pool: %d example(s) over %d structure(s)",
+            label,
+            len(examples),
+            len(wanted),
+        )
+        return examples, featurized_by_name
+
+    def prepared(entry, featurized_by_name):
+        """Featurize, bind the denoiser, and build the supervised BB mask."""
+        source = featurized_by_name[entry["name"]]
+        structure = to_featurized(entry["name"], source[0]).to(device)
+        target = structure.backbone_target.float()
+        mask = pilot.backbone_supervision_mask(
+            structure.topology.atom_names,
+            coordinate_mask=structure.label_dict.get("coordinate_mask"),
+            device=device,
+        )
+        generator = torch.Generator().manual_seed(int(entry["seed"]))
+        noise = torch.randn(target.shape, generator=generator).to(device)
+        x_noisy = (target + noise * entry["sigma"])[None]
+        sigma = torch.full((1,), entry["sigma"], device=device)
+        controller.backbone = px_driver.bind(
+            conditioning_cache.get(entry["name"], structure.feature_dict)
+        )
+        return structure, target, mask, x_noisy, sigma
+
+    def upstream_for(entry, featurized_by_name, cache):
+        """The cached frozen half, computing it on a miss."""
+        structure, target, mask, x_noisy, sigma = prepared(entry, featurized_by_name)
+        state = cache.get(entry["name"], entry["sigma"], entry["seed"])
+        if state is None:
+            # The packing sampler draws from the global RNG, so the frozen half
+            # has to be seeded from the example rather than from wherever the
+            # loop happens to have left it. Without this, two arms -- or a rerun
+            # of the same arm -- read a DIFFERENT sc0 for the same example, and
+            # the comparison measures the side-chain sampler as well as the
+            # adapter. It is also what makes the cache reproducible rather than
+            # merely reusable.
+            torch.manual_seed(int(entry["seed"]))
+            state = controller.frozen_half(
+                structure.topology,
+                x_noisy,
+                sigma,
+                structure.aatype,
+                bs_delta_h=trainer.bs_delta_h,
+            )
+            cache.put(entry["name"], entry["sigma"], entry["seed"], state.to("cpu"))
+        return structure, target, mask, x_noisy, sigma, state.to(device)
+
+    def pilot_batches():
+        examples, featurized_by_name = build_pool(
+            structures,
+            per_structure=args.sigmas_per_structure,
+            limit=args.pool_size,
+            seed_offset=1,
+            label="train",
+        )
+        if not examples:
+            raise SystemExit("the pilot pool is empty")
+        order = torch.Generator().manual_seed(int(couple_cfg.get("seed", 0)) + 7)
+        while True:
+            # Reshuffled each epoch rather than cycled in order: with a pool
+            # smaller than the step budget, a fixed order makes the gradient
+            # sequence periodic and the loss curve reads as if it converged.
+            for index in torch.randperm(len(examples), generator=order).tolist():
+                entry = examples[index]
+                structure, target, mask, x_noisy, sigma, state = upstream_for(
+                    entry, featurized_by_name, upstream_cache
+                )
+                yield CoupledBatch(
+                    topology=structure.topology,
+                    x_noisy=x_noisy,
+                    sigma=sigma,
+                    aatype=structure.aatype,
+                    backbone_target=target[None],
+                    backbone_atom_mask=mask[None],
+                    upstream=state,
+                    name=entry["name"],
+                )
+
+    def install_validation():
+        """Score bb0 against bb1 on held-out examples. The pilot's own signal."""
+        if not args.val_structures:
+            return None
+        val_paths = resolve_structures(args.val_structures, suffix=".cif")
+        examples, featurized_by_name = build_pool(
+            val_paths,
+            per_structure=1,
+            limit=args.val_pool_size,
+            seed_offset=101,
+            label="val",
+        )
+        val_cache = pilot.UpstreamCache(identity=upstream_cache.identity)
+
+        def validate(step):
+            rows = []
+            was_training = adapters.training
+            adapters.eval()
+            for entry in examples:
+                structure, target, mask, x_noisy, sigma, state = upstream_for(
+                    entry, featurized_by_name, val_cache
+                )
+                with torch.no_grad():
+                    cycle = controller.corrective_event(
+                        structure.topology,
+                        x_noisy,
+                        sigma,
+                        structure.aatype,
+                        bs_delta_h=trainer.bs_delta_h,
+                        upstream=state,
+                    )
+                keep = mask.bool()
+                reference = target[keep]
+                row = dict(
+                    sigma=entry["sigma"],
+                    bb0=_masked_rmsd(cycle.bb0_flat, reference, keep),
+                )
+                row["bb1"] = (
+                    _masked_rmsd(cycle.bb1_flat, reference, keep)
+                    if cycle.bb1_flat is not None
+                    else row["bb0"]
+                )
+                row["delta_a_norm"] = float(cycle.feedback_stats.get("delta_a_norm", 0.0))
+                row["relative_residual"] = float(
+                    cycle.feedback_stats.get("relative_residual", 0.0)
+                )
+                rows.append(row)
+            if was_training:
+                adapters.train()
+            if not rows:
+                return None
+            mean = lambda key: sum(r[key] for r in rows) / len(rows)  # noqa: E731
+            improved = sum(1 for r in rows if r["bb1"] < r["bb0"])
+            return dict(
+                val_examples=len(rows),
+                val_bb0_rmsd=mean("bb0"),
+                val_bb1_rmsd=mean("bb1"),
+                val_improvement=mean("bb0") - mean("bb1"),
+                val_fraction_improved=improved / len(rows),
+                val_delta_a_norm=mean("delta_a_norm"),
+                val_relative_residual=mean("relative_residual"),
+            )
+
+        return validate
+
+    if run_pilot:
+        conditioning_cache = ConditioningCache(px_driver, capacity=args.conditioning_cache)
+        cache_identity = pilot.cache_identity(
+            frozen=frozen,
+            pack_steps=couple_cfg.get("pack_steps"),
+            bs_policy=couple_cfg.get("bs_policy", "bypass"),
+            sigma_schedule=sigma_schedule.identity(),
+            seed_base=int(couple_cfg.get("seed", 0)),
+        )
+        upstream_cache = pilot.UpstreamCache(identity=cache_identity)
+        if args.cache_upstream and Path(args.cache_upstream).is_file():
+            upstream_cache = pilot.UpstreamCache.load(
+                args.cache_upstream, identity=cache_identity
+            )
+            logger.info("loaded upstream cache: %s", upstream_cache.stats())
+        trainer.validate_fn = install_validation()
+        batches = pilot_batches
+    else:
+        batches = pxdesign_batches if args.backbone == "pxdesign" else stub_batches
 
     result = trainer.train(batches(), progress=lambda m: logger.info(m))
+    if run_pilot:
+        result["upstream_cache"] = upstream_cache.stats()
+        result["conditioning_cache"] = conditioning_cache.stats()
+        logger.info("caches: %s", json.dumps(result["upstream_cache"], default=str))
+        if args.cache_upstream:
+            upstream_cache.save(args.cache_upstream)
+            logger.info("wrote upstream cache -> %s", args.cache_upstream)
     logger.info("done: %s", result)
     (out / "result.json").write_text(json.dumps(result, indent=2))
     return 0

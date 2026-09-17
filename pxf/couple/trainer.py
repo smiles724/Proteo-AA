@@ -47,7 +47,15 @@ class CoupledBatch:
     ``sidechain_batch`` the dict :mod:`pxf.train.step` needs for ``L_SC``
                       (keys of ``pxf.train.step.REQUIRED_KEYS``)
     ``backbone_target`` GT coordinates aligned with ``x_noisy``, for ``L_BB``
-    ``backbone_atom_mask`` optional mask over that axis
+    ``backbone_atom_mask`` which atoms on that axis may be supervised. Required
+                      by the SC->BB pilot: the monomer configuration happens to
+                      emit a backbone-only axis, but only by configuration, and
+                      the featurizer collapses design-region side chains onto
+                      their CA rather than dropping them. See
+                      :func:`pxf.couple.pilot.backbone_supervision_mask`.
+    ``upstream``      a cached, detached :class:`pxf.couple.pilot.UpstreamState`,
+                      so a pilot pays for the packing once per example rather
+                      than once per step
     """
 
     topology: Any
@@ -57,6 +65,7 @@ class CoupledBatch:
     sidechain_batch: dict | None = None
     backbone_target: torch.Tensor | None = None
     backbone_atom_mask: torch.Tensor | None = None
+    upstream: Any = None
     name: str | None = None
 
     def require(self, kind):
@@ -82,6 +91,22 @@ class CoupleSettings:
     grad_accum_steps: int = 1
     pack_steps: int | None = None  # side-chain rollout length in the cycle
     sigma_data_backbone: float = 16.0
+    # Use the explicit-boundary corrective-event path for backbone steps: the
+    # frozen half under no_grad and cacheable, the correction outside it. The
+    # older path runs the whole cycle in one call, which is equivalent here
+    # because everything upstream is frozen, but says so nowhere.
+    corrective_event: bool = False
+    # The selected Phase-1 BB->SC policy, held FIXED across every SC->BB
+    # comparison -- that is what makes the A_SB arms comparable to each other.
+    # "bypass" runs no BB->SC residual at all, which the plan prescribes while
+    # Phase 1 is unresolved and which does not prevent testing A_SB. "matched"
+    # applies the loaded A_BS to this structure's own a_token. Recorded in every
+    # checkpoint, because an A_SB trained under one policy is not deployable
+    # under the other.
+    bs_policy: str = "bypass"
+    # Steps at which to score the held-out set. Step 0 is always included, so
+    # "at initialization" is a measurement rather than an assumption.
+    eval_steps: tuple = ()
     # Reduction for L_SC; see pxf.train.losses.SIDECHAIN_REDUCTIONS.
     sidechain_reduction: str = "per_residue"
     # The sigma_B distribution the batches were drawn from, as
@@ -168,6 +193,18 @@ class CoupledTrainer:
             )
         self.step = 0
         self.phase_record = record
+        from pxf.couple.controller import UNSET
+
+        policies = {"bypass": None, "matched": UNSET}
+        if self.settings.bs_policy not in policies:
+            raise ValueError(
+                f"unknown bs_policy {self.settings.bs_policy!r}; choose from "
+                f"{sorted(policies)}"
+            )
+        self.bs_delta_h = policies[self.settings.bs_policy]
+        # Held-out scoring, installed by the driver. Called at step 0 and at
+        # every step in `settings.eval_steps`.
+        self.validate_fn = None
         torch.manual_seed(self.settings.seed)
         self.generator = torch.Generator().manual_seed(self.settings.seed)
         self._log_path = self.out_dir / "train_log.jsonl"
@@ -222,13 +259,23 @@ class CoupledTrainer:
         """Run the cycle and compute the objective this step owns."""
         batch.require(kind)
         run_feedback = kind == "backbone"
-        cycle = self.controller.forward(
-            batch.topology,
-            batch.x_noisy,
-            batch.sigma,
-            batch.aatype,
-            run_feedback=run_feedback,
-        )
+        if run_feedback and self.settings.corrective_event:
+            cycle = self.controller.corrective_event(
+                batch.topology,
+                batch.x_noisy,
+                batch.sigma,
+                batch.aatype,
+                bs_delta_h=self.bs_delta_h,
+                upstream=batch.upstream,
+            )
+        else:
+            cycle = self.controller.forward(
+                batch.topology,
+                batch.x_noisy,
+                batch.sigma,
+                batch.aatype,
+                run_feedback=run_feedback,
+            )
         if kind == "sidechain":
             features = cycle.aux.get("features")
             if features is None:
@@ -241,13 +288,31 @@ class CoupledTrainer:
                 generator=self.generator,
                 reduction=self.settings.sidechain_reduction,
             ), cycle
-        return couple_losses.backbone_feedback_loss(
+        if batch.backbone_atom_mask is None and self.settings.corrective_event:
+            raise ValueError(
+                f"batch {batch.name!r} carries no backbone_atom_mask, so the "
+                "supervised atom set is whatever the featurizer happened to put "
+                "on the flat axis. Under the monomer configuration that is "
+                "backbone-only and harmless, but the featurizer collapses "
+                "design-region side chains onto their CA rather than dropping "
+                "them, so any other configuration would supervise those. Build "
+                "the mask with pxf.couple.pilot.backbone_supervision_mask."
+            )
+        loss = couple_losses.backbone_feedback_loss(
             cycle,
             batch.backbone_target,
             sigma=batch.sigma,
             sigma_data=self.settings.sigma_data_backbone,
             atom_mask=batch.backbone_atom_mask,
-        ), cycle
+        )
+        loss.stats.update(
+            {
+                f"fb_{k}": v
+                for k, v in cycle.feedback_stats.items()
+                if not isinstance(v, list)
+            }
+        )
+        return loss, cycle
 
     # ---- persistence -----------------------------------------------------
 
@@ -288,6 +353,7 @@ class CoupledTrainer:
             ema=self.ema.state_dict() if self.ema else None,
             settings=asdict(self.settings),
             optim_settings=asdict(self.optim_settings),
+            initialized_from=getattr(self, "initialized_from", None),
             frozen=self.frozen_identity,
             controller=self.controller.identity(),
             generator=self.generator.get_state(),
@@ -298,6 +364,61 @@ class CoupledTrainer:
         path = self.out_dir / "checkpoints" / f"{name}.pt"
         torch.save(self.checkpoint_state(), path)
         return path
+
+    def initialize_from(self, path, *, prefix="bb_to_sc."):
+        """Load one *direction* of a previous phase's adapters. Weights only.
+
+        Distinct from :meth:`resume`, which continues the same experiment and
+        restores the optimizer, the step counter, the EMA and the RNG.
+        Initialization takes the selected Phase-1 ``A_BS`` and nothing else:
+        ``A_SB`` starts fresh and zero-initialized, the step counter stays at
+        zero, and the optimizer and EMA are rebuilt. Conflating the two is how a
+        "2k pilot" silently starts at step 20,000 with a stale optimizer state
+        for parameters that no longer exist.
+
+        The loaded direction is frozen here as well as by ``set_phase``: the
+        pilot trains ``A_SB`` only, and an ``A_BS`` that moved would change the
+        packing the feedback reads, which is the one thing every arm has to
+        share.
+        """
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        if "adapters" not in state:
+            raise ValueError(f"{path} is not a coupling checkpoint")
+        source = state["adapters"]
+        if state.get("ema"):
+            # Phase 1's own evaluation used the EMA weights, so the policy being
+            # held fixed is the EMA one; loading the raw weights would hold a
+            # different policy fixed than the one that was selected.
+            shadow = state["ema"].get("shadow") or state["ema"].get("params") or {}
+            source = {**source, **{k: v for k, v in shadow.items() if k in source}}
+        wanted = {k: v for k, v in source.items() if k.startswith(prefix)}
+        if not wanted:
+            raise ValueError(
+                f"{path} carries no {prefix}* parameters, so there is no "
+                "Phase-1 policy in it to hold fixed"
+            )
+        missing, unexpected = self.adapters.load_state_dict(wanted, strict=False)
+        unexpected = [k for k in unexpected if k.startswith(prefix)]
+        if unexpected:
+            raise ValueError(
+                f"{path} has {prefix}* parameters the current adapters do not: "
+                f"{unexpected[:5]}"
+            )
+        still_missing = [k for k in missing if k.startswith(prefix)]
+        if still_missing:
+            raise ValueError(f"{path} is missing {prefix}* parameters: {still_missing[:5]}")
+        self.adapters.bb_to_sc.requires_grad_(False)
+        record = dict(
+            source=str(path),
+            source_step=int(state.get("step", 0)),
+            source_is_ema=bool(state.get("ema")),
+            prefix=prefix,
+            loaded=len(wanted),
+            frozen=True,
+            step=self.step,
+        )
+        self.initialized_from = record
+        return record
 
     def resume(self, path):
         state = torch.load(path, map_location="cpu", weights_only=False)
@@ -325,6 +446,31 @@ class CoupledTrainer:
         with self._log_path.open("a") as stream:
             stream.write(json.dumps(record) + "\n")
 
+    def _maybe_validate(self, wanted, progress):
+        """Score the held-out set if this step is one of the evaluation points.
+
+        Evaluating at initialization as well as at the end is what makes the
+        pilot's claim falsifiable: a zero-initialized A_SB must reproduce the
+        uncorrected proposal exactly, so step 0 is the equality check and every
+        later point is measured against it rather than against a remembered
+        number.
+        """
+        if self.validate_fn is None or self.step not in wanted:
+            return None
+        record = self.validate_fn(self.step)
+        if record is None:
+            return None
+        record = dict(eval=True, step=self.step, **record)
+        self._log(record)
+        if progress:
+            summary = "  ".join(
+                f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
+                for k, v in record.items()
+                if k not in ("eval", "step")
+            )
+            progress(f"[eval step {self.step:>7d}]  {summary}")
+        return record
+
     def train(self, batches: Iterable[CoupledBatch], *, max_steps=None, progress=print):
         """Consume ``batches`` until ``max_steps``. Yields nothing; logs and checkpoints."""
         target = int(max_steps or self.settings.max_steps)
@@ -332,6 +478,8 @@ class CoupledTrainer:
         started = time.time()
         pending = 0
         running = {"sidechain": [], "backbone": []}
+        wanted_evals = sorted({0, *(int(s) for s in self.settings.eval_steps)})
+        self._maybe_validate(wanted_evals, progress)
 
         for batch in batches:
             if self.step >= target:
@@ -397,6 +545,7 @@ class CoupledTrainer:
                 and self.step % self.settings.checkpoint_every == 0
             ):
                 self.save()
+            self._maybe_validate(wanted_evals, progress)
 
         final = self.save(tag="final")
         return dict(

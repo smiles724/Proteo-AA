@@ -220,3 +220,50 @@ def test_each_source_reports_what_it_is_missing():
         bp.residual(adapters, "mean", sigma=1.0, mean=make_mean())
     with pytest.raises(ValueError, match="unknown residual source"):
         bp.residual(adapters, "telepathy", sigma=1.0)
+
+
+# --- device placement -------------------------------------------------------
+#
+# The mean vector is loaded from JSON and starts on the CPU; every other source
+# is produced by the adapter and lands on the model's device. That asymmetry
+# made the mean arm the only one to fail, and only on GPU, so a CPU-only suite
+# could not see it. These pin the placement rule rather than the symptom.
+
+
+def test_the_mean_vector_follows_a_tokens_device_and_dtype():
+    a_token = torch.randn(1, 5, 3, dtype=torch.float64)
+    out = bp.residual(
+        FakeAdapters(), "mean", a_token=a_token, sigma=1.642, length=5, mean=make_mean()
+    )
+    assert out.device == a_token.device
+    assert out.dtype == a_token.dtype
+
+
+def test_an_explicit_device_overrides_inference():
+    out = bp.residual(
+        FakeAdapters(),
+        "mean",
+        sigma=1.642,
+        length=5,
+        mean=make_mean(),
+        device=torch.device("cpu"),
+        dtype=torch.float16,
+    )
+    assert out.dtype == torch.float16
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_every_source_lands_on_one_device():
+    """The regression itself: h_base + delta_h must not span devices."""
+    device = torch.device("cuda")
+    adapters, a_token = FakeAdapters(), torch.randn(1, 5, 3, device=device)
+    for source in ("matched", "zero_input", "mean"):
+        out = bp.residual(
+            adapters,
+            source,
+            a_token=a_token,
+            sigma=1.642,
+            length=5,
+            mean=make_mean(),
+        )
+        assert out.device.type == device.type, f"{source} landed on {out.device}"

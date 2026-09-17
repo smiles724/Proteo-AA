@@ -155,6 +155,8 @@ def residual(
     length=None,
     mean=None,
     gate=None,
+    device=None,
+    dtype=None,
 ):
     """The BB->SC residual for one arm, gated.
 
@@ -181,8 +183,16 @@ def residual(
             raise ValueError("the mean source needs a MeanResidual")
         if length is None:
             raise ValueError("the mean source needs the residue count to broadcast to")
+        # mu(sigma) is loaded from JSON and so starts on the CPU, while every
+        # other source is produced by the adapter and lands on the model's
+        # device. Without this the mean arm is the only one that dies, and only
+        # on GPU -- which is exactly how it escaped a CPU-only test suite.
+        if device is None and a_token is not None:
+            device, dtype = a_token.device, a_token.dtype
         vector = mean.at(
-            sigma if not torch.is_tensor(sigma) else float(sigma.reshape(-1)[0])
+            sigma if not torch.is_tensor(sigma) else float(sigma.reshape(-1)[0]),
+            device=device,
+            dtype=dtype,
         )
         delta = vector.reshape(1, 1, -1).expand(1, int(length), -1)
     else:

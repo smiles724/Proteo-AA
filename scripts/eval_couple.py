@@ -85,10 +85,12 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--compare",
-        nargs=1,
+        nargs="+",
         metavar="RUN_DIR",
         default=None,
-        help=f"print the delta table from an existing {METRICS_FILE} and exit",
+        help=f"print the delta table from an existing {METRICS_FILE} and exit. "
+        "Given two directories, report how much of the second run's effect the "
+        "first reproduces, refusing if their manifests disagree",
     )
     p.add_argument(
         "--checkpoint",
@@ -313,11 +315,60 @@ def _with_sequence_recovery(summary):
     return summary
 
 
-def compare(run_dir):
+def _load_run(run_dir):
     path = Path(run_dir) / METRICS_FILE
     if not path.is_file():
         raise SystemExit(f"{path} does not exist; run the evaluation first")
-    return report(json.loads(path.read_text()))
+    return json.loads(path.read_text())
+
+
+def compare(run_dir, against=None):
+    """One run's table, or the retention of one run's effect against another.
+
+    With two runs this is the information-content comparison: how much of the
+    reference run's coupled-vs-uncoupled effect the candidate reproduces. The
+    manifests must agree first -- two runs with different seed schemes, sigma
+    grids or panels measured different things, and dividing one delta by the
+    other would produce a number with no meaning.
+    """
+    record = _load_run(run_dir)
+    if against is None:
+        return report(record)
+
+    other = _load_run(against)
+    left = record.get("manifest") or {}
+    right = other.get("manifest") or {}
+    if not left or not right:
+        raise SystemExit(
+            "one of these runs predates the run manifest, so compatibility "
+            "cannot be established; re-run both before comparing them"
+        )
+    mismatched = ev.incompatible_fields(left, right)
+    if mismatched:
+        print("\nREFUSING to compare: the runs did not measure the same thing")
+        for key, a, b in mismatched:
+            print(f"  {key}:\n    {run_dir}: {a}\n    {against}: {b}")
+        raise SystemExit(1)
+
+    print("\n=== retention of the reference effect ===")
+    print(
+        f"  reference: {against}   ({right.get('a_token_source')}, n={other['n_targets']})"
+    )
+    print(
+        f"  candidate: {run_dir}   ({left.get('a_token_source')}, "
+        f"n={record['n_targets']})\n"
+    )
+    print(f"  {'sigma':>8} {'metric':24s} {'D ref':>10} {'D cand':>10} {'retained':>9}")
+    for cand, ref in zip(record["per_sigma"], other["per_sigma"]):
+        for key in ev.HEADLINE:
+            dr = ref["arms"]["coupled"][key] - ref["arms"]["uncoupled"][key]
+            dc = cand["arms"]["coupled"][key] - cand["arms"]["uncoupled"][key]
+            # A retention ratio on a near-zero reference effect is noise, not a
+            # measurement, so it is withheld rather than printed misleadingly.
+            share = f"{100 * dc / dr:8.0f}%" if abs(dr) > 1e-3 else "     n/a"
+            print(f"  {ref['sigma']:8.3f} {key:24s} {dr:+10.4f} {dc:+10.4f} {share}")
+        print()
+    return 0
 
 
 # --- evaluation ------------------------------------------------------------
@@ -496,7 +547,11 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.compare:
-        return 1 if compare(args.compare[0]) and args.fail_on_regression else 0
+        if len(args.compare) > 2:
+            raise SystemExit("--compare takes one or two run directories")
+        against = args.compare[1] if len(args.compare) == 2 else None
+        hurt = compare(args.compare[0], against)
+        return 1 if hurt and args.fail_on_regression else 0
 
     required = ["structures", "out"]
     # Native mode never builds a backbone, so the donor is not merely optional
@@ -611,6 +666,20 @@ def main(argv=None):
     )
     canonical = load_metrics()
 
+    # Submodule revisions and the patch digest, so a manifest identifies the
+    # code as well as the data. Best-effort: --allow-unpinned-sources exists
+    # precisely for environments where the git checks cannot run.
+    try:
+        from pxf import provenance
+
+        upstream_record = {
+            name: provenance.component_record(name, strict=not args.allow_unpinned_sources)
+            for name in ("pxdesign", "protenix", "fampnn")
+        }
+    except Exception as error:  # pragma: no cover - environment dependent
+        logger.warning("could not record upstream revisions: %s", error)
+        upstream_record = None
+
     featurized = featurize_structures(
         structures, crop_size=args.crop_size, proteoaa_root=args.proteoaa_root
     )
@@ -626,8 +695,17 @@ def main(argv=None):
             strict_sources=not args.allow_unpinned_sources,
         ).to(device)
 
-    # None = control off. {} = on but no donor seen yet (the first target).
-    donor_bank = {} if args.shuffle_a_token else None
+    # None = control off. Otherwise pre-seeded from the LAST structure, so the
+    # rotation closes into a cycle and every target is both scored and donated
+    # to. Seeding lazily from the first target instead would silently drop it
+    # from the shuffled run, leaving the control scored on n-1 targets and the
+    # reference on n -- unpaired, which is exactly what the comparison must not
+    # be. Costs one extra proposal per sigma.
+    donor_bank = None
+    if args.shuffle_a_token:
+        donor_bank = _seed_donor_bank(
+            featurized[-1], sigmas, args, controller, px_driver, device, logger
+        )
     counts = {(arm, i): [] for arm in ev.ARMS for i in range(len(sigmas))}
     backbone_rmsds = {(arm, i): [] for arm in ev.ARMS for i in range(len(sigmas))}
     pooled_counts = {arm: [] for arm in ev.ARMS}
@@ -671,12 +749,11 @@ def main(argv=None):
                 )
             )
 
-        # Shuffled control: this target's own a_token becomes the next target's
-        # donor, so the donor is always a *different* protein at the same sigma.
-        # The first target has no donor yet, so it only seeds the bank and is
-        # not scored -- hence n is one lower than an unshuffled run.
+        # Shuffled control: this target's own a_token becomes the next
+        # target's donor, so the donor is always a different protein at the
+        # same sigma. The bank is pre-seeded from the last structure, so every
+        # target is scored and the panel matches the reference run's exactly.
         own_a_token = {}
-        score_this_target = donor_bank is None or bool(donor_bank)
 
         for si, sigma_value in enumerate(sigmas):
             seed = ev.target_seed(args.seed, sample_id, sigma_value)
@@ -686,6 +763,20 @@ def main(argv=None):
             generator = torch.Generator().manual_seed(seed)
             noise = torch.randn(target.shape, generator=generator).to(device)
             x_noisy = (target + noise * float(sigma_value))[None]
+
+            # The backbone proposal and the FaMPNN encoding do not depend on the
+            # residual, so they are computed once and every arm packs from them.
+            # This makes "the arms saw the same conditioning" structural rather
+            # than a consequence of the backbone happening to be deterministic,
+            # and it removes one backbone pass per extra arm.
+            proposal = None
+            if not args.codesign:
+                with torch.no_grad():
+                    proposal = controller.propose(
+                        structure.topology, x_noisy, sigma, aatype
+                    )
+                if donor_bank is not None:
+                    own_a_token.setdefault(si, proposal.a_token.detach())
 
             for arm in ev.ARMS:
                 enabled = arm == "coupled"
@@ -718,21 +809,11 @@ def main(argv=None):
                             override = ev.donor_a_token(
                                 donor_bank[si], int(aatype.shape[0])
                             )
-                        cycle = controller.forward(
-                            structure.topology,
-                            x_noisy,
-                            sigma,
-                            aatype,
-                            run_feedback=args.run_feedback and enabled,
+                        cycle = controller.pack_proposal(
+                            proposal,
                             a_token_override=override,
+                            run_feedback=args.run_feedback and enabled,
                         )
-                        # cycle.a_token is this structure's own even when the
-                        # residual read a donor, so caching it here is correct
-                        # whichever arm ran first.
-                        if donor_bank is not None:
-                            own_a_token.setdefault(si, cycle.a_token.detach())
-                if not score_this_target:
-                    continue
                 # The packed atom set belongs to whatever sequence was packed
                 # for, so atom37 assembly must use s_hat in codesign mode.
                 scored_aatype = aatype if s_hat is None else s_hat.reshape(-1)
@@ -824,6 +905,16 @@ def main(argv=None):
         pack_steps=args.pack_steps,
         run_feedback=bool(args.run_feedback),
         a_token_source="shuffled-donor" if args.shuffle_a_token else "own",
+        # Everything needed to decide whether another run measured the same
+        # thing. Checked by `--compare`; two runs that disagree on any
+        # compatibility key are not combinable however alike they look.
+        manifest=ev.run_manifest(
+            args=args,
+            sigmas=sigmas,
+            checkpoint_path=args.checkpoint,
+            structures=structures,
+            upstream=upstream_record,
+        ),
         codesign=bool(args.codesign),
         seq_decode=(codesign.DECODE_SINGLE_PASS if args.codesign else None),
         seq_temperature=(args.seq_temperature if args.codesign else None),
@@ -867,6 +958,39 @@ def main(argv=None):
 
     hurt = report(record)
     return 1 if hurt and args.fail_on_regression else 0
+
+
+def _seed_donor_bank(entry, sigmas, args, controller, px_driver, device, logger):
+    """a_token for one structure at every sigma, to prime the donor rotation.
+
+    Uses the last structure in the panel so that target 0's donor is target
+    n-1: a cyclic shift by one, which is a derangement for any n > 1, and no
+    structure ever donates to itself.
+    """
+    from pxf.backbone.driver import to_featurized
+
+    sample_id, source = entry
+    structure = to_featurized(sample_id, source[0]).to(device)
+    target = structure.backbone_target.float()
+    # The controller's backbone is bound per target inside the main loop, and
+    # this runs before any of that, so bind it here for the donor structure.
+    controller.backbone = px_driver.bind(px_driver.conditioning(structure.feature_dict))
+    bank = {}
+    for si, sigma_value in enumerate(sigmas):
+        seed = ev.target_seed(args.seed, sample_id, sigma_value)
+        sigma = torch.full((1,), float(sigma_value), device=device)
+        generator = torch.Generator().manual_seed(seed)
+        noise = torch.randn(target.shape, generator=generator).to(device)
+        with torch.no_grad():
+            proposal = controller.propose(
+                structure.topology,
+                (target + noise * float(sigma_value))[None],
+                sigma,
+                structure.aatype.reshape(-1),
+            )
+        bank[si] = proposal.a_token.detach()
+    logger.info("donor bank seeded from %s (%d sigmas)", sample_id, len(bank))
+    return bank
 
 
 def _native_parse(structures, sample_id):

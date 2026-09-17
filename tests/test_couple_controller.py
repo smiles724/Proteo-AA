@@ -261,3 +261,98 @@ def test_no_override_is_identical_to_passing_none(fampnn, case):
     torch.manual_seed(0)
     b = controller.forward(*args, run_feedback=False, a_token_override=None)
     assert torch.allclose(a.bb0_dense, b.bb0_dense)
+
+
+# --- shared proposal, packed per arm ----------------------------------------
+
+
+def _fingerprint(proposal):
+    """Every shared tensor, cloned, so mutation during packing is detectable."""
+    import torch as _t
+
+    out = {
+        "bb0_flat": proposal.bb0_flat.clone(),
+        "a_token": proposal.a_token.clone(),
+        "h_base": proposal.h_base.clone(),
+        "coords_af2": proposal.inputs.coords_af2.clone(),
+    }
+    out.update(
+        {
+            f"features.{k}": v.clone()
+            for k, v in proposal.features.items()
+            if _t.is_tensor(v)
+        }
+    )
+    return out
+
+
+def test_packing_does_not_mutate_the_shared_proposal(fampnn, case):
+    """Arms must be independent; a mutated proposal would couple them silently."""
+    controller, adapters, _record = build(fampnn, case, phase="bb_to_sc")
+    with torch.no_grad():
+        for parameter in adapters.bb_to_sc.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.05)
+
+    proposal = controller.propose(
+        case["topology"], case["flat"], torch.tensor([1.0]), case["aatype"]
+    )
+    before = _fingerprint(proposal)
+    torch.manual_seed(0)
+    controller.pack_proposal(proposal, run_feedback=False)
+    torch.manual_seed(0)
+    controller.pack_proposal(
+        proposal, a_token_override=torch.randn_like(proposal.a_token), run_feedback=False
+    )
+    after = _fingerprint(proposal)
+    for key, value in before.items():
+        assert torch.equal(value, after[key]), f"packing mutated the shared {key}"
+
+
+def test_both_arms_see_a_bit_identical_backbone(fampnn, case):
+    """The point of sharing: no reliance on the backbone being deterministic."""
+    controller, adapters, _record = build(fampnn, case, phase="bb_to_sc")
+    with torch.no_grad():
+        for parameter in adapters.bb_to_sc.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.05)
+
+    proposal = controller.propose(
+        case["topology"], case["flat"], torch.tensor([1.0]), case["aatype"]
+    )
+    adapters.enable_bb_to_sc = True
+    torch.manual_seed(0)
+    coupled = controller.pack_proposal(proposal, run_feedback=False)
+    adapters.enable_bb_to_sc = False
+    torch.manual_seed(0)
+    uncoupled = controller.pack_proposal(proposal, run_feedback=False)
+
+    assert torch.equal(coupled.bb0_dense, uncoupled.bb0_dense)
+    assert torch.equal(coupled.a_token, uncoupled.a_token)
+    # ... and the residual is the only thing that actually differed.
+    assert uncoupled.delta_h is None and coupled.delta_h is not None
+    assert not torch.allclose(coupled.sidechains, uncoupled.sidechains)
+
+
+def test_propose_then_pack_reproduces_forward(fampnn, case):
+    """The split must be a refactor, not a behaviour change."""
+    controller, _adapters, _record = build(fampnn, case, phase="bb_to_sc")
+    args = (case["topology"], case["flat"], torch.tensor([1.0]), case["aatype"])
+    torch.manual_seed(3)
+    whole = controller.forward(*args, run_feedback=False)
+    proposal = controller.propose(*args)
+    torch.manual_seed(3)
+    split = controller.pack_proposal(proposal, run_feedback=False)
+    assert torch.equal(whole.bb0_dense, split.bb0_dense)
+    assert torch.equal(whole.sidechains, split.sidechains)
+
+
+def test_one_proposal_serves_many_arms_without_recomputing_the_backbone(fampnn, case):
+    """Backbone calls must not scale with the number of arms."""
+    controller, _adapters, record = build(fampnn, case, phase="bb_to_sc")
+    before = record["calls"]
+    proposal = controller.propose(
+        case["topology"], case["flat"], torch.tensor([1.0]), case["aatype"]
+    )
+    assert record["calls"] == before + 1
+    for _ in range(3):
+        controller.pack_proposal(proposal, run_feedback=False)
+    assert record["calls"] == before + 1, "packing re-ran the backbone"

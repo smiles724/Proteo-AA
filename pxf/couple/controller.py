@@ -121,6 +121,34 @@ class CycleOutput:
         return self.bb1_flat is not None
 
 
+@dataclass
+class Proposal:
+    """Everything the arms share at one ``(structure, sigma, replicate)``.
+
+    The backbone pass and the FaMPNN encoding do not depend on the residual, so
+    computing them once and packing from them repeatedly is both cheaper and
+    stronger: the arms then provably see identical conditioning rather than
+    identical-by-determinism conditioning. Phase 1 happens to satisfy the latter
+    (A_SB is zero, so the backbone is a pure function of x_noisy and sigma), but
+    that is a property of the phase, not a guarantee of the comparison.
+
+    Nothing here may be mutated by packing. ``iface.with_residual`` returns a
+    shallow copy rather than writing into ``features``, and
+    ``tests/test_couple_controller.py`` pins that a second pack from the same
+    proposal sees byte-identical inputs.
+    """
+
+    topology: object
+    x_noisy: torch.Tensor
+    sigma: torch.Tensor
+    aatype: torch.Tensor
+    bb0_flat: torch.Tensor
+    a_token: torch.Tensor
+    inputs: object
+    h_base: torch.Tensor
+    features: dict
+
+
 class CoupledDenoiser:
     """Runs one coupling cycle over an injected backbone denoiser and FaMPNN."""
 
@@ -179,6 +207,17 @@ class CoupledDenoiser:
         own ``a_token``, so the substitution changes one quantity and the arms
         stay comparable.
         """
+        proposal = self.propose(topology, x_noisy, sigma, aatype, seq_mask=seq_mask)
+        return self.pack_proposal(
+            proposal, a_token_override=a_token_override, run_feedback=run_feedback
+        )
+
+    def propose(self, topology, x_noisy, sigma, aatype, *, seq_mask=None):
+        """The residual-independent half: backbone proposal, then encoding.
+
+        Deterministic given ``(x_noisy, sigma)`` and free of packing randomness,
+        so it can be computed once and reused by every arm.
+        """
         converter = self.converter
         # --- backbone proposal ---
         bb0_flat, a_token = self.backbone(x_noisy, sigma)
@@ -206,14 +245,7 @@ class CoupledDenoiser:
                 ),
             )
 
-        out = CycleOutput(
-            bb0_flat=bb0_flat,
-            bb0_dense=inputs.coords_af2,
-            a_token=a_token,
-            aux=dict(inputs=inputs),
-        )
-
-        # --- BB -> SC ---
+        # --- BB -> SC encoding ---
         _, h_base, features = iface.encode(
             self.fampnn,
             inputs.coords_af2,
@@ -222,6 +254,36 @@ class CoupledDenoiser:
             missing_atom_mask=inputs.missing_atom_mask,
             residue_index=inputs.residue_index,
             chain_index=inputs.chain_index,
+        )
+        return Proposal(
+            topology=topology,
+            x_noisy=x_noisy,
+            sigma=sigma,
+            aatype=aatype,
+            bb0_flat=bb0_flat,
+            a_token=a_token,
+            inputs=inputs,
+            h_base=h_base,
+            features=features,
+        )
+
+    def pack_proposal(self, proposal, *, a_token_override=None, run_feedback=None):
+        """The residual-dependent half: apply A_BS, then pack.
+
+        One arm per call, from shared conditioning. Packing randomness is the
+        caller's to control -- reseed immediately before each arm, or the two
+        arms differ by the sampler as well as by the residual.
+        """
+        inputs = proposal.inputs
+        a_token, sigma = proposal.a_token, proposal.sigma
+        h_base, features = proposal.h_base, proposal.features
+        x_noisy = proposal.x_noisy
+
+        out = CycleOutput(
+            bb0_flat=proposal.bb0_flat,
+            bb0_dense=inputs.coords_af2,
+            a_token=a_token,
+            aux=dict(inputs=inputs),
         )
         out.h_base = h_base
         # L_SC re-runs the side-chain denoiser from these features, so the cycle

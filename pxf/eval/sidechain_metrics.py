@@ -147,7 +147,10 @@ def aggregate(per_target, *, canonical=None):
     canonical = canonical or load()
     if not per_target:
         raise ValueError("No targets to aggregate")
-    keys = set().union(*(set(counts) for counts in per_target))
+    # Sorted, not set-ordered: set iteration order varies between processes,
+    # which leaves the values identical but the JSON key order different, so a
+    # byte-level diff of two reproducible runs spuriously fails.
+    keys = sorted(set().union(*(set(counts) for counts in per_target)))
     totals = {}
     for key in keys:
         values = [counts[key] for counts in per_target if key in counts]

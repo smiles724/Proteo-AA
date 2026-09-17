@@ -342,3 +342,88 @@ def donor_a_token(source, length):
         return source[..., :length, :]
     repeats = -(-length // have)  # ceil
     return source.repeat(1, repeats, 1)[..., :length, :]
+
+
+# --- run manifest -----------------------------------------------------------
+
+# Bumped whenever the seed derivation changes. Two runs with different scheme
+# versions drew different noise and must not be pooled or compared as levels,
+# however identical their configuration looks.
+SEED_SCHEME = "blake2b-v1"
+
+# Fields that must agree before results from two runs may be combined. Anything
+# that changes what was computed belongs here; anything that only changes how it
+# was scheduled (job id, node, wall time) deliberately does not.
+COMPATIBILITY_KEYS = (
+    "seed_scheme",
+    "seed_base",
+    "sigma_values",
+    "pack_steps",
+    "run_feedback",
+    "codesign",
+    "fampnn_weights",
+    "checkpoint_sha256",
+    "ema",
+    "structures_fingerprint",
+    "upstream",
+)
+
+
+def structures_fingerprint(paths):
+    """A digest of the evaluated panel: which structures, in which order.
+
+    Order matters because the shuffled control's donor is the previous target,
+    so a reordered panel is a different experiment even with the same members.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for path in paths:
+        digest.update(str(path).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def run_manifest(*, args, sigmas, checkpoint_path=None, structures=(), upstream=None):
+    """Everything needed to say whether two runs measured the same thing.
+
+    Recorded rather than inferred. A comparison across runs is only meaningful
+    if the seed scheme, the sigma grid, the packing settings, the frozen
+    components and the panel all match, and none of those are recoverable from
+    the metrics file after the fact.
+    """
+    checkpoint_sha = None
+    if checkpoint_path:
+        from pxf.provenance import file_sha256
+
+        checkpoint_sha = file_sha256(checkpoint_path)
+    return {
+        "seed_scheme": SEED_SCHEME,
+        "seed_base": int(args.seed),
+        "sigma_values": [float(s) for s in sigmas],
+        "pack_steps": int(args.pack_steps),
+        "run_feedback": bool(args.run_feedback),
+        "codesign": bool(getattr(args, "codesign", False)),
+        "fampnn_weights": args.fampnn_weights,
+        "checkpoint": str(checkpoint_path) if checkpoint_path else None,
+        "checkpoint_sha256": checkpoint_sha,
+        "ema": bool(getattr(args, "ema", False) and checkpoint_path),
+        "a_token_source": (
+            "shuffled-donor" if getattr(args, "shuffle_a_token", False) else "own"
+        ),
+        "n_structures": len(structures),
+        "structures_fingerprint": structures_fingerprint(structures),
+        "upstream": upstream,
+    }
+
+
+def incompatible_fields(left, right):
+    """Which compatibility keys disagree. Empty means the runs may be compared.
+
+    ``a_token_source`` is deliberately absent from the comparison: a real run
+    and its shuffled control *should* differ there, and that pair is the whole
+    point of the control.
+    """
+    out = []
+    for key in COMPATIBILITY_KEYS:
+        if left.get(key) != right.get(key):
+            out.append((key, left.get(key), right.get(key)))
+    return out

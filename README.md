@@ -86,13 +86,32 @@ stop-gradient rollout. See [`docs/training.md`](docs/training.md) for what the
 paper specifies, what it leaves unspecified (optimizer and learning rate — chosen
 here and recorded in every checkpoint), and the two upstream gaps it works around.
 
+**Coupling the two directions.** The side-chain module can also be run *inside*
+the backbone's denoising loop, so predicted side chains feed back into the
+backbone estimate. [`docs/sb_pilot.md`](docs/sb_pilot.md) covers the SC → BB
+pilot: what it tests, the trained controls that make its result readable, the
+measured sensitivity of the feedback path, and the two correctness fixes the
+coupling needed first.
+
 ```bash
-PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn" python -m pytest tests/ -q
+export PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn"
+export PROTENIX_ROOT_DIR=/hai/scratch/yfsun/protenix_data
+export PROTENIX_DATA_ROOT_DIR=/hai/scratch/yfsun/protenix_data/common
+export LAYERNORM_TYPE=torch
+python -m pytest tests/ -q          # 491 passed, 4 skipped
 ```
+
+All four are needed. Without the `PROTENIX_*` pair the featurizer cannot find
+the CCD cache; without `LAYERNORM_TYPE=torch` Protenix selects its fused
+LayerNorm kernel, which refuses a CPU tensor and raises `RuntimeError: input
+must be a CUDA tensor` — a message that invites the wrong conclusion that these
+tests need a GPU. They do not. With only `PYTHONPATH` set the suite reports 6
+failures and 8 errors that all read like code regressions.
 
 The side-chain tests run against the real weights, including an accuracy
 regression guard: packing a CASP15 backbone from its own sequence reproduces the
-withheld native side chains to ~1.1 Å all-atom RMSD.
+withheld native side chains to ~1.1 Å all-atom RMSD. The 4 skips need a GPU
+(a device-mismatch regression guard) — everything else runs on a CPU.
 
 ## What this code guarantees
 

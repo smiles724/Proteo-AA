@@ -390,7 +390,7 @@ def run_native(args):
             if args.codesign:
                 # MPNN -> s_hat -> side-chain diffusion on the deposited
                 # backbone. No adapters, so this is the co-design ceiling.
-                torch.manual_seed(ev.target_seed(args.seed, sample_id, 0))
+                torch.manual_seed(ev.target_seed(args.seed, sample_id, 0.0))
                 s_hat, sidechains, _aux = codesign.codesign_native(
                     packer.model,
                     backbone_only,
@@ -419,7 +419,7 @@ def run_native(args):
                     atom_mask=given[None].to(device),
                     residue_index=native["residue_index"].reshape(1, -1).to(device),
                     chain_index=native["chain_index"].reshape(1, -1).to(device),
-                    seed=ev.target_seed(args.seed, sample_id, 0),
+                    seed=ev.target_seed(args.seed, sample_id, 0.0),
                 )
                 pred37 = packed["coords_af2"][0].cpu()
                 pred_mask = packed["atom_mask_af2"][0].cpu()
@@ -679,7 +679,7 @@ def main(argv=None):
         score_this_target = donor_bank is None or bool(donor_bank)
 
         for si, sigma_value in enumerate(sigmas):
-            seed = ev.target_seed(args.seed, sample_id, si)
+            seed = ev.target_seed(args.seed, sample_id, sigma_value)
             sigma = torch.full((1,), float(sigma_value), device=device)
             # One noise draw per (target, sigma), reused by both arms: the arms
             # must differ only in the adapter, never in the input.

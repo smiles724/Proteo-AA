@@ -172,16 +172,53 @@ def test_zero_sweep_points_is_refused():
 
 
 def test_the_seed_depends_on_target_and_sigma_but_not_on_loop_position():
-    a = ev.target_seed(0, "AF-Q9X0-F1", 2)
-    assert a == ev.target_seed(0, "AF-Q9X0-F1", 2)
-    assert a != ev.target_seed(0, "AF-Q9X0-F1", 3)
-    assert a != ev.target_seed(0, "AF-OTHER-F1", 2)
+    a = ev.target_seed(0, "AF-Q9X0-F1", 0.429)
+    assert a == ev.target_seed(0, "AF-Q9X0-F1", 0.429)
+    assert a != ev.target_seed(0, "AF-Q9X0-F1", 1.642)
+    assert a != ev.target_seed(0, "AF-OTHER-F1", 0.429)
+    assert a != ev.target_seed(1, "AF-Q9X0-F1", 0.429)
+    assert a != ev.target_seed(0, "AF-Q9X0-F1", 0.429, replicate=1)
+
+
+def test_the_seed_is_stable_across_processes():
+    """The property the previous `hash()` implementation did not have.
+
+    Python salts `hash` for str per interpreter, so two jobs -- a run and its
+    shuffled control, or a rerun of the same config -- drew different backbone
+    noise and different packing trajectories while appearing to share a seed.
+    Arms stayed paired inside one process, so the bug was invisible in any
+    single run's delta and only corrupted comparisons *between* runs.
+
+    Pinned against literals rather than a second call: a within-process
+    comparison cannot detect per-interpreter salting.
+    """
+    assert ev.target_seed(0, "AF-P81613-F1-model_v4", 0.010) == 1588898999
+    assert ev.target_seed(0, "AF-P81613-F1-model_v4", 0.429) == 2130388763
+    assert ev.target_seed(0, "AF-P81613-F1-model_v4", 4.881) == 1734635334
+
+
+def test_the_seed_keys_on_the_sigma_value_not_its_sweep_index():
+    """So a 3-point and a 5-point sweep agree wherever they share a sigma."""
+    five = ev.sweep_sigmas(make_schedule(), 5)
+    three = ev.sweep_sigmas(make_schedule(), 3)
+    shared = sorted(set(five) & set(three))
+    assert shared, "the sweeps share no sigma; this test proves nothing"
+    # At least one shared sigma must sit at a different position in the two
+    # sweeps, or keying on the value rather than the index would be untested.
+    moved = [s for s in shared if five.index(s) != three.index(s)]
+    assert moved, "no shared sigma changed index; the distinction is untested"
+    for sigma in moved:
+        assert ev.target_seed(0, "t", sigma) == ev.target_seed(0, "t", sigma)
+        # An index-keyed seed would differ here; a value-keyed one does not.
+        assert ev.target_seed(0, "t", sigma) != ev.target_seed(
+            0, "t", float(five.index(sigma))
+        )
 
 
 def test_seeds_are_valid_torch_seeds():
     for name in ("a", "bb", "AF-X-F1"):
-        for i in range(4):
-            seed = ev.target_seed(7, name, i)
+        for sigma in (0.01, 0.429, 4.881, 160.0):
+            seed = ev.target_seed(7, name, sigma)
             assert 0 <= seed < 2**31 - 1
             torch.Generator().manual_seed(seed)
 

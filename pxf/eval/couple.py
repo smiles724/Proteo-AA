@@ -35,6 +35,8 @@ per-sigma as well as pooled -- an adapter that helps at low noise and hurts at
 high noise is a real outcome, and pooling alone would hide it.
 """
 
+import hashlib
+
 import torch
 
 from pxf import atom37
@@ -63,14 +65,32 @@ REPORT = {
 ARMS = ("coupled", "uncoupled")
 
 
-def target_seed(base, name, sigma_index):
-    """A seed that depends on the target and the sigma, never on iteration order.
+def target_seed(base, name, sigma, replicate=0):
+    """A seed fixed by *what* is being evaluated, not by how the run is arranged.
 
-    Both arms must draw the *same* packing noise or the comparison measures the
-    sampler instead of the adapter, and a seed derived from position in the loop
-    would change under ``--max-targets``.
+    Two properties are needed and an earlier version only had the first.
+
+    Within a process, both arms must draw the same packing noise, or the
+    comparison measures the sampler rather than the adapter. Keying on the
+    target and sigma rather than on loop position also survives
+    ``--max-targets``.
+
+    **Across processes the seed must also be identical**, and Python's ``hash``
+    is salted per interpreter for ``str``, so the previous implementation
+    returned different values in every run. Arms inside one job stayed paired,
+    but two jobs -- a real run and its shuffled control, or a rerun of the same
+    config -- silently drew different backbone noise and different packing
+    trajectories, so their absolute levels were not comparable. A digest fixes
+    that; ``blake2b`` is in the standard library and stable across versions and
+    platforms.
+
+    ``sigma`` is the actual noise level rather than its index, so a run with a
+    different ``--n-sigma`` reuses the same seed wherever it evaluates the same
+    sigma. ``replicate`` distinguishes repeated draws at one (target, sigma).
     """
-    return (int(base) + hash((str(name), int(sigma_index))) % 1_000_003) % (2**31 - 1)
+    key = f"{int(base)}|{name}|{float(sigma):.12g}|{int(replicate)}".encode()
+    digest = hashlib.blake2b(key, digest_size=8).digest()
+    return int.from_bytes(digest, "big") % (2**31 - 1)
 
 
 def sweep_sigmas(schedule, count):

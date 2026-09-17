@@ -85,7 +85,11 @@ def test_frozen_phase_leaves_nothing_trainable():
 def test_a_disabled_direction_returns_none():
     """Ablations are a runtime switch, so the A_SB=0 control is free to run."""
     pair = CouplingAdapters(64, 32, enable_sc_to_bb=False)
-    assert pair.delta_a(torch.randn(1, 5, 32), torch.tensor([1.0])) is None
+    # delta_a returns (residual, stats): the phase-2 readout reports its own
+    # gate and residual-norm diagnostics, and a disabled direction still has to
+    # answer in that shape.
+    delta, stats = pair.delta_a(torch.randn(1, 5, 32), torch.tensor([1.0]))
+    assert delta is None and stats == {}
     assert pair.delta_h(torch.randn(1, 5, 64), torch.tensor([1.0])) is not None
     other = CouplingAdapters(64, 32, enable_bb_to_sc=False)
     assert other.delta_h(torch.randn(1, 5, 64), torch.tensor([1.0])) is None

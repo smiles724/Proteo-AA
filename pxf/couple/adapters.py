@@ -123,14 +123,21 @@ class CouplingAdapters(nn.Module):
         d_noise=64,
         enable_bb_to_sc=True,
         enable_sc_to_bb=True,
+        sc_to_bb=None,
     ):
         super().__init__()
         self.d_backbone, self.d_fampnn = int(d_backbone), int(d_fampnn)
         self.bb_to_sc = ResidualAdapter(
             d_backbone, d_fampnn, d_hidden=d_hidden, d_noise=d_noise
         )
-        self.sc_to_bb = ResidualAdapter(
-            d_fampnn, d_backbone, d_hidden=d_hidden, d_noise=d_noise
+        # The SC -> BB direction is pluggable so the phase-2 readout can replace
+        # it without a second adapter container: same attribute, same checkpoint
+        # key prefix, same freeze/unfreeze in `set_phase`, so a phase-1
+        # checkpoint still loads and the trainer is untouched.
+        self.sc_to_bb = (
+            ResidualAdapter(d_fampnn, d_backbone, d_hidden=d_hidden, d_noise=d_noise)
+            if sc_to_bb is None
+            else sc_to_bb
         )
         self.enable_bb_to_sc = bool(enable_bb_to_sc)
         self.enable_sc_to_bb = bool(enable_sc_to_bb)
@@ -139,9 +146,27 @@ class CouplingAdapters(nn.Module):
         """BB -> SC residual for FaMPNN's node features, or None when disabled."""
         return self.bb_to_sc(a_token, sigma) if self.enable_bb_to_sc else None
 
-    def delta_a(self, h_packed, sigma):
-        """SC -> BB residual for PXDesign's token features, or None when disabled."""
-        return self.sc_to_bb(h_packed, sigma) if self.enable_sc_to_bb else None
+    def delta_a(self, packed, sigma, *, reference=None):
+        """SC -> BB residual for PXDesign's token features, or None when disabled.
+
+        ``packed`` is a :class:`~pxf.couple.visibility.PackedStructure` from the
+        cycle's re-encode, or a bare ``h_packed`` tensor. Which of the two the
+        installed SC -> BB module wants is its own declaration
+        (``reads_packing``), not the caller's guess: a plain
+        :class:`ResidualAdapter` reads node features only, while
+        :class:`pxf.couple.readout.FeedbackPath` needs the coordinates, the
+        sequence and the availability masks too.
+
+        Returns either the residual or ``(residual, stats)``; the controller
+        accepts both so a readout can report its own diagnostics.
+        """
+        if not self.enable_sc_to_bb:
+            return None, {}
+        module = self.sc_to_bb
+        if getattr(module, "reads_packing", False):
+            return module(packed, sigma, reference=reference)
+        h_packed = packed if torch.is_tensor(packed) else packed.h_packed
+        return module(h_packed, sigma), {}
 
     def set_phase(self, phase):
         """Freeze/unfreeze per the staged plan; returns what is trainable."""
@@ -172,9 +197,11 @@ class CouplingAdapters(nn.Module):
         return self.bb_to_sc.is_identity() and self.sc_to_bb.is_identity()
 
     def identity(self):
+        record = getattr(self.sc_to_bb, "identity", None)
         return dict(
             d_backbone=self.d_backbone,
             d_fampnn=self.d_fampnn,
+            sc_to_bb=(record() if callable(record) else type(self.sc_to_bb).__name__),
             enable_bb_to_sc=self.enable_bb_to_sc,
             enable_sc_to_bb=self.enable_sc_to_bb,
             phase=getattr(self, "phase", None),

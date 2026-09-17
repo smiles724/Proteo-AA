@@ -10,7 +10,25 @@
 
 The re-encode is the point of the design: ``h_packed`` sees the side chains the
 model actually realized, not native ones, so the feedback carries information
-about *this* packing.
+about *this* packing. Making that true takes a second mask -- the input's
+``missing_atom_mask`` marks every side-chain slot absent, which is right for the
+first encode and wrong for the second, where it would keep the generated atoms
+masked and leave ``h_packed == h_base``. :mod:`pxf.couple.visibility` computes
+the post-packing availability instead, and the cycle records it so a run can be
+audited on how many atoms the feedback actually saw.
+
+One corrective event, both PXDesign calls at the *same* noisy state:
+
+    (B0, a0) = D(x_sigma, sigma; 0)
+    S0       = P(B0, s)                      packing, the selected BB->SC policy
+    z        = R(B0, S0, s)                  feedback readout
+    B1       = D(x_sigma, sigma; A_SB(z, sigma))
+
+``bb0``/``sc0``/``bb1`` are kept apart on the output, and ``sc1`` -- a fresh
+packing on the corrected backbone -- is produced by :meth:`repack_on` rather
+than inferred, because reporting ``bb1`` combined with the unchanged ``sc0`` as
+the final structure would credit the correction with side chains built for a
+different backbone.
 
 Gradient routing is explicit and staged, not implicit. Phase 2 trains ``A_SB``
 with the packing detached -- backbone gradients do not flow back through the
@@ -31,6 +49,7 @@ from typing import Protocol
 import torch
 
 from pxf.couple import fampnn_iface as iface
+from pxf.couple import visibility as vis
 from pxf.couple.converter import PXFaRepresentationConverter
 
 PHASES = ("frozen", "bb_to_sc", "sc_to_bb", "joint")
@@ -102,7 +121,20 @@ class GradientPolicy:
 
 @dataclass
 class CycleOutput:
-    """Every intermediate the staged losses and the ablations need."""
+    """Every intermediate the staged losses, the ablations and the report need.
+
+    The four structural stages are stored separately and never merged:
+
+    ``bb0``  the initial clean backbone estimate
+    ``sc0``  side chains packed on ``bb0``; this is what the feedback reads
+    ``bb1``  the corrected clean backbone estimate
+    ``sc1``  a fresh packing on ``bb1``, for the final side-chain evaluation
+
+    ``sc1`` is only populated by :meth:`CoupledDenoiser.repack_on`. It is not
+    filled in by the cycle because a corrective event does not need it and the
+    packing is the expensive half; an evaluator that wants a final structure has
+    to ask for it, which is also what stops ``bb1 + sc0`` being reported as one.
+    """
 
     bb0_flat: torch.Tensor  # [..., N_atom, 3]
     bb0_dense: torch.Tensor  # [B, L, 37, 3]
@@ -110,15 +142,29 @@ class CycleOutput:
     h_base: torch.Tensor | None = None
     delta_h: torch.Tensor | None = None
     h_cond: torch.Tensor | None = None
-    sidechains: torch.Tensor | None = None  # [B, L, 33, 3] global
+    sidechains: torch.Tensor | None = None  # sc0, [B, L, 33, 3] global
     h_packed: torch.Tensor | None = None
+    packed: object | None = None  # visibility.PackedStructure for the re-encode
     delta_a: torch.Tensor | None = None
+    feedback_stats: dict = field(default_factory=dict)
     bb1_flat: torch.Tensor | None = None
+    bb1_dense: torch.Tensor | None = None  # [B, L, 37, 3]
+    sc1: torch.Tensor | None = None  # fresh packing on bb1, [B, L, 33, 3]
     aux: dict = field(default_factory=dict)
 
     @property
     def ran_feedback(self):
         return self.bb1_flat is not None
+
+    # `sidechains` predates the stage naming and is load-bearing in the phase-1
+    # paths, so it stays the field and `sc0` is the alias, not the reverse.
+    @property
+    def sc0(self):
+        return self.sidechains
+
+    @property
+    def visibility(self):
+        return None if self.packed is None else self.packed.visibility
 
 
 # `delta_h=None` means bypass, which is a real choice, so "not specified" needs
@@ -327,25 +373,132 @@ class CoupledDenoiser:
             return out
 
         # --- re-encode the predicted packing ---
-        visible = sidechains.detach() if self.policy.detach_sidechains else sidechains
-        _, h_packed, _ = iface.encode(
+        packed = self.encode_predicted_packing(
+            inputs,
+            sidechains.detach() if self.policy.detach_sidechains else sidechains,
+            h_base=h_base,
+            psce=pack_aux.get("psce") if isinstance(pack_aux, dict) else None,
+        )
+        out.packed = packed.detach() if self.policy.detach_h_packed else packed
+        out.h_packed = out.packed.h_packed
+
+        # --- SC -> BB ---
+        out.delta_a, out.feedback_stats = self._delta_a(out.packed, sigma, a_token)
+        if out.delta_a is not None:
+            out.bb1_flat, _ = self.backbone(x_noisy, sigma, feedback=out.delta_a)
+            out.bb1_dense = self.densify(out.bb1_flat, proposal.topology, proposal.aatype)
+        return out
+
+    # ---- the four stages -------------------------------------------------
+
+    def encode_predicted_packing(self, inputs, sidechains, *, h_base=None, psce=None):
+        """``E(bb0, sc0, s)`` with the post-packing availability mask.
+
+        The one place the second encode happens. ``inputs.missing_atom_mask`` is
+        deliberately *not* forwarded: it is the input's observation mask, it
+        marks all 33 side-chain slots absent for a backbone-only proposal, and
+        ``build_atom_mask``'s ``1 - missing_atom_mask`` factor would therefore
+        keep every generated atom masked -- the failure this method exists to
+        make impossible. Availability is recomputed from the fixed sequence, the
+        supplied backbone and the packer's own output.
+        """
+        visibility = vis.predicted_availability(
+            inputs.aatype,
+            inputs.seq_mask,
+            inputs.atom_mask,
+            inputs.coords_af2,
+            sidechains=sidechains,
+        )
+        _, h_packed, features = iface.encode(
             self.fampnn,
             inputs.coords_af2,
             inputs.aatype,
-            sidechains=visible,
+            sidechains=sidechains,
+            atom_availability=visibility.available,
             seq_mask=inputs.seq_mask,
-            missing_atom_mask=inputs.missing_atom_mask,
             residue_index=inputs.residue_index,
             chain_index=inputs.chain_index,
         )
-        out.h_packed = h_packed
+        coords37 = inputs.coords_af2.clone()
+        coords37[..., list(self.converter.sidechain_slots), :] = sidechains.to(
+            coords37.dtype
+        )
+        packed = vis.PackedStructure(
+            h_packed=h_packed,
+            coords37=coords37,
+            aatype=inputs.aatype,
+            seq_mask=inputs.seq_mask,
+            visibility=visibility,
+            psce=psce,
+            h_base=h_base,
+        )
+        packed.features = features
+        return packed
 
-        # --- SC -> BB ---
-        source = h_packed.detach() if self.policy.detach_h_packed else h_packed
-        out.delta_a = self._delta_a(source, sigma, a_token)
-        if out.delta_a is not None:
-            out.bb1_flat, _ = self.backbone(x_noisy, sigma, feedback=out.delta_a)
-        return out
+    def densify(self, flat, topology, aatype):
+        """A flat PXDesign coordinate tensor as FaMPNN's ``[B, L, 37, 3]`` block."""
+        return self.converter.px_backbone_to_fampnn(
+            flat,
+            topology.atom_names,
+            topology.atom_to_token_idx,
+            topology.num_tokens,
+            res_names=topology.res_names,
+            residue_index=topology.residue_index,
+            chain_index=topology.chain_index,
+            aatype=aatype,
+        ).coords_af2
+
+    def repack_on(
+        self,
+        bb_dense,
+        aatype,
+        *,
+        seq_mask=None,
+        residue_index=None,
+        chain_index=None,
+        supplied_atom_mask=None,
+        num_steps=None,
+        delta_h=UNSET,
+    ):
+        """``sc1``: a fresh packing on a corrected backbone. Returns ``(sc, aux)``.
+
+        Separate from the cycle on purpose. The corrected backbone's side chains
+        have to be *rebuilt*, not carried over: ``sc0`` was packed onto ``bb0``
+        and reporting it attached to ``bb1`` would mix a structure that was never
+        produced, flattering or penalizing the correction at random.
+        """
+        backbone = list(self.converter.backbone_slots)
+        if supplied_atom_mask is None:
+            supplied_atom_mask = torch.zeros(
+                *bb_dense.shape[:2], 37, device=bb_dense.device
+            )
+            supplied_atom_mask[..., backbone] = 1.0
+        start = vis.predicted_availability(
+            aatype,
+            torch.ones(bb_dense.shape[:2], device=bb_dense.device)
+            if seq_mask is None
+            else seq_mask,
+            supplied_atom_mask,
+            bb_dense,
+        )
+        _, _h, features = iface.encode(
+            self.fampnn,
+            bb_dense,
+            aatype,
+            atom_availability=start.available,
+            seq_mask=seq_mask,
+            residue_index=residue_index,
+            chain_index=chain_index,
+        )
+        return iface.pack_from_features(
+            self.fampnn,
+            features if delta_h is UNSET else iface.with_residual(features, delta_h),
+            aatype,
+            seq_mask=seq_mask,
+            residue_index=residue_index,
+            chain_index=chain_index,
+            num_steps=self.pack_steps if num_steps is None else num_steps,
+        )
 
     __call__ = forward
 
@@ -359,13 +512,24 @@ class CoupledDenoiser:
             return None
         return self._match(delta, h_base)
 
-    def _delta_a(self, h_packed, sigma, a_token):
+    def _delta_a(self, packed, sigma, a_token):
+        """``A_SB(z, sigma)``, matched to the token axis. Returns ``(delta, stats)``.
+
+        The adapter is handed the whole :class:`~pxf.couple.visibility.PackedStructure`
+        rather than ``h_packed`` alone, because a readout over predicted side
+        chains needs the coordinates, the sequence and the availability masks as
+        well. Adapters that only want ``h_V`` declare so with
+        ``reads_packing = False`` and still work unchanged.
+        """
         if not getattr(self.adapters, "enable_sc_to_bb", True):
-            return None
-        delta = self.adapters.delta_a(h_packed, sigma)
+            return None, {}
+        length = packed.h_packed.shape[1]
+        reference = self._per_residue(a_token, length)
+        result = self.adapters.delta_a(packed, sigma, reference=reference)
+        delta, stats = result if isinstance(result, tuple) else (result, {})
         if delta is None:
-            return None
-        return self._match(delta, self._per_residue(a_token, h_packed.shape[1]))
+            return None, dict(stats)
+        return self._match(delta, reference), dict(stats)
 
     @staticmethod
     def _per_residue(tensor, length):

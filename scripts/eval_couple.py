@@ -154,8 +154,11 @@ def parse_args(argv=None):
     p.add_argument(
         "--run-feedback",
         action="store_true",
-        help="also run the SC->BB half; off by default because the "
-        "metric scored here is side-chain packing",
+        help="also run the SC->BB half; off by default because the metric "
+        "scored here is side-chain packing on bb0, which the correction does "
+        "not change. The corrected backbone is measured by "
+        "scripts/eval_sb_feedback.py -- this flag does not make the numbers "
+        "below describe bb1",
     )
     p.add_argument(
         "--mode",
@@ -481,7 +484,9 @@ def run_native(args):
                     a_token=None,
                     sidechains=sidechains,
                 )
-                pred37, pred_mask = ev.predicted_atom37(assembled, s_hat.reshape(-1), rc)
+                pred37, pred_mask = ev.predicted_atom37(
+                    assembled, s_hat.reshape(-1), rc, stage="bb0"
+                )
                 pred37, pred_mask = pred37.cpu(), pred_mask.cpu()
                 residue_mask, seq_counts = codesign.sequence_recovery(s_hat, aatype)
                 residue_mask = residue_mask.cpu()
@@ -879,7 +884,14 @@ def main(argv=None):
                 # The packed atom set belongs to whatever sequence was packed
                 # for, so atom37 assembly must use s_hat in codesign mode.
                 scored_aatype = aatype if s_hat is None else s_hat.reshape(-1)
-                pred37, pred_mask = ev.predicted_atom37(cycle, scored_aatype, rc)
+                # Explicitly the *proposal* stage. This script measures
+                # side-chain packing on bb0; with --run-feedback the cycle also
+                # carries bb1, and scoring that would need sc1 as well. The
+                # corrected backbone is scored by scripts/eval_sb_feedback.py,
+                # which is about the SC -> BB question.
+                pred37, pred_mask = ev.predicted_atom37(
+                    cycle, scored_aatype, rc, stage="bb0"
+                )
                 pred37, pred_mask = pred37.cpu(), pred_mask.cpu()
                 native_cpu, native_mask_cpu = native37.cpu(), native_mask.cpu()
                 # How far the proposal itself landed, before side chains are

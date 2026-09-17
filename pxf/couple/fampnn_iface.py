@@ -9,11 +9,20 @@ the feature dict, which is the one hook the upstream code already reads.
 
     h_base       = encode(model, bb, seq)                  # side chains masked
     x_scn, aux   = pack_from_features(model, feats, seq)    # h_V may be modified
-    h_packed     = encode(model, bb, seq, sidechains=x_scn) # predicted SC visible
+    h_packed     = encode(model, bb, seq, sidechains=x_scn,
+                          atom_availability=...)            # predicted SC visible
 
 The third call is the load-bearing one for SC -> BB feedback: if ``h_packed`` is
 insensitive to which side chains were realized, the feedback path carries no
 signal no matter how good the adapter is. :mod:`pxf.couple.probes` measures that.
+
+**That call needs ``atom_availability``, not the input's ``missing_atom_mask``.**
+:func:`build_atom_mask` multiplies by ``1 - missing_atom_mask``, and a
+backbone-only input marks every side-chain slot missing, so passing it back in
+keeps the generated atoms masked however ``sidechain_visible`` is set --
+silently, with ``h_packed == h_base``. :mod:`pxf.couple.visibility` computes the
+post-packing availability instead; ``atom_availability=`` is the port that takes
+it.
 """
 
 import torch
@@ -54,6 +63,7 @@ def encode(
     chain_index=None,
     sidechains=None,
     sidechain_visible=None,
+    atom_availability=None,
 ):
     """Run the full-atom encoder; returns ``(seq_logits, h_V, feature_dict)``.
 
@@ -62,6 +72,14 @@ def encode(
     ``[..., 37, 3]`` tensor. With neither ``sidechains`` nor
     ``sidechain_visible``, side chains are fully masked, which is the
     backbone-only encoding the packer starts from.
+
+    ``atom_availability`` is the *per-atom* ``[..., 37]`` mask from
+    :func:`pxf.couple.visibility.predicted_availability`. When given it replaces
+    the ``(missing_atom_mask, sidechain_visible)`` construction entirely -- which
+    is required for re-encoding a packing, because the input's missing mask
+    marks every generated side-chain atom absent. Coordinates outside the mask
+    are zeroed on the side-chain block, generalizing the per-residue zeroing the
+    ``sidechain_visible`` path does.
     """
     rc = _rc()
     coords = coords_af2.clone()
@@ -84,18 +102,47 @@ def encode(
         if block.shape[-2] == atom37.NUM_ATOM37:
             block = block[..., rc.non_bb_idxs, :]
         coords[..., rc.non_bb_idxs, :] = block.to(coords.dtype)
-        if sidechain_visible is None:
+        if sidechain_visible is None and atom_availability is None:
             sidechain_visible = torch.ones(batch, length, device=device)
-    if sidechain_visible is None:
-        sidechain_visible = torch.zeros(batch, length, device=device)
-    # Masked side chains must not leak coordinates through the mask.
-    coords[..., rc.non_bb_idxs, :] = (
-        coords[..., rc.non_bb_idxs, :] * sidechain_visible[..., None, None]
-    )
 
-    atom_mask = build_atom_mask(
-        model, aatype, seq_mask, missing_atom_mask, sidechain_visible
-    )
+    if atom_availability is not None:
+        if sidechain_visible is not None:
+            raise ValueError(
+                "atom_availability and sidechain_visible both given; they are "
+                "two ways to say the same thing and would disagree. Pass the "
+                "per-atom availability alone."
+            )
+        atom_mask = atom_availability.to(device=device, dtype=coords.dtype)
+        if atom_mask.shape[-1] != atom37.NUM_ATOM37:
+            raise ValueError(
+                f"atom_availability must cover {atom37.NUM_ATOM37} slots, "
+                f"got {atom_mask.shape[-1]}"
+            )
+        # Defensive only: predicted_availability already applies both factors.
+        # Re-applying them here means a hand-built mask cannot reveal an atom the
+        # residue type does not have or a residue that is padding.
+        exists = build_atom_mask(
+            model,
+            aatype,
+            seq_mask,
+            torch.zeros_like(atom_mask),
+            torch.ones(batch, length, device=device, dtype=coords.dtype),
+        )
+        atom_mask = atom_mask * exists
+        # Unavailable side chains must not leak coordinates through the mask.
+        coords[..., rc.non_bb_idxs, :] = (
+            coords[..., rc.non_bb_idxs, :] * atom_mask[..., rc.non_bb_idxs, None]
+        )
+    else:
+        if sidechain_visible is None:
+            sidechain_visible = torch.zeros(batch, length, device=device)
+        # Masked side chains must not leak coordinates through the mask.
+        coords[..., rc.non_bb_idxs, :] = (
+            coords[..., rc.non_bb_idxs, :] * sidechain_visible[..., None, None]
+        )
+        atom_mask = build_atom_mask(
+            model, aatype, seq_mask, missing_atom_mask, sidechain_visible
+        )
     seq_logits, feature_dict = model.denoiser.seq_design_module(
         coords, aatype, seq_mask, atom_mask, residue_index, chain_index
     )

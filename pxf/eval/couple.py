@@ -144,29 +144,96 @@ def restype_atom37_mask(aatype, rc, device=None):
     return table[aatype.reshape(-1).long()].bool()
 
 
-def predicted_atom37(cycle, aatype, rc):
-    """The cycle's packing as atom37 coordinates plus the mask of generated atoms.
+# The two structural stages a cycle can be scored at. Naming them, and making
+# the choice explicit, is what stops the silent failure this function used to
+# have: it assembled from `bb0_dense` unconditionally, so turning the feedback
+# on produced a report whose "backbone RMSD" was still the *uncorrected*
+# proposal's. Nothing raised, the number simply did not move.
+STAGES = ("bb0", "bb1")
 
-    The backbone comes from the diffusion proposal (``bb0_dense``) and the side
-    chains from the packer, written into the 33 non-backbone slots. FaMPNN emits
-    every slot that exists for the residue type, so the generated mask is the
-    residue-type mask -- there is no partial output to account for.
+
+def predicted_atom37(cycle, aatype, rc, *, stage=None):
+    """One stage of the cycle as atom37 coordinates, plus the generated mask.
+
+    ``stage="bb0"`` is the initial proposal with ``sc0`` packed onto it.
+    ``stage="bb1"`` is the corrected backbone with ``sc1`` -- the *fresh*
+    packing from :meth:`~pxf.couple.controller.CoupledDenoiser.repack_on`. The
+    combination ``bb1 + sc0`` is refused rather than assembled: those side
+    chains were built for a different backbone, so the pair is a structure the
+    system never produced and scoring it would credit or penalize the correction
+    at random.
+
+    ``stage`` is required once a cycle has run feedback. With both a corrected
+    and an uncorrected backbone on the object there is no defensible default,
+    and picking one silently is exactly how a before/after comparison comes out
+    flat.
+
+    FaMPNN emits every slot that exists for the residue type, so the generated
+    mask is the residue-type mask -- there is no partial output to account for.
     """
-    backbone = cycle.bb0_dense
+    if stage is None:
+        # getattr: the fake cycles in the tests, and the synthetic CycleOutput
+        # the native arm assembles, carry only the two fields they need.
+        if getattr(cycle, "ran_feedback", False):
+            raise ValueError(
+                "this cycle ran the SC->BB correction, so it carries both bb0 "
+                "and bb1 and there is no correct default. Pass stage='bb0' to "
+                "score the proposal or stage='bb1' to score the correction."
+            )
+        stage = "bb0"
+    if stage not in STAGES:
+        raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
+
+    if stage == "bb0":
+        backbone, sidechains, which = cycle.bb0_dense, cycle.sidechains, "sc0"
+    else:
+        backbone = getattr(cycle, "bb1_dense", None)
+        sidechains, which = getattr(cycle, "sc1", None), "sc1"
+        if backbone is None:
+            raise ValueError(
+                "stage='bb1' needs the corrected backbone densified onto the "
+                "atom37 axis; the cycle ran no feedback"
+            )
+        if sidechains is None:
+            raise ValueError(
+                "stage='bb1' needs sc1, a fresh packing on the corrected "
+                "backbone. Call CoupledDenoiser.repack_on(bb1_dense, ...) and "
+                "assign cycle.sc1; combining bb1 with sc0 is not a structure "
+                "this system produced."
+            )
     if backbone.dim() != 4:
-        raise ValueError(f"bb0_dense must be [B, L, 37, 3], got {tuple(backbone.shape)}")
-    sidechains = cycle.sidechains
+        raise ValueError(
+            f"{stage} coordinates must be [B, L, 37, 3], got {tuple(backbone.shape)}"
+        )
     if sidechains is None:
         raise ValueError("the cycle ran no packing step, so there is nothing to score")
     slots = list(atom37.SIDECHAIN_SLOTS)
     if sidechains.shape[-2] != len(slots):
-        raise ValueError(
-            f"packed side chains have {sidechains.shape[-2]} slots, expected {len(slots)}"
-        )
+        raise ValueError(f"{which} has {sidechains.shape[-2]} slots, expected {len(slots)}")
     pred = backbone.clone()
     pred[..., slots, :] = sidechains.to(pred.dtype)
     mask = restype_atom37_mask(aatype, rc, device=pred.device)
     return pred[0], mask
+
+
+def backbone_atom37(cycle, stage):
+    """One stage's backbone alone, ``[L, 37, 3]``, with no side chains attached.
+
+    What the backbone metrics need. Separate from :func:`predicted_atom37`
+    because scoring a backbone must not require a packing to exist: the
+    before/after BB comparison is available from a corrective event directly,
+    and making it wait for ``sc1`` would tempt a caller into assembling
+    ``bb1 + sc0``.
+    """
+    if stage not in STAGES:
+        raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
+    dense = cycle.bb0_dense if stage == "bb0" else getattr(cycle, "bb1_dense", None)
+    if dense is None:
+        raise ValueError(f"the cycle carries no {stage} backbone")
+    backbone = torch.zeros_like(dense[0])
+    slots = list(atom37.BACKBONE_SLOTS)
+    backbone[:, slots, :] = dense[0][:, slots, :]
+    return backbone
 
 
 def place_on_native_backbone(pred37, native37, canonical):

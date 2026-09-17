@@ -5,9 +5,16 @@ consistent and statistically solid, and it is not side-chain-specific and not
 within an order of magnitude of the roadmap criterion.
 
 Runs: `/hai/scratch/yfsun/proteo_aa_runs/pxf_sb_pilot/{full,bb_only,generic}_1182{15,16,17}`,
-evaluation `/hai/scratch/yfsun/proteo_aa_runs/pxf_sb_eval/exit_118224`,
+evaluation `/hai/scratch/yfsun/proteo_aa_runs/pxf_sb_eval/exit4_118228`,
 probe `.../probe_118225`. All three arms: 2,000 steps, lr 1e-4, clip 1.0, 50
 packing steps, σ ∈ [0.1, 2.0] Å, bypass BB→SC policy, frozen PXDesign/FaMPNN.
+
+The evaluation was run four times while the cost attribution was corrected; the
+accuracy numbers below are bit-stable across all four (same seeds, checkpoints
+and panel), and only the cost column changed. Earlier run directories
+`exit_118224`, `exit2_118226` and `exit3_118227` are superseded: their cost
+tables are wrong. See the commit history for what each got wrong and in which
+direction.
 
 ## The arms were comparable, provably
 
@@ -71,11 +78,32 @@ rather than the information being unavailable.
 
 ## Cost
 
-Equal denoiser-call counts are not equal cost. The BB-only alternatives need
-`bb0` alone; the feedback arms also pay for the 50-step packing rollout and the
-re-encode. `refine` — one deterministic Euler step of PXDesign's own schedule —
-is cheaper than feedback and performs the same as `bb0` (0.3341), so at this
-noise level the second denoiser call buys nothing wherever it is spent.
+Equal denoiser-call counts are not equal cost. Deployed cost per corrective
+event, measured on an H200:
+
+| arm | calls | needs packing | s/event | vs `bb0` |
+|---|---|---|---|---|
+| `bb0` | 1 | no | 0.051 | 1.00× |
+| `refine` | 2 | no | 0.070 | 1.38× |
+| `zero` | 2 | no | 0.071 | 1.40× |
+| `bb_only` | 2 | no | 0.073 | 1.44× |
+| `generic` | 2 | no | 0.073 | 1.44× |
+| `full` | 2 | **yes** | **0.190** | **3.75×** |
+| `perturbed` | 2 | yes | 0.189 | 3.74× |
+
+Only the arms reading `h_packed` need the 50-step rollout and the re-encode.
+`bb_only` reads `h_base`, which `propose` produces alongside `bb0`, and `generic`
+reads nothing — so both are BB-only in cost as well as in information. (All three
+variants share one code path so their parameter counts match exactly, which means
+the controls *as executed* do compute a packing and discard it; pricing that
+would price the parameter-matching rather than the method.)
+
+**So the candidate costs 2.6× `bb_only` (0.190 vs 0.073) for a result
+statistically indistinguishable from it**, and `bb_only` is nominally ahead
+(0.3333 vs 0.3334). `refine` — one deterministic Euler step of PXDesign's own
+schedule, at 1.38× — performs the same as `bb0` (0.3341), so at this noise level
+the second denoiser call buys almost nothing wherever it is spent, and buys it
+most expensively through side-chain feedback.
 
 ## What this does and does not license
 

@@ -112,10 +112,30 @@ def test_a_clean_result_passes(mod):
 def test_a_failed_wiring_check_fails_everything(mod):
     """If the zero arm does not reproduce bb0, nothing below it means anything."""
     passed, lines = mod.verdict(
-        record(arms={"zero": dict(max_abs_deviation_from_bb0=1e-3)})
+        record(arms={"zero": dict(max_abs_deviation_from_bb0=1e-2)})
     )
     assert not passed
     assert any("WIRING" in line and "FAILED" in line for line in lines)
+
+
+def test_gpu_nondeterminism_alone_does_not_fail_the_wiring_check(mod):
+    """The tolerance has to clear float noise and still catch a real fault.
+
+    Two invocations of the same PXDesign forward on an H200 differ by ~4.8e-6 A,
+    which an earlier 1e-6 tolerance reported as a wiring failure on a run where
+    every backbone metric agreed to four decimals. The corrections being
+    measured are ~2.6e-3 A, so the tolerance sits between the two.
+    """
+    passed, lines = mod.verdict(
+        record(arms={"zero": dict(max_abs_deviation_from_bb0=mod.GPU_NONDETERMINISM)})
+    )
+    assert passed, lines
+    assert mod.GPU_NONDETERMINISM < mod.WIRING_TOLERANCE < 2.6e-3
+    # A deviation the size of the effect is a real fault and must still fail.
+    passed, _lines = mod.verdict(
+        record(arms={"zero": dict(max_abs_deviation_from_bb0=2.6e-3)})
+    )
+    assert not passed
 
 
 def test_an_unmeasured_wiring_check_fails(mod):

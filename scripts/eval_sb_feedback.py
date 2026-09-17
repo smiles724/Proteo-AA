@@ -71,7 +71,15 @@ METRICS_FILE = "sb_feedback_metrics.json"
 # re-analysis cannot drift apart.
 MIN_ABSOLUTE_GAIN = 0.05  # Angstroms
 MIN_RELATIVE_GAIN = 0.03  # fraction of the baseline RMSD
-WIRING_TOLERANCE = 1e-6  # the zero arm must equal bb0 to this
+# The zero-feedback arm must reproduce bb0 to this, in Angstroms of worst-atom
+# deviation. Not zero, and the number is measured rather than picked: two
+# invocations of the same PXDesign forward on an H200 differ by ~4.8e-6 A from
+# non-deterministic reduction order, while the corrections being measured are
+# ~2.6e-3 A. 1e-4 sits 20x above the noise and 25x below the signal, so it
+# still fails on a real wiring error -- which would be at least the size of the
+# effect, not a fraction of it.
+WIRING_TOLERANCE = 1e-4
+GPU_NONDETERMINISM = 4.8e-6  # measured, for the report to quote
 # Side-chain metrics carried through to the no-regression half of the criterion.
 SIDECHAIN_KEYS = (
     "symmetry_rmsd",
@@ -124,6 +132,15 @@ def parse_args(argv=None):
     p.add_argument("--max-targets", type=int, default=64, help="0 for all")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--refine-eta",
+        type=float,
+        default=1.0,
+        help="Euler step scale for the computational baseline. 1.0 is the plain "
+        "probability-flow ODE step and the lowest-variance choice, which makes "
+        "the baseline as strong as possible; PXDesign's own schedule ramps eta "
+        "from 1.0 to 2.5 and also churns, both of which add variance",
+    )
     p.add_argument(
         "--perturb-degrees",
         type=float,
@@ -179,8 +196,9 @@ def verdict(record):
     else:
         wired = wiring <= WIRING_TOLERANCE
         lines.append(
-            f"WIRING: zero-feedback arm deviates from bb0 by {wiring:.2e} A "
-            f"({'ok' if wired else 'FAILED'})"
+            f"WIRING: zero-feedback arm deviates from bb0 by {wiring:.2e} A, "
+            f"tolerance {WIRING_TOLERANCE:.0e} ({'ok' if wired else 'FAILED'}). "
+            f"GPU non-determinism alone measures ~{GPU_NONDETERMINISM:.1e} A"
         )
 
     baseline_name, baseline = None, None
@@ -609,24 +627,32 @@ def main(argv=None):
                     )
 
                 # The computational baseline: spend the second denoiser call on
-                # the SAMPLER. One EDM step from sigma down to the schedule's
-                # next level, then denoise there. A real refinement, not a
-                # repeat -- repeating a deterministic call is only the wiring
-                # check above.
+                # the SAMPLER rather than on feedback. One step of PXDesign's own
+                # published schedule, taken deterministically:
+                #
+                #     d      = (x_sigma - bb0) / sigma
+                #     x_next = x_sigma + eta * (sigma_next - sigma) * d
+                #     bb     = D(x_next, sigma_next)
+                #
+                # which is Protenix's update at generator.py:260 with the churn
+                # disabled. Churn is left out deliberately: PXDesign's config
+                # (gamma0 = 1.0, gamma_min = 0.01) re-noises to 2*sigma
+                # everywhere in this window, and eta ramps to 2.5, both of which
+                # add variance. A noisier baseline would flatter the candidate,
+                # and the plan asks for the STRONGEST comparable-cost
+                # alternative. Two denoiser calls, matching the feedback arm.
                 lower = next_sigma(sigma_schedule, sigma_value)
                 clock = time.perf_counter()
-                fresh = torch.randn(
-                    target.shape, generator=torch.Generator().manual_seed(seed + 2)
-                ).to(device)
+                drift = (x_noisy - upstream.bb0_flat) / float(sigma_value)
+                x_next = x_noisy + args.refine_eta * (lower - float(sigma_value)) * drift
                 refined, _a = controller.backbone(
-                    upstream.bb0_flat + (fresh * lower)[None],
-                    torch.full((1,), lower, device=device),
+                    x_next, torch.full((1,), lower, device=device)
                 )
                 produced["refine"] = (
                     refined,
-                    time.perf_counter() - clock,
+                    frozen_seconds + (time.perf_counter() - clock),
                     2,
-                    dict(refine_sigma=lower),
+                    dict(refine_sigma=lower, refine_eta=args.refine_eta),
                 )
 
             # --- score every arm from the same reference ---
@@ -756,10 +782,12 @@ def main(argv=None):
         scored_sidechains=not args.no_sidechains,
         bs_policy=bs_policy,
         perturb_degrees=args.perturb_degrees,
+        refine_eta=args.refine_eta,
         criterion=dict(
             min_absolute_angstrom=MIN_ABSOLUTE_GAIN,
             min_relative=MIN_RELATIVE_GAIN,
             wiring_tolerance=WIRING_TOLERANCE,
+            gpu_nondeterminism_angstrom=GPU_NONDETERMINISM,
         ),
         checkpoints={
             k: {x: v[x] for x in ("path", "variant", "step", "is_ema")}

@@ -125,7 +125,23 @@ rollout is not the same work as a call.
 
 Criterion: backbone RMSD improvement ≥ `max(0.05 Å, 3% of the strongest
 comparable-cost alternative)`, a paired bootstrap interval excluding zero, and no
-material side-chain or chemistry regression. Beating `bb0` demonstrates
+material side-chain or chemistry regression.
+
+**The interval is protein-level, not cluster-level.** The roadmap asks for
+paired protein *and* cluster uncertainty, and the second is not available here:
+the la-proteina AFDB manifest carries `afid, split, shard_id, length` and no
+cluster assignment, so there is nothing to resample by. The train/val split is
+by accession, which guards against train→val leakage; what it does not bound is
+correlation *within* the val panel, so if it contains homologues the interval is
+optimistic. Quoting it as a cluster-level interval would overstate it. A panel
+with cluster labels (or a clustering pass over the 256 val structures) is what
+would close this.
+
+**On the criterion's shape at this noise level.** With σ ∈ [0.1, 2] Å the
+proposal is already at ~0.32 Å, so `max(0.05 Å, 3%)` is dominated by the
+absolute floor and demands a ~15% relative improvement. That is a demanding bar,
+and it is the stated one — worth noticing when reading a result, not worth
+moving after seeing one. Beating `bb0` demonstrates
 practical correction; **claiming a side-chain-specific benefit additionally
 requires beating `bb_only` and `generic`.**
 

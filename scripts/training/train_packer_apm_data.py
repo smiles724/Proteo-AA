@@ -224,6 +224,10 @@ def main():
     ap.add_argument("--arm", required=True, choices=["none", "a_token", "plm", "both"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--data-root", default=DATA_ROOT)
+    ap.add_argument("--data-sources", default="PDB",
+                    help="comma-separated subset of PDB,AFDB,SWISSPROT. PDB "
+                         "alone reproduces the monomer-only runs; all three is "
+                         "APM's own use_AFDB/use_SWISSPROT setting.")
     ap.add_argument("--plm-checkpoint", default=ESM2_650M)
     ap.add_argument("--a-token-skip-missing", action="store_true",
                     help="drop training chains that have no cached a_token "
@@ -267,20 +271,33 @@ def main():
     torch.manual_seed(args.seed)
 
     from pxdesign_train.sidechain.apm_dataset import (APMPackingDataset, PDB_FILTER,
+                                                      multi_source_index,
                                                       post2021_val_files)
     from apm.data.datasets import _length_filter, _max_coil_filter, _rog_filter
     from pxdesign_train.sidechain.apm_loss import RigidGroupTables, packing_loss
 
-    meta = pd.read_csv(Path(args.data_root) / "meta_data.csv", low_memory=False)
-    meta = meta[meta["processed_path"].astype(str).str.contains("train_set")]
-    n_raw = len(meta)
-    meta = _length_filter(meta, PDB_FILTER["min_num_res"], PDB_FILTER["max_num_res"])
-    meta = _max_coil_filter(meta, PDB_FILTER["max_coil_percent"])
-    meta = _rog_filter(meta, PDB_FILTER["rog_quantile"])
-    root = Path(args.data_root) / "pdb_monomer"
-    meta = meta[[(root / f"{n}.pkl").is_file() for n in meta["pdb_name"].astype(str)]]
-    meta = meta.reset_index(drop=True)
-    files = [root / f"{n}.pkl" for n in meta["pdb_name"].astype(str)]
+    sources = tuple(x.strip() for x in args.data_sources.split(",") if x.strip())
+    source_counts = None
+    if sources == ("PDB",):
+        # Unchanged path, so a PDB-only run here is bit-identical to the four
+        # completed arms rather than merely equivalent.
+        meta = pd.read_csv(Path(args.data_root) / "meta_data.csv", low_memory=False)
+        meta = meta[meta["processed_path"].astype(str).str.contains("train_set")]
+        n_raw = len(meta)
+        meta = _length_filter(meta, PDB_FILTER["min_num_res"], PDB_FILTER["max_num_res"])
+        meta = _max_coil_filter(meta, PDB_FILTER["max_coil_percent"])
+        meta = _rog_filter(meta, PDB_FILTER["rog_quantile"])
+        root = Path(args.data_root) / "pdb_monomer"
+        meta = meta[[(root / f"{n}.pkl").is_file() for n in meta["pdb_name"].astype(str)]]
+        meta = meta.reset_index(drop=True)
+        files = [root / f"{n}.pkl" for n in meta["pdb_name"].astype(str)]
+    else:
+        meta, source_counts = multi_source_index(sources=sources,
+                                                 data_root=args.data_root)
+        n_raw = sum(v["raw"] for v in source_counts.values())
+        meta = meta.reset_index(drop=True)
+        files = [Path(x) for x in meta["path"]]
+        print("SOURCES " + json.dumps(source_counts), flush=True)
 
     a_root = Path(args.a_token_cache) if args.a_token_cache else None
     n_no_cache = 0
@@ -291,6 +308,11 @@ def main():
         # none/plm -- so the count goes in the config, not just a log line, and
         # the list is written out so the difference is auditable rather than
         # remembered.
+        if sources != ("PDB",):
+            raise SystemExit(
+                "the a_token cache was built over PDB monomers only; an "
+                "a_token arm on additional sources needs the cache extended "
+                "first (scripts/data/build_a_token_cache.py)")
         have = {f.stem for f in (a_root / "train").glob("*.npy")}
         keep = [n in have for n in meta["pdb_name"].astype(str)]
         missing = [n for n, k in zip(meta["pdb_name"].astype(str), keep) if not k]
@@ -319,6 +341,7 @@ def main():
     tables = RigidGroupTables(torch.float32, device)
 
     header = dict(arm=args.arm, params_total=n_par, train_chains=len(files),
+                  data_sources=list(sources), source_counts=source_counts,
                   a_token_cache=(str(a_root) if needs_a_token else None),
                   chains_dropped_no_a_token=n_no_cache,
                   filtered_out=n_raw - len(files), clusters=int(meta.cluster.nunique()),
@@ -329,7 +352,10 @@ def main():
                   max_epochs=args.max_epochs, seed=args.seed,
                   loss="supervised_chi_loss(1.0, norm 0.02) + sidechain_fape (APM, weight 1.0)",
                   diffuse_mask="APM packing convention: 1 for every modelled residue",
-                  data="PDB monomers only (no AFDB, no multimer) -- see module docstring")
+                  data=("PDB monomers only (no AFDB/SwissProt/multimer)"
+                        if sources == ("PDB",) else
+                        f"sources={'+'.join(sources)}; multimer still excluded "
+                        "(needs the spatial-crop path)"))
     print("CONFIG " + json.dumps(header), flush=True)
     (out / "config.json").write_text(json.dumps(header, indent=2))
 

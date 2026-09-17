@@ -35,6 +35,10 @@ APM_REFERENCE=${APM_REFERENCE:-/hai/scratch/shenjm/apm_reference}
 PYEXTRA=${PYEXTRA:-/hai/scratch/shenjm/pyextra}
 PYBIN=${PYBIN:-/hai/users/s/h/shenjm/miniconda3/envs/proteoaa/bin/python}
 RUNROOT=${RUNROOT:-/hai/scratch/shenjm/proteo_aa_runs/packer_apm_data}
+# PDB alone reproduces the completed four arms bit-for-bit. PDB,AFDB,SWISSPROT
+# is APM's own use_AFDB/use_SWISSPROT setting: 186,695 chains over 84,882
+# clusters, 19x the batches per epoch, so set MAX_EPOCHS accordingly.
+DATA_SOURCES=${DATA_SOURCES:-PDB}
 
 ARMS=(none plm a_token both)
 ARM=${ARM:-${ARMS[${SLURM_ARRAY_TASK_ID:-0}]}}
@@ -61,7 +65,7 @@ echo "arm=$ARM out=$OUT node=$(hostname) commit=$(git rev-parse --short HEAD)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 exec "$PYBIN" scripts/training/train_packer_apm_data.py \
-  --arm "$ARM" --out "$OUT" \
+  --arm "$ARM" --out "$OUT" --data-sources "$DATA_SOURCES" \
   --max-epochs "${MAX_EPOCHS:-200}" --accum "${ACCUM:-8}" \
   --val-every "${VAL_EVERY:-10}" --val-n "${VAL_N:-100}" \
   --workers 6 --time-limit-h "${TIME_LIMIT_H:-22}" \

@@ -26,7 +26,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from apm.data.datasets import _length_filter, _max_coil_filter, _rog_filter
+from apm.data.datasets import (_length_filter, _max_coil_filter,
+                               _mean_plddt_filter, _rog_filter)
 from apm.data.datasets import _process_csv_row_FAESM
 
 # apm/configs/datasets.yaml :: pdb_dataset.filter, the settings the released
@@ -141,3 +142,125 @@ def post2021_val_files(pdb_test_dir, test_ids_csv):
 
 __all__ = ["APMPackingDataset", "featurise", "pdb_monomer_files",
            "post2021_val_files", "LOSS_KEYS", "PDB_FILTER"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-source training index (APM's use_AFDB / use_SWISSPROT)
+# ---------------------------------------------------------------------------
+# APM's pdb_dataset sets `use_AFDB: True` and `use_SWISSPROT: True`, and the
+# released checkpoint reaches 1.347 symmetry_rmsd where our monomer-only run
+# reaches 1.611. Each source has its OWN filter chain and its own cluster file,
+# and the order within a chain matters because `_rog_filter` fits a quantile,
+# so the filters below are APM's calls in APM's order rather than a shared
+# pipeline:
+#
+#   PDB        length -> coil -> rog                       (datasets.py:645)
+#   AFDB       length -> coil -> rog -> mean_plddt >= 95    (datasets.py:663)
+#   SWISSPROT  length -> avg_plddt >= 85 -> coil -> rog     (datasets.py:586)
+#
+# Cluster ids are offset per source exactly as APM offsets them, so one epoch
+# still draws one sample per cluster and a cluster cannot span two sources.
+METADATA_ALL = Path("/hai/scratch/shenjm/apm_weights/metadata_all")
+EXTRACTED = Path("/hai/scratch/yfsun/apm/extracted")
+
+SOURCE_DIRS = {
+    "PDB": EXTRACTED / "data_APM/pdb_monomer",
+    "AFDB": EXTRACTED / "data_APM/afdb",
+    "SWISSPROT": EXTRACTED / "swissprot_data",
+}
+SWISSPROT_PLDDT = 85.0          # datasets.py:592 -- NOT the AFDB threshold
+AFDB_PLDDT = 95.0               # datasets.yaml :: filter.AFDB_plddt_threshold
+
+
+def _read_clusters(cluster_path, synthetic=False):
+    """apm/data/datasets.py:270, copied because it is six lines and pure."""
+    out = {}
+    with open(cluster_path) as fh:
+        for i, line in enumerate(fh):
+            for chain in line.split(" "):
+                pdb = chain.strip() if synthetic else chain.split("_")[0].strip()
+                out[pdb.upper()] = i
+    return out
+
+
+def _swissprot_clusters(path):
+    """`swissprot_cluster50_cluster.tsv` is `cluster_rep <TAB> member`."""
+    groups = {}
+    with open(path) as fh:
+        for line in fh:
+            parts = line.strip().split("\t")
+            if len(parts) != 2:
+                continue
+            groups.setdefault(parts[0], []).append(parts[1])
+    return {member: i for i, members in enumerate(groups.values()) for member in members}
+
+
+def multi_source_index(sources=("PDB", "AFDB", "SWISSPROT"), data_root=None,
+                       filters=None):
+    """Combined training index over APM's sources.
+
+    Returns (DataFrame with pdb_name/modeled_seq_len/cluster/src/path, per-source
+    counts). Rows whose pickle is absent are dropped and counted, because the
+    extraction is a subset of the metadata for SwissProt.
+    """
+    F = dict(PDB_FILTER) if filters is None else dict(filters)
+    dirs = dict(SOURCE_DIRS)
+    if data_root:
+        # `data_root` already points AT data_APM (the trainer's default is
+        # .../extracted/data_APM), so this is one level, not two.
+        dirs["PDB"] = Path(data_root) / "pdb_monomer"
+    frames, counts, offset = [], {}, 0
+
+    for src in sources:
+        if src == "PDB":
+            csv = (Path(data_root) / "meta_data.csv" if data_root
+                   else EXTRACTED / "data_APM/meta_data.csv")
+            meta = pd.read_csv(csv, low_memory=False)
+            meta = meta[meta["processed_path"].astype(str).str.contains("train_set")]
+            raw = len(meta)
+            meta = _length_filter(meta, F["min_num_res"], F["max_num_res"])
+            meta = _max_coil_filter(meta, F["max_coil_percent"])
+            meta = _rog_filter(meta, F["rog_quantile"])
+            # Keep the cluster column the completed monomer-only runs used, so
+            # "more data" is the only thing that changes between the two runs.
+            clusters = meta["cluster"].astype(int)
+        elif src == "AFDB":
+            meta = pd.read_csv(METADATA_ALL / "metadata_90.csv", low_memory=False)
+            raw = len(meta)
+            meta = _length_filter(meta, F["min_num_res"], F["max_num_res"])
+            meta = _max_coil_filter(meta, F["max_coil_percent"])
+            meta = _rog_filter(meta, F["rog_quantile"])
+            meta = _mean_plddt_filter(meta, AFDB_PLDDT)
+            lut = _read_clusters(METADATA_ALL / "AFDB.clusters", synthetic=True)
+            clusters = meta["pdb_name"].astype(str).str.upper().map(lut)
+        elif src == "SWISSPROT":
+            meta = pd.read_csv(METADATA_ALL / "swissprot_metadata.csv", low_memory=False)
+            raw = len(meta)
+            meta = meta[(meta.modeled_seq_len >= F["min_num_res"]) &
+                        (meta.modeled_seq_len <= F["max_num_res"])]
+            meta = meta[meta.avg_plddt >= SWISSPROT_PLDDT]
+            meta = _max_coil_filter(meta, F["max_coil_percent"])
+            meta = _rog_filter(meta, F["rog_quantile"])
+            lut = _swissprot_clusters(METADATA_ALL / "swissprot_cluster50_cluster.tsv")
+            clusters = meta["pdb_name"].astype(str).map(lut)
+        else:
+            raise ValueError(f"unknown source {src!r}")
+
+        meta = meta.copy()
+        # A name with no cluster entry becomes its own cluster, which is what
+        # APM's `cluster_lookup` does for a missing pdb.
+        miss = clusters.isna()
+        if miss.any():
+            clusters = clusters.copy()
+            clusters[miss] = range(int(clusters.max() or 0) + 1,
+                                   int(clusters.max() or 0) + 1 + int(miss.sum()))
+        meta["cluster"] = clusters.astype(int) + offset
+        offset = int(meta["cluster"].max()) + 1
+        meta["src"] = src
+        meta["path"] = [str(dirs[src] / f"{n}.pkl") for n in meta["pdb_name"].astype(str)]
+        on_disk = [Path(x).is_file() for x in meta["path"]]
+        counts[src] = dict(raw=raw, filtered=len(meta), on_disk=int(sum(on_disk)))
+        frames.append(meta[on_disk][["pdb_name", "modeled_seq_len", "cluster", "src", "path"]])
+
+    combined = pd.concat(frames, ignore_index=True)
+    return combined, counts

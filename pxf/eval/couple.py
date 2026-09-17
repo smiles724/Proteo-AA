@@ -427,3 +427,74 @@ def incompatible_fields(left, right):
         if left.get(key) != right.get(key):
             out.append((key, left.get(key), right.get(key)))
     return out
+
+
+# --- paired uncertainty -----------------------------------------------------
+
+
+def per_target_deltas(rows, metric, sigma=None):
+    """``{target: coupled - uncoupled}`` from a run's per-target rows.
+
+    The delta is formed *within* a target before anything is averaged, which is
+    what makes the interval below a paired one: per-target packing difficulty
+    varies far more than the adapter's effect does, and an unpaired interval
+    would be dominated by it.
+    """
+    by_target = {}
+    for row in rows:
+        if sigma is not None and abs(float(row["sigma"]) - float(sigma)) > 1e-9:
+            continue
+        by_target.setdefault(row["target"], {})[row["arm"]] = float(row[metric])
+    return {
+        target: arms["coupled"] - arms["uncoupled"]
+        for target, arms in by_target.items()
+        if "coupled" in arms and "uncoupled" in arms
+    }
+
+
+def paired_bootstrap(values, *, n_resamples=10000, alpha=0.05, seed=0):
+    """Percentile CI for a mean, resampling whole targets.
+
+    Targets are the independent unit, not (target, sigma) pairs: one structure
+    contributes a correlated row at every sigma, so resampling rows would
+    understate the interval.
+    """
+    import torch as _t
+
+    data = _t.tensor([float(v) for v in values], dtype=_t.float64)
+    if data.numel() == 0:
+        return float("nan"), float("nan"), float("nan")
+    generator = _t.Generator().manual_seed(int(seed))
+    index = _t.randint(data.numel(), (int(n_resamples), data.numel()), generator=generator)
+    means = data[index].mean(dim=1)
+    low = float(means.quantile(alpha / 2))
+    high = float(means.quantile(1 - alpha / 2))
+    return float(data.mean()), low, high
+
+
+def retention_interval(candidate, reference, *, n_resamples=10000, seed=0):
+    """Bootstrap the *ratio* of two paired effects on the same targets.
+
+    Resampling the shared target list once per replicate -- rather than each
+    run independently -- keeps numerator and denominator paired, which is the
+    only way the ratio has an interval worth quoting.
+
+    Returns ``(ratio, low, high, n)``. A ratio whose denominator interval spans
+    zero is meaningless however tight it looks, so the caller is expected to
+    check the reference effect first.
+    """
+    import torch as _t
+
+    shared = sorted(set(candidate) & set(reference))
+    if not shared:
+        return float("nan"), float("nan"), float("nan"), 0
+    cand = _t.tensor([candidate[t] for t in shared], dtype=_t.float64)
+    ref = _t.tensor([reference[t] for t in shared], dtype=_t.float64)
+    generator = _t.Generator().manual_seed(int(seed))
+    index = _t.randint(len(shared), (int(n_resamples), len(shared)), generator=generator)
+    ratios = cand[index].mean(dim=1) / ref[index].mean(dim=1)
+    finite = ratios[_t.isfinite(ratios)]
+    point = float(cand.mean() / ref.mean()) if float(ref.mean()) != 0 else float("nan")
+    if finite.numel() == 0:
+        return point, float("nan"), float("nan"), len(shared)
+    return point, float(finite.quantile(0.025)), float(finite.quantile(0.975)), len(shared)

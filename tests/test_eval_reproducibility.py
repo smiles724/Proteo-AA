@@ -180,3 +180,85 @@ def test_the_fingerprint_is_stable_across_interpreters():
         "print(json.dumps(structures_fingerprint(['a.cif', 'b.cif'])))\n"
     )
     assert _in_subprocess(snippet) == ev.structures_fingerprint(["a.cif", "b.cif"])
+
+
+# --- paired uncertainty -----------------------------------------------------
+
+
+def _rows(per_target):
+    """Rows in the shape per_target.csv has: one per (target, arm, sigma)."""
+    out = []
+    for target, (unc, cou) in per_target.items():
+        out.append(
+            {
+                "target": target,
+                "arm": "uncoupled",
+                "sigma": "0.429",
+                "symmetry_rmsd": str(unc),
+            }
+        )
+        out.append(
+            {
+                "target": target,
+                "arm": "coupled",
+                "sigma": "0.429",
+                "symmetry_rmsd": str(cou),
+            }
+        )
+    return out
+
+
+def test_deltas_are_formed_within_a_target_before_averaging():
+    rows = _rows({"a": (2.0, 1.5), "b": (1.0, 0.9)})
+    deltas = ev.per_target_deltas(rows, "symmetry_rmsd", sigma=0.429)
+    assert deltas == {"a": -0.5, "b": pytest.approx(-0.1)}
+
+
+def test_a_target_missing_an_arm_is_dropped_rather_than_half_counted():
+    rows = _rows({"a": (2.0, 1.5)})
+    rows.append(
+        {"target": "lonely", "arm": "coupled", "sigma": "0.429", "symmetry_rmsd": "1.0"}
+    )
+    assert set(ev.per_target_deltas(rows, "symmetry_rmsd", sigma=0.429)) == {"a"}
+
+
+def test_the_sigma_filter_selects_one_noise_level():
+    rows = _rows({"a": (2.0, 1.5)})
+    rows += [
+        {"target": "a", "arm": "uncoupled", "sigma": "4.881", "symmetry_rmsd": "9.0"},
+        {"target": "a", "arm": "coupled", "sigma": "4.881", "symmetry_rmsd": "3.0"},
+    ]
+    assert ev.per_target_deltas(rows, "symmetry_rmsd", sigma=0.429) == {"a": -0.5}
+    assert ev.per_target_deltas(rows, "symmetry_rmsd", sigma=4.881) == {"a": -6.0}
+
+
+def test_a_bootstrap_interval_brackets_the_mean_and_is_deterministic():
+    values = [0.1, 0.2, 0.15, 0.05, 0.3, 0.12, 0.22, 0.08]
+    mean, low, high = ev.paired_bootstrap(values, n_resamples=2000, seed=0)
+    assert low < mean < high
+    assert (mean, low, high) == ev.paired_bootstrap(values, n_resamples=2000, seed=0)
+
+
+def test_an_all_zero_effect_gives_an_interval_containing_zero():
+    mean, low, high = ev.paired_bootstrap([0.0] * 20, n_resamples=500)
+    assert mean == 0.0 and low == 0.0 and high == 0.0
+
+
+def test_full_retention_is_one_and_no_retention_is_zero():
+    reference = {f"t{i}": -0.2 for i in range(20)}
+    identical = dict(reference)
+    ratio, low, high, n = ev.retention_interval(identical, reference, n_resamples=500)
+    assert n == 20
+    assert ratio == pytest.approx(1.0) and low == pytest.approx(1.0)
+
+    inert = {f"t{i}": 0.0 for i in range(20)}
+    ratio, _low, _high, _n = ev.retention_interval(inert, reference, n_resamples=500)
+    assert ratio == pytest.approx(0.0)
+
+
+def test_retention_pairs_the_numerator_and_denominator_on_shared_targets():
+    reference = {"a": -0.4, "b": -0.2, "extra": -1.0}
+    candidate = {"a": -0.2, "b": -0.1, "other": -5.0}
+    ratio, _low, _high, n = ev.retention_interval(candidate, reference, n_resamples=500)
+    assert n == 2, "unshared targets must be excluded from both sides"
+    assert ratio == pytest.approx(0.5)

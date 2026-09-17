@@ -70,7 +70,7 @@ from pathlib import Path
 import _bootstrap  # noqa: F401
 import torch
 
-from pxf.couple import codesign, schedule
+from pxf.couple import bs_policy, codesign, schedule
 from pxf.couple.controller import CycleOutput
 from pxf.eval import couple as ev
 
@@ -181,6 +181,31 @@ def parse_args(argv=None):
         default=0.0,
         help="sampling temperature for the predicted sequence; 0.0 is argmax "
         "(only read with --codesign)",
+    )
+    p.add_argument(
+        "--residual-source",
+        default="matched",
+        choices=("matched", "mean", "zero_input"),
+        help="what feeds A_BS in the coupled arm. matched: this structure's own "
+        "a_token. mean: a shared mu(sigma) estimated on training proteins. "
+        "zero_input: A(0, sigma), which is non-zero because of biases and the "
+        "sigma embedding. --shuffle-a-token is the fourth source and overrides "
+        "this one",
+    )
+    p.add_argument(
+        "--gate",
+        default="off",
+        choices=("off", "A", "B", "C", "one"),
+        help="sigma-dependent scaling of the residual. off/one leave it "
+        "untouched; A, B and C are the development candidates, each exactly "
+        "zero below its sigma_off so the coupled arm becomes the bypass arm "
+        "rather than an approximation of it",
+    )
+    p.add_argument(
+        "--mean-residual",
+        default=None,
+        help="mu(sigma) JSON from scripts/estimate_mean_residual.py; required "
+        "by --residual-source mean",
     )
     p.add_argument(
         "--shuffle-a-token",
@@ -661,6 +686,17 @@ def main(argv=None):
             logger.info("evaluating the EMA weights (step %s)", step)
     adapters.eval().requires_grad_(False)
 
+    gate = bs_policy.gate_by_name(None if args.gate == "off" else args.gate)
+    mean_residual = None
+    if args.residual_source == "mean":
+        if not args.mean_residual:
+            raise SystemExit(
+                "--residual-source mean needs --mean-residual pointing at the "
+                "mu(sigma) JSON; estimate it with scripts/estimate_mean_residual.py"
+            )
+        mean_residual = bs_policy.MeanResidual.from_json(args.mean_residual)
+        logger.info("mean residual: %s", mean_residual.identity())
+
     controller = CoupledDenoiser(
         backbone=None, fampnn=fampnn, adapters=adapters, pack_steps=args.pack_steps
     )
@@ -780,7 +816,11 @@ def main(argv=None):
 
             for arm in ev.ARMS:
                 enabled = arm == "coupled"
-                adapters.enable_bb_to_sc = enabled
+                # `enable_bb_to_sc` is left on: the policy decides whether a
+                # residual exists, and `delta_h(...)` must stay callable for the
+                # zero-input and matched sources. Only SC->BB is still gated by
+                # the flag, and phase 1 never runs it.
+                adapters.enable_bb_to_sc = True
                 adapters.enable_sc_to_bb = enabled and args.run_feedback
                 # The packing sampler draws from the global RNG, so both arms are
                 # reseeded identically -- otherwise the delta measures the sampler.
@@ -804,15 +844,37 @@ def main(argv=None):
                         # touched: the uncoupled arm has no residual to
                         # substitute into, and its packing must stay the shared
                         # baseline both runs are measured against.
-                        override = None
-                        if enabled and donor_bank:
-                            override = ev.donor_a_token(
-                                donor_bank[si], int(aatype.shape[0])
+                        # One packing path for every arm: the policy decides
+                        # what the residual is, including that it is nothing.
+                        if not enabled:
+                            delta = None
+                        elif donor_bank:
+                            # The donor source needs a_token from another
+                            # structure, so it goes through the adapter here
+                            # rather than through bs_policy's single-structure
+                            # view; the gate still applies.
+                            donor = ev.donor_a_token(donor_bank[si], int(aatype.shape[0]))
+                            delta = bs_policy.residual(
+                                adapters,
+                                "matched",
+                                a_token=donor,
+                                sigma=sigma,
+                                gate=gate,
+                            )
+                        else:
+                            delta = bs_policy.residual(
+                                adapters,
+                                args.residual_source,
+                                a_token=proposal.a_token,
+                                sigma=sigma,
+                                length=int(aatype.shape[0]),
+                                mean=mean_residual,
+                                gate=gate,
                             )
                         cycle = controller.pack_proposal(
                             proposal,
-                            a_token_override=override,
                             run_feedback=args.run_feedback and enabled,
+                            delta_h=delta,
                         )
                 # The packed atom set belongs to whatever sequence was packed
                 # for, so atom37 assembly must use s_hat in codesign mode.
@@ -905,6 +967,9 @@ def main(argv=None):
         pack_steps=args.pack_steps,
         run_feedback=bool(args.run_feedback),
         a_token_source="shuffled-donor" if args.shuffle_a_token else "own",
+        residual_source="shuffled" if args.shuffle_a_token else args.residual_source,
+        gate=gate.identity() if gate else None,
+        mean_residual=mean_residual.identity() if mean_residual else None,
         # Everything needed to decide whether another run measured the same
         # thing. Checked by `--compare`; two runs that disagree on any
         # compatibility key are not combinable however alike they look.

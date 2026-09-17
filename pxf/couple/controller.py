@@ -121,6 +121,11 @@ class CycleOutput:
         return self.bb1_flat is not None
 
 
+# `delta_h=None` means bypass, which is a real choice, so "not specified" needs
+# its own value rather than reusing None.
+UNSET = object()
+
+
 @dataclass
 class Proposal:
     """Everything the arms share at one ``(structure, sigma, replicate)``.
@@ -267,7 +272,9 @@ class CoupledDenoiser:
             features=features,
         )
 
-    def pack_proposal(self, proposal, *, a_token_override=None, run_feedback=None):
+    def pack_proposal(
+        self, proposal, *, a_token_override=None, run_feedback=None, delta_h=UNSET
+    ):
         """The residual-dependent half: apply A_BS, then pack.
 
         One arm per call, from shared conditioning. Packing randomness is the
@@ -289,10 +296,16 @@ class CoupledDenoiser:
         # L_SC re-runs the side-chain denoiser from these features, so the cycle
         # records the dict itself rather than just h_V.
         out.aux["features"] = features
-        # Only the residual reads the override; out.a_token stays this
-        # structure's own, so the recorded provenance is not falsified.
-        source = a_token if a_token_override is None else a_token_override
-        out.delta_h = self._delta_h(source, sigma, h_base)
+        if delta_h is not UNSET:
+            # The caller supplied the residual outright -- a gated one, a shared
+            # mean, or an explicit bypass. `pxf.couple.bs_policy` builds these,
+            # and routing them here keeps every arm on one packing path.
+            out.delta_h = delta_h
+        else:
+            # Only the residual reads the override; out.a_token stays this
+            # structure's own, so the recorded provenance is not falsified.
+            source = a_token if a_token_override is None else a_token_override
+            out.delta_h = self._delta_h(source, sigma, h_base)
         out.h_cond = h_base if out.delta_h is None else h_base + out.delta_h
 
         # --- pack ---

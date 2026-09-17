@@ -1,0 +1,49 @@
+# Structures the coupling path can train on, produced by
+#   scripts/survey_coupling_structures.py \
+#       --glob '/hai/scratch/yfsun/casp16/cif/*.cif' \
+#       --crop-size 1024 --out /hai/scratch/yfsun/marlowe_transfer/casp16_usable.txt
+# 43 usable of 72 candidates; lengths 111-661.
+# Run with --crop-size >= 661, or the side-chain targets misalign.
+/hai/scratch/yfsun/casp16/cif/T1206.cif
+/hai/scratch/yfsun/casp16/cif/T1208s1.cif
+/hai/scratch/yfsun/casp16/cif/T1208s2.cif
+/hai/scratch/yfsun/casp16/cif/T1212.cif
+/hai/scratch/yfsun/casp16/cif/T1214v1.cif
+/hai/scratch/yfsun/casp16/cif/T1226.cif
+/hai/scratch/yfsun/casp16/cif/T1227s1.cif
+/hai/scratch/yfsun/casp16/cif/T1228v1.cif
+/hai/scratch/yfsun/casp16/cif/T1228v2.cif
+/hai/scratch/yfsun/casp16/cif/T1228v3.cif
+/hai/scratch/yfsun/casp16/cif/T1228v4.cif
+/hai/scratch/yfsun/casp16/cif/T1231.cif
+/hai/scratch/yfsun/casp16/cif/T1234.cif
+/hai/scratch/yfsun/casp16/cif/T1235.cif
+/hai/scratch/yfsun/casp16/cif/T1237.cif
+/hai/scratch/yfsun/casp16/cif/T1243.cif
+/hai/scratch/yfsun/casp16/cif/T1244s2.cif
+/hai/scratch/yfsun/casp16/cif/T1245s1.cif
+/hai/scratch/yfsun/casp16/cif/T1245s2.cif
+/hai/scratch/yfsun/casp16/cif/T1246.cif
+/hai/scratch/yfsun/casp16/cif/T1259.cif
+/hai/scratch/yfsun/casp16/cif/T1266.cif
+/hai/scratch/yfsun/casp16/cif/T1271s7.cif
+/hai/scratch/yfsun/casp16/cif/T1272s1.cif
+/hai/scratch/yfsun/casp16/cif/T1272s3.cif
+/hai/scratch/yfsun/casp16/cif/T1272s4.cif
+/hai/scratch/yfsun/casp16/cif/T1272s5.cif
+/hai/scratch/yfsun/casp16/cif/T1272s6.cif
+/hai/scratch/yfsun/casp16/cif/T1272s7.cif
+/hai/scratch/yfsun/casp16/cif/T1272s8.cif
+/hai/scratch/yfsun/casp16/cif/T1272s9.cif
+/hai/scratch/yfsun/casp16/cif/T1274.cif
+/hai/scratch/yfsun/casp16/cif/T1276.cif
+/hai/scratch/yfsun/casp16/cif/T1278.cif
+/hai/scratch/yfsun/casp16/cif/T1279.cif
+/hai/scratch/yfsun/casp16/cif/T1280.cif
+/hai/scratch/yfsun/casp16/cif/T1284.cif
+/hai/scratch/yfsun/casp16/cif/T1292.cif
+/hai/scratch/yfsun/casp16/cif/T1294v1.cif
+/hai/scratch/yfsun/casp16/cif/T1294v2.cif
+/hai/scratch/yfsun/casp16/cif/T1298_v1.cif
+/hai/scratch/yfsun/casp16/cif/T1298_v2.cif
+/hai/scratch/yfsun/casp16/cif/T1299.cif

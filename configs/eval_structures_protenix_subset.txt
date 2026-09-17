@@ -1,0 +1,36 @@
+# Usable Protenix recentPDB eval entries, remapped from the survey's /tmp
+# symlink paths to the real mmCIF tree. Header of the original follows.
+# Structures the coupling path can train on, produced by
+#   scripts/survey_coupling_structures.py \
+#       --glob '/tmp/yfsun/psurvey_all/*.cif' \
+#       --crop-size 1536 --out /hai/scratch/yfsun/marlowe_transfer/protenix_eval_usable.txt
+# 28 usable of 1642 candidates; lengths 87-1240.
+# Run with --crop-size >= 1240, or the side-chain targets misalign.
+/hai/scratch/yfsun/protenix_data/mmcif/7fcc.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7mnk.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7o6w.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7qv6.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7r7m.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7tvl.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7tvn.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7tvo.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7umq.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7un5.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7vd7.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7veq.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7vma.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7vmi.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7vtk.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7vty.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7w70.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7wvr.cif
+/hai/scratch/yfsun/protenix_data/mmcif/7x84.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8a01.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8a02.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8a03.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8a04.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8a06.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8b3y.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8cz5.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8dc1.cif
+/hai/scratch/yfsun/protenix_data/mmcif/8h6r.cif

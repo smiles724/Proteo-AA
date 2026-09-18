@@ -409,3 +409,58 @@ shows that `a_token` carries the same *semantics* under `d18aa1da` as under
 `c3bfc36`, and the readout's inputs (186-dim readout, 250-dim projection) come
 from the FaMPNN side, which this analysis does not touch. The precondition for
 testing adapted weights is met; the test itself has not been run.
+
+## 15. The port, and its no-op validation
+
+`pxf/official/runtime.py` drives the official runtime with a recordable
+sampler; `pxf/official/bridge.py` recovers `Topology`, the design mask and
+per-token `aatype` from the official `AtomArray` plus feature dict, since the
+official path produces neither `pxdesign_train`'s featurizer object nor its
+keys. Design tokens are identified by PXDesign's own `xpb` marker rather than
+by a chain index or a fraction, because that predicate *is* the featurizer's
+definition of the condition region.
+
+Three departures from the local path, all forced by section 9 and section 13:
+no `fixed_target` anywhere, eta 2.5, and no `prepare_features`.
+
+### Two things the first run got wrong
+
+**The official baseline is entry-point dependent.** `configs_base` gives the
+design model `eta_schedule = {type: piecewise_65, min: 1.0, max: 2.5}`, and
+the `pxdesign` *CLI* overrides it to a constant 2.5. Calling `get_configs`
+directly -- as the harness did -- silently inherits `piecewise_65`, so the
+transcription check compared a constant-eta replay against a piecewise-eta
+upstream and diverged by **49.65 A**. The runs that produced plausible
+complexes (sections 7, 10) went through the CLI and therefore used const 2.5,
+so that is the baseline the harness now sets explicitly. A `run_trajectory`
+that took a *schedule* rather than a scalar would be needed to reproduce
+`piecewise_65`; it currently cannot, and that is a real limitation.
+
+**The numerical floor had never been measured at trajectory scale.** The
+4.8e-6 figure on record was for a single denoiser call. Over 60 steps the same
+computation run twice diverges by 1.3e-3, because each step's rounding feeds
+the next through a chaotic map. Judging against the single-call figure made
+all four checks "fail", including one -- a bypassed tap -- that is a
+mathematical no-op and therefore *cannot* fail for a real reason. The harness
+now measures the floor with a null replicate (check 0) instead of assuming it.
+
+### Results, adapters disabled
+
+| check | max deviation | verdict |
+|---|---|---|
+| 0 null replicate (identical computation twice) | **1.313e-03** | defines the floor |
+| 1 transcription: upstream `sample_diffusion` vs `run_trajectory` | 2.683e-04 | PASS |
+| 2 replay: uninterrupted vs record-at-30 then resume | 3.619e-04 | PASS |
+| 3 hooks installed, feedback bypassed | 1.299e-03 | PASS |
+| 4 one injected residual of exact zeros | 5.712e-04 | PASS |
+| exactly one injection | 1 | PASS |
+
+Recorded alongside: `sigma / c_tau_last = 2.0` exactly at the event step,
+confirming the churn behaves as the module docstring claims and that the
+*churned* level is what gets recorded; and `a_token` width 768, matching both
+the official `diffusion_module.c_token` and the adapter tensors.
+
+Check 1 is the load-bearing one. It says this repo's transcription of the
+sampler loop reproduces upstream's own `sample_diffusion` to well below the
+floor -- so the loop substituted for the official one is the official one, and
+`fixed_target`'s removal did not quietly change the trajectory.

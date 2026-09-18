@@ -299,7 +299,12 @@ def run_trajectory(
     gamma0=1.0,
     gamma_min=0.01,
     noise_scale_lambda=1.003,
-    step_scale_eta=1.5,
+    # PXDesign's setting, not Protenix's. `configs_base` gives the design model
+    # `eta_schedule = {type: piecewise_65, min: 1.0, max: 2.5}` and the
+    # `pxdesign` CLI overrides it to a constant 2.5; 1.5 is Protenix's generic
+    # default and was never PXDesign's. The Euler step is scaled by this at
+    # every level, so the difference is not cosmetic.
+    step_scale_eta=2.5,
     stream,
     record_steps=(),
     resume=None,

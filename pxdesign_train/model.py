@@ -268,6 +268,9 @@ class ProtenixDesignTrain(ProtenixDesign):
         #   _a_sc_cache      — the per-token side-chain summary a_sc from round 1.
         self._a_direct_active = False
         self._a_sc_cache = None
+        #   _sc_env_cache    — the sigma-reduced coordinate-feedback term from
+        #       round 1, already projected to c_trunk by SidechainEnvFeedback.
+        self._sc_env_cache = None
         # Pass-scoped ATOM-level (q) injection state (see _q_skip_decoder_pre_hook):
         #   _q_direct_active — True only inside the refinement diffusion call.
         #   _q_sc_cache      — S_phi's features for the 4 backbone atoms (q_sc_bb),
@@ -553,6 +556,35 @@ class ProtenixDesignTrain(ProtenixDesign):
             if self.enable_coevolution:
                 c_trunk = int(getattr(configs, "c_s", 384))
                 self.hres_injector = HResInjector(c_hres=self.sc_c_res, c_trunk=c_trunk)
+                # ---- Coordinate (environment) feedback ----
+                # A SECOND additive term at the same injection point, consuming the
+                # packer's side-chain COORDINATES through a residue-KNN atom
+                # neighbourhood. Kept separate from `hres_injector` (which consumes
+                # pooled per-atom features) so the F / C / F+C arms are separable;
+                # both are zero-initialised, so either can be off without the other
+                # noticing. `env_source="atom_id"` is the control that removes the
+                # packer's node_embed and leaves atom identity plus geometry.
+                # Re-read the config here rather than relying on `sc_cfg` from
+                # the block above: that name is bound inside a conditional, so
+                # depending on it would make this a NameError on any path where
+                # the conditional did not run.
+                _sc = getattr(configs, "sidechain", None)
+                env_mode = str(getattr(_sc, "env_feedback", "off"))
+                if env_mode not in ("off", "packer", "atom_id"):
+                    raise ValueError(
+                        f"sidechain.env_feedback must be off/packer/atom_id, got "
+                        f"{env_mode!r}")
+                if env_mode != "off":
+                    from pxdesign_train.sidechain.env_feedback import SidechainEnvFeedback
+                    self.sc_env_feedback = SidechainEnvFeedback(
+                        c_atom=c_atom, c_trunk=c_trunk,
+                        n_blocks=int(getattr(_sc, "env_blocks", 2)),
+                        n_heads=int(getattr(_sc, "env_heads", 8)),
+                        n_neighbors=int(getattr(_sc, "env_neighbors", 16)),
+                        feature_source=env_mode,
+                        use_env=bool(getattr(_sc, "env_use_neighbourhood", True)),
+                        detach_inputs=bool(getattr(_sc, "env_detach", True)),
+                    )
                 # The shared DiffusionModule sees two semantically different modes:
                 # B_pre receives x_sigma at a sampled physical noise level, while
                 # B_post receives B_pre's x_hat_0 under a fixed refinement sigma.
@@ -1142,6 +1174,7 @@ class ProtenixDesignTrain(ProtenixDesign):
         # (or a previous item) leak into this one, and make sure the first pass
         # runs with the injection off.
         self._a_sc_cache = None
+        self._sc_env_cache = None
         self._a_direct_active = False
         self._q_inject_calls = {}      # per-forward; backward of THIS step still sees it
         self._q_sc_cache = None
@@ -1306,6 +1339,15 @@ class ProtenixDesignTrain(ProtenixDesign):
                 s_trunk_refine = (
                     s_trunk_refine + self.hres_injector(h_res_prime).to(s.dtype)
                 )
+            # ENV feedback: the same injection point, a second additive term.
+            # Separate from `hres_injector` on purpose -- it consumes the packer's
+            # COORDINATES through a residue-KNN neighbourhood, which is the only
+            # thing this channel can carry that IPA reading (R, t) cannot, whereas
+            # `hres_injector` consumes pooled per-atom features. Keeping them
+            # separate is what makes the F / C / F+C arms separable.
+            env_term = getattr(self, "_sc_env_cache", None)
+            if env_term is not None:
+                s_trunk_refine = s_trunk_refine + env_term.to(s.dtype)
             # DIRECT a-level feedback (sidechain.a_direct): arm the layernorm_a hook
             # for the duration of THIS call only. The first pass above ran with the
             # flag down (and with _a_sc_cache=None), so a'_bb = a_bb + MLP(...) can
@@ -2092,6 +2134,30 @@ class ProtenixDesignTrain(ProtenixDesign):
                 out["sc_pred_chi_raw"] = torsions["raw"]
                 out["sc_pred_chi"] = torsions["chi"]
                 out["sc_pred_chi_mask"] = torsions["chi_mask"]
+            # ENV feedback (side-chain coordinates -> h_res'): cache the packer's
+            # coordinate output beside its features. Both are per-sigma here; the
+            # reduction happens in the cycle, not now, because
+            # `centre_random_augmentation` draws an INDEPENDENT rotation per
+            # N_sample row -- averaging coordinates across rows would average
+            # different global orientations. Running the (rigid-invariant) module
+            # per row and averaging its OUTPUT is the correct order, and that
+            # invariance is what `tests/test_sc_env_feedback.py` pins.
+            if getattr(self, "sc_env_feedback", None) is not None:
+                # Run per sigma row, then reduce -- NOT the other way round.
+                # `frame_t` IS the CA position (`frames.build_frame` returns
+                # t == ca), so no gather is needed for the KNN.
+                rm = sc_slot.any(-1) if ctx_tok is None else (sc_slot.any(-1) | ctx_tok.bool())
+                env_term = self.sc_env_feedback(
+                    atom_feats, y0_global, sc_slot, ft, rm,
+                    atom_name_ids=sc_ids,
+                )                                   # [B*N_sample, L, c_trunk]
+                if use_per_sigma:
+                    env_term = env_term.reshape(
+                        *sample_shape, n_sample, env_term.shape[-2], env_term.shape[-1]
+                    ).mean(dim=len(sample_shape))    # [*sample_shape, L, c_trunk]
+                elif squeeze:
+                    env_term = env_term.squeeze(0)
+                self._sc_env_cache = env_term
             h_res_prime = self.sidechain_feedback(
                 atom_feats, sc_slot, h_res, detach=self.sc_detach_feedback,
             )

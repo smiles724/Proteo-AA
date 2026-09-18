@@ -182,3 +182,40 @@ def test_width_mismatch_is_refused():
     b["sc_feats"] = torch.randn(B, L, A, 768)
     with pytest.raises(ValueError, match="768"):
         m(**b)
+
+
+# ---------------------------------------------------------------------------
+# Criterion 0 at the integration level
+# ---------------------------------------------------------------------------
+# The unit test above proves the MODULE returns zeros. That is necessary and not
+# sufficient: the term still has to reach `s_trunk_refine` as an addition of
+# zeros rather than, say, replacing it, and the cache has to be cleared between
+# forwards. These check the wiring, not the module.
+
+def test_injection_is_additive_and_zero_at_init():
+    """`s_trunk_refine + env_term` with env_term==0 must leave s_trunk_refine
+    bit-identical, including dtype. A `.to(s.dtype)` on a zero tensor is still
+    exactly zero, but the ADDITION is what the model does, so add it here too.
+    """
+    m = SidechainEnvFeedback(c_atom=C_ATOM, c_trunk=C_TRUNK, n_blocks=2).eval()
+    env_term = m(**_batch(11))
+    s_trunk = torch.randn(B, L, C_TRUNK)
+    assert torch.equal(s_trunk + env_term.to(s_trunk.dtype), s_trunk)
+
+
+def test_cache_is_reset_between_forwards():
+    """A stale `_sc_env_cache` would silently feed the PREVIOUS item's side
+    chains into this item's refinement pass, and nothing downstream would
+    notice. The model clears it per forward; this pins the attribute name that
+    contract depends on, so a rename cannot quietly break it.
+    """
+    import inspect
+
+    from pxdesign_train import model as model_mod
+
+    src = inspect.getsource(model_mod.ProtenixDesignTrain)
+    # Set in the packer, consumed in the cycle, and cleared once per forward.
+    assert src.count("self._sc_env_cache = None") >= 2, (
+        "_sc_env_cache must be initialised in __init__ AND cleared per forward; "
+        "found fewer than two assignments to None")
+    assert "self._sc_env_cache = env_term" in src

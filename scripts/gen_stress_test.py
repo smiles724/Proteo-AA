@@ -384,7 +384,7 @@ def main(argv=None):
                         "    %-10s calls=%d inj=%d drift=%.3f A target=%.2e s=%.1f",
                         arm,
                         row["denoiser_calls"],
-                        row["injections"],
+                        row["injection_count"],
                         row["drift_from_baseline"],
                         row["target_max_displacement"],
                         row["seconds"],

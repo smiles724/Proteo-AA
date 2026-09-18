@@ -6,20 +6,42 @@ donor, one packing length or one BB->SC policy is not the state another arm
 should read. So the refusal is tested, not the reuse.
 """
 
+import copy
+
 import pytest
 import torch
 
 from pxf import atom37
 from pxf.couple import pilot
 
+FROZEN = {
+    "fampnn": {"sha256": "aaaa", "variant": "0.0"},
+    "backbone_driver": "pxdesign",
+    "upstream": {"fampnn": {"revision": "abc"}},
+    "pxdesign": {
+        "weights": {"sha256": "bbbb"},
+        "proteoaa": {"revision": "def"},
+        # Descriptive: recorded for provenance, does not change any state.
+        "driver_settings": {
+            "c_token": 768,
+            "sigma_data": 16.0,
+            "activation_checkpointing": False,
+            "blocks_cleared": 4,
+            "chunk_size": None,
+            "inplace_safe": False,
+        },
+    },
+}
+
 
 def identity(**overrides):
     base = dict(
-        frozen={"fampnn": "0.0", "pxdesign": "v0.1.0"},
+        frozen=FROZEN,
         pack_steps=50,
         bs_policy="bypass",
         sigma_schedule={"mode": "trajectory", "sigma_min": 0.1, "sigma_max": 2.0},
         seed_base=0,
+        crop_size=512,
     )
     base.update(overrides)
     return pilot.cache_identity(**base)
@@ -77,7 +99,8 @@ def test_hits_and_misses_are_counted():
         ("pack_steps", 10),
         ("bs_policy", "matched"),
         ("seed_base", 7),
-        ("frozen", {"fampnn": "0.3"}),
+        # A different FaMPNN donor, in the shape provenance.weight_record emits.
+        ("frozen", {**FROZEN, "fampnn": {"sha256": "different", "variant": "0.3"}}),
     ],
 )
 def test_an_incompatible_cache_is_refused_not_warned(tmp_path, field, value):
@@ -100,4 +123,51 @@ def test_the_fingerprint_changes_with_the_identity():
 
 def test_the_version_is_part_of_the_identity():
     """So a change to what an UpstreamState holds invalidates old caches."""
-    assert identity()["version"] == "sb-pilot-upstream-v1"
+    assert identity()["version"] == "sb-pilot-upstream-v2"
+
+
+def test_descriptive_provenance_does_not_invalidate_a_cache():
+    """The identity tracks what changes a state, not what a run records.
+
+    Hashing the whole `frozen` blob made this sensitive to anything a run
+    happened to log about itself: adding a descriptive driver_settings block
+    refused every existing cache with a 40-line diff, though none of those
+    fields alters a frozen state. Found by it happening.
+    """
+    import copy
+
+    relabelled = copy.deepcopy(FROZEN)
+    relabelled["pxdesign"]["driver_settings"]["blocks_cleared"] = 99
+    relabelled["pxdesign"]["driver_settings"]["c_token"] = 1024
+    relabelled["pxdesign"]["driver_settings"]["activation_checkpointing"] = True
+    assert identity(frozen=relabelled) == identity()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda f: f["fampnn"].update(sha256="different"),
+        lambda f: f["pxdesign"]["weights"].update(sha256="different"),
+        lambda f: f["pxdesign"]["proteoaa"].update(revision="different"),
+        lambda f: f.update(upstream={"fampnn": {"revision": "different"}}),
+        lambda f: f.update(backbone_driver="stub"),
+        # These two can move a float in the forward pass, so they must count.
+        lambda f: f["pxdesign"]["driver_settings"].update(chunk_size=4),
+        lambda f: f["pxdesign"]["driver_settings"].update(inplace_safe=True),
+    ],
+)
+def test_anything_that_changes_a_state_does_invalidate_it(mutate):
+    """The subset has to be wrong in neither direction."""
+    changed = copy.deepcopy(FROZEN)
+    mutate(changed)
+    assert identity(frozen=changed) != identity()
+
+
+def test_the_crop_size_is_part_of_the_identity():
+    """It changes the featurization, so it changes the states.
+
+    It was missing: only the cache *filename* carried it, so two runs at
+    different crops pointed at the same path would have reused each other's
+    states without complaint.
+    """
+    assert identity(crop_size=256) != identity(crop_size=512)

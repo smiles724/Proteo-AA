@@ -954,6 +954,7 @@ def main(argv=None):
             bs_policy=couple_cfg.get("bs_policy", "bypass"),
             sigma_schedule=sigma_schedule.identity(),
             seed_base=int(couple_cfg.get("seed", 0)),
+            crop_size=args.crop_size,
         )
         upstream_cache = pilot.UpstreamCache(identity=cache_identity)
         if args.cache_upstream and Path(args.cache_upstream).is_file():

@@ -234,17 +234,77 @@ class UpstreamCache:
         return cache
 
 
-def cache_identity(*, frozen, pack_steps, bs_policy, sigma_schedule, seed_base):
+def frozen_fingerprint(frozen):
+    """The parts of a run's frozen-component record that change the computation.
+
+    Explicitly a *subset*, and that is the point. Hashing the whole ``frozen``
+    blob makes the cache identity sensitive to anything a run happens to record
+    about itself: adding a descriptive ``driver_settings`` block -- c_token,
+    sigma_data, how many activation-checkpoint flags were cleared -- invalidated
+    every existing cache and refused it with a 40-line diff, even though not one
+    of those fields alters a single frozen state. Measured the hard way.
+
+    So this pulls out the weight digests, the code revisions and the numeric
+    settings that could actually move a float, and ignores the rest. Getting
+    this subset wrong in the *other* direction would silently reuse states from
+    a different donor, so each entry is here for a stated reason rather than
+    because it was in the dict.
+    """
+    frozen = frozen or {}
+
+    def digest(record):
+        """The weight hash, or a stable stand-in for an unexpected shape.
+
+        Tolerant on purpose: this reads a free-form provenance blob, so a record
+        that is a bare string (a variant name, say) must not crash a run at
+        startup over a cosmetic difference -- it falls back to the value itself,
+        which still distinguishes two different donors.
+        """
+        if not isinstance(record, dict):
+            return None if record is None else repr(record)
+        weights = record.get("weights")
+        weights = weights if isinstance(weights, dict) else record
+        return weights.get("sha256", repr(sorted(weights)))
+
+    px = frozen.get("pxdesign")
+    px = px if isinstance(px, dict) else {}
+    settings = px.get("driver_settings")
+    settings = settings if isinstance(settings, dict) else {}
+    return dict(
+        # What produced the numbers.
+        fampnn_weights=digest(frozen.get("fampnn")),
+        pxdesign_weights=digest(px),
+        # The code that ran them.
+        upstream=frozen.get("upstream"),
+        proteoaa_revision=(
+            (px.get("proteoaa") or {}).get("revision")
+            if isinstance(px.get("proteoaa"), dict)
+            else None
+        ),
+        backbone_driver=frozen.get("backbone_driver"),
+        # Settings that can change the forward pass itself. Activation
+        # checkpointing only affects backward, so it is deliberately absent.
+        chunk_size=settings.get("chunk_size"),
+        inplace_safe=settings.get("inplace_safe"),
+    )
+
+
+def cache_identity(
+    *, frozen, pack_steps, bs_policy, sigma_schedule, seed_base, crop_size=None
+):
     """What a cache's contents are a function of, and nothing else.
 
-    Job id, node and wall time are deliberately absent: they change how a state
-    was scheduled, not what it is.
+    Job id, node, wall time and descriptive provenance are deliberately absent:
+    they change how a state was scheduled or how it is labelled, not what it is.
+    ``crop_size`` is present because it changes the featurization, and therefore
+    the states -- it was missing, and only the cache *filename* carried it.
     """
     return dict(
-        frozen=frozen,
+        frozen=frozen_fingerprint(frozen),
         pack_steps=pack_steps,
         bs_policy=bs_policy,
         sigma_schedule=sigma_schedule,
         seed_base=int(seed_base),
-        version="sb-pilot-upstream-v1",
+        crop_size=None if crop_size is None else int(crop_size),
+        version="sb-pilot-upstream-v2",
     )

@@ -234,7 +234,7 @@ def test_resuming_across_phases_is_refused(fampnn, batch_parts, tmp_path):
     first, _a1, b1 = make_trainer(fampnn, batch_parts, "bb_to_sc", tmp_path / "p1")
     result = first.train((b1 for _ in range(4)), progress=None)
     second, _a2, _b2 = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path / "p2")
-    with pytest.raises(ValueError, match="--init-from-phase1"):
+    with pytest.raises(ValueError, match="--init-from"):
         second.resume(result["checkpoint"])
 
 

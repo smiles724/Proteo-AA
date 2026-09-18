@@ -1,0 +1,43 @@
+{
+  "data_path": "/hai/scratch/yfsun/proteina_complexa_data/DATA_PATH",
+  "seed": 0,
+  "per_pool": 16,
+  "selected": 32,
+  "pools": {
+    "pdb": {
+      "rows": 45856,
+      "eligible": 134,
+      "picked": 16,
+      "filters": {
+        "split": "val",
+        "resolution_max": 3.5,
+        "total_res": [
+          80,
+          480
+        ],
+        "min_interface_res": 10,
+        "n_chains_kept": 2,
+        "leak_excluded": true,
+        "deposition_max": null
+      }
+    },
+    "ted": {
+      "rows": 148319,
+      "eligible": 1113,
+      "picked": 16,
+      "filters": {
+        "split": "val",
+        "quality_gates": true,
+        "min_interface_length": 10,
+        "min_plddt": 80.0,
+        "max_pae": 5.0,
+        "deduped_on": [
+          "cluster_id",
+          "uniprot"
+        ]
+      }
+    }
+  },
+  "target_rule": "larger chain is the target; smaller is generated",
+  "holdout_note": "split=='val' in both manifests; PDB leak flag re-checked. Held out from A_SB by construction (it trained on AFDB monomers). NOT established against PXDesign pretraining."
+}

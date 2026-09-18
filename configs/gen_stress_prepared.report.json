@@ -1,0 +1,16 @@
+{
+  "targets": "configs/gen_stress_targets.parquet",
+  "cache": "/hai/scratch/yfsun/proteo_aa_runs/pxf_gen_stress/cif_cache",
+  "prepared": 31,
+  "failed": 1,
+  "failures": [
+    {
+      "example_id": "3d4u",
+      "reason": "DesignSourceDataset: failed to find a crop-valid example after 1 attempts starting at index 0 (tried [0]). Last retryable sample error: DesignCropper: binder has 1739 tokens but crop_size=512. Increase crop_size or shrink the binder selection."
+    }
+  ],
+  "verified": true,
+  "parser": "Distillation",
+  "normalisation": "gemmi -> PDB -> protenix pdb_to_cif -> CIF",
+  "binder_rule": "smaller chain after conversion; ties on chain id"
+}

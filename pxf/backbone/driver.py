@@ -284,12 +284,23 @@ def featurize_structures(
     source_name="pxf",
     proteoaa_root=None,
     binder_chain_ids=None,
+    parser_dataset="WeightedPDB",
     **overrides,
 ):
     """Featurize structures through ``pxdesign_train``, one item per path.
 
     Each path gets its own dataset so a failure is isolated to that structure
     rather than aborting the whole set.
+
+    ``parser_dataset`` selects Protenix's parser. ``"WeightedPDB"`` (the
+    default) expects a full mmCIF and reads ``pdbx_struct_assembly`` to build
+    the bioassembly. ``"Distillation"`` treats the file as *already assembled*
+    and is what a stripped or predicted structure needs -- the
+    proteina-complexa mirror's CIFs carry no assembly category, so the default
+    parser raises ``KeyError: 'pdbx_struct_assembly'``, which the provider
+    re-tags and the dataset then reports as "parsed without
+    atom_array/token_array". That message names a symptom two layers from the
+    cause, which is why this is a parameter rather than a guess.
     """
     bundle = proteoaa.load(proteoaa_root)
     settings = dict(MONOMER_DATASET, **overrides)
@@ -298,6 +309,7 @@ def featurize_structures(
         provider = bundle.CifFileProvider(
             cif_paths=[str(path)],
             binder_chain_ids=[binder_chain_ids[index]] if binder_chain_ids else None,
+            dataset=parser_dataset,
         )
         dataset = bundle.DesignSourceDataset(
             provider, source_name=source_name, crop_size=int(crop_size), **settings

@@ -534,3 +534,62 @@ event, with no replicate and therefore no floor for the arm-to-arm
 differences. What it establishes is that the intervention is live and
 correctly targeted in the official runtime -- which is the precondition the
 pilot needed, and all it was asked to show.
+
+## 17. The 4 x 2 pilot
+
+Four targets (1jfl, 1za5, 2a8t, 3env) x two seeds (101, 202) x three arms,
+one event each at `t_hat = 0.4922`, gate open in all eight. Eight of eight
+runs completed; no failures.
+
+### Plumbing, verified on every run
+
+| | |
+|---|---|
+| injections | baseline 0, bb_only 1, full 1 -- on all 8 |
+| residual width | 768 on all |
+| residual rows non-zero | 228 / 192 / 191 / 217 -- exactly each target's binder length |
+| residual on target tokens | 0 (`scatter_design_residual` raises otherwise) |
+| mapping | `contiguous_tail: true` on all |
+
+The residual reaches every generated residue and no target token, on every run.
+
+### Effect: null
+
+Paired over the eight (target, seed) pairs, bootstrap 95% CI:
+
+| comparison | min BB-BB (A) | contacts < 5 A |
+|---|---|---|
+| bb_only - baseline | -0.0008 [-0.0234, +0.0219] | +0.13 [-0.75, +1.13] |
+| full - baseline | -0.0018 [-0.0269, +0.0234] | +0.38 [-0.75, +1.50] |
+| full - bb_only | -0.0010 [-0.0042, +0.0023] | +0.25 [+0.00, +0.75] |
+
+Every interval contains zero. The per-pair shifts are around +-0.04 A but
+**flip sign by target** -- negative on 1jfl and 3env, positive on 1za5 and
+2a8t -- with a standard deviation twenty to forty times the mean. That is
+noise, not a small effect.
+
+This agrees with the earlier pilot verdict (+0.0007 A over bb0, -0.0000
+against bb_only) reached by a different route, and it now rests on a
+generation baseline that is valid.
+
+### Two caveats that belong with the numbers
+
+**The baseline is not uniformly clash-free at 200 steps.** Six of eight
+(target, seed) pairs are clean. 3env/101 interpenetrates at 1.16-1.19 A with
+5 clashing pairs, and 1jfl/101 has a single pair at 2.58 A. The official runs
+in sections 7 and 10 used the shipped `N_step=400`; this pilot used 200, and
+1 pair in 8 came out bad. The clash counts are **identical across arms within
+each pair** (3env/101 is 5 / 5 / 5), so this is a property of the generation,
+not of the feedback -- but it means "plausible complex" holds for the shipped
+settings, not for every setting.
+
+The single clash that appears only in the feedback arms of 1jfl/101 is a
+threshold artefact: baseline sits at 2.622 A, the arms at 2.584 / 2.581 A,
+and the counter's cut is 2.6 A. A 0.04 A shift crossing a fixed bin edge is
+not a degradation.
+
+**These metrics are interface geometry, not design quality.** Minimum
+distance and contact counts say whether two chains are plausibly arranged.
+They say nothing about whether the binder folds or binds. No refolding was
+run, per the instruction to inspect overlaps before spending on it, so no
+self-consistency claim is available either way.

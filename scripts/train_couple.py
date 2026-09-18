@@ -137,14 +137,18 @@ def parse_args(argv=None):
         default=None,
         help="continue THIS experiment: adapters, optimizer, step, EMA and RNG. "
         "Not for starting a new phase from a previous one -- use "
-        "--init-from-phase1 for that",
+        "--init-from for that",
     )
     p.add_argument(
+        "--init-from",
         "--init-from-phase1",
+        dest="init_from",
         default=None,
-        help="weights-only initialization: load and freeze the selected A_BS "
-        "from a phase-1 checkpoint, start A_SB fresh, and reset the optimizer, "
-        "step counter and EMA. A 2k pilot must start at step 0",
+        help="weights-only initialization from another phase's checkpoint: "
+        "inherit whichever adapter direction that phase trained, start this "
+        "phase's direction fresh, and reset the step counter, the optimizer and "
+        "the EMA. This is the correct way to chain phases; --resume is not, and "
+        "used to be what the launcher recommended",
     )
     p.add_argument(
         "--sb-variant",
@@ -576,15 +580,16 @@ def main(argv=None):
         fampnn_finetune=bool(args.train_fampnn),
         fampnn_model_cfg=bundle["model_cfg"] if args.train_fampnn else None,
     )
-    if args.resume and args.init_from_phase1:
+    if args.resume and args.init_from:
         raise SystemExit(
-            "--resume and --init-from-phase1 do different things and cannot be "
-            "combined: resume continues this experiment from its own state, "
-            "initialization starts a new one from a previous phase's weights"
+            "--resume and --init-from do different things and cannot be "
+            "combined: resume continues this experiment from its own state "
+            "(step counter, optimizer moments, EMA), initialization starts a "
+            "new phase from a previous one's weights at step 0"
         )
-    if args.init_from_phase1:
-        record = trainer.initialize_from(args.init_from_phase1)
-        logger.info("initialized A_BS from phase 1: %s", json.dumps(record, default=str))
+    if args.init_from:
+        record = trainer.initialize_from(args.init_from)
+        logger.info("initialized from another phase: %s", json.dumps(record, default=str))
     if args.resume:
         logger.info("resumed at step %d", trainer.resume(args.resume))
 

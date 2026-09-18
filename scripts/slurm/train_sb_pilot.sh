@@ -92,7 +92,7 @@ echo "structures=${STRUCTURES} crop=${CROP_SIZE} pool=${POOL_SIZE}"
 nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader
 python -c "import torch; print('torch', torch.__version__, 'arch', torch.cuda.get_arch_list()[-2:])"
 
-# --resume continues THIS run if it was interrupted. --init-from-phase1 is a
+# --resume continues THIS run if it was interrupted. --init-from is a
 # different thing (weights-only start from a previous phase) and the script
 # refuses to accept both.
 RESUME_ARG=""
@@ -102,7 +102,7 @@ if [ -n "$LATEST" ]; then
     RESUME_ARG="--resume $LATEST"
 elif [ -n "$INIT_FROM_PHASE1" ]; then
     echo "initializing A_BS from $INIT_FROM_PHASE1 (weights only, step 0)"
-    RESUME_ARG="--init-from-phase1 $INIT_FROM_PHASE1"
+    RESUME_ARG="--init-from $INIT_FROM_PHASE1"
 fi
 
 STEP_ARG=""

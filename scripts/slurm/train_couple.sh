@@ -36,10 +36,22 @@
 #   SIGMA_MIN / SIGMA_MAX                   move the coupling window, Angstroms
 #   SIGMA                                   only with SIGMA_MODE=fixed
 #
-# Phases chain by dependency, each warm-starting from the previous:
+# Phases chain by dependency. Use INIT_FROM, not RESUME:
 #   J1=$(... PHASE=1 sbatch --parsable scripts/slurm/train_couple.sh)
-#   J2=$(... PHASE=2 RESUME=<phase1 final.pt> sbatch --parsable \
+#   J2=$(... PHASE=2 INIT_FROM=<phase1 final.pt> sbatch --parsable \
 #            --dependency=afterok:$J1 scripts/slurm/train_couple.sh)
+#
+# RESUME continues THIS run after an interruption; INIT_FROM starts a new phase
+# from a previous one's weights. They are not interchangeable, and this script
+# used to recommend RESUME for the cross-phase case, which was a no-op that
+# reported success: --resume restores the step counter, so a phase-1 checkpoint
+# at step 20,000 loaded into a phase-2 run whose max_steps is also 20,000 breaks
+# on its first batch, performs zero updates, and still writes a "final"
+# checkpoint and a result.json saying steps: 20000. The only outward sign was an
+# empty train_log.jsonl. It also loaded phase 1's AdamW moments into phase 2's
+# optimizer -- the two directions have identical parameter shapes, so they match
+# by position and load silently into the wrong adapter. The trainer now refuses
+# both; see CoupledTrainer.resume and .initialize_from.
 set -euo pipefail
 
 # sbatch copies this script to /var/lib/slurm/scripts, so BASH_SOURCE does not
@@ -84,14 +96,24 @@ python -c "import torch; print('torch', torch.__version__, 'arch', torch.cuda.ge
 
 # Resume this phase's own run if it was interrupted; RESUME warm-starts from a
 # previous phase instead.
+# Two different things, kept apart. RESUME restores this run's own step
+# counter, optimizer and EMA; INIT_FROM takes only weights and starts at step 0.
+if [ -n "${RESUME:-}" ] && [ -n "${INIT_FROM:-}" ]; then
+    echo "set RESUME or INIT_FROM, not both: one continues this run, the other" \
+         "starts a new phase from a previous one's weights" >&2
+    exit 2
+fi
 RESUME_ARG=""
 LATEST=$(ls -1 "$OUT"/checkpoints/step*.pt 2>/dev/null | sort | tail -1 || true)
 if [ -n "$LATEST" ]; then
-    echo "resuming interrupted run from $LATEST"
+    echo "resuming this interrupted run from $LATEST"
     RESUME_ARG="--resume $LATEST"
 elif [ -n "${RESUME:-}" ]; then
-    echo "warm-starting from $RESUME"
+    echo "resuming this run from $RESUME"
     RESUME_ARG="--resume $RESUME"
+elif [ -n "${INIT_FROM:-}" ]; then
+    echo "initializing phase ${PHASE} from $INIT_FROM (weights only, step 0)"
+    RESUME_ARG="--init-from $INIT_FROM"
 fi
 
 DONOR_ARG=""

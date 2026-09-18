@@ -365,57 +365,106 @@ class CoupledTrainer:
         torch.save(self.checkpoint_state(), path)
         return path
 
-    def initialize_from(self, path, *, prefix="bb_to_sc."):
-        """Load one *direction* of a previous phase's adapters. Weights only.
+    # Which adapter direction each phase trains, i.e. which one a later phase
+    # should inherit. Keyed by the phase that WROTE the checkpoint.
+    PHASE_TRAINS = {
+        "bb_to_sc": ("bb_to_sc.",),
+        "sc_to_bb": ("sc_to_bb.",),
+        "joint": ("bb_to_sc.", "sc_to_bb."),
+        "frozen": (),
+    }
 
-        Distinct from :meth:`resume`, which continues the same experiment and
-        restores the optimizer, the step counter, the EMA and the RNG.
-        Initialization takes the selected Phase-1 ``A_BS`` and nothing else:
-        ``A_SB`` starts fresh and zero-initialized, the step counter stays at
-        zero, and the optimizer and EMA are rebuilt. Conflating the two is how a
-        "2k pilot" silently starts at step 20,000 with a stale optimizer state
-        for parameters that no longer exist.
+    def initialize_from(self, path, *, prefix=None):
+        """Start this phase from a previous phase's *weights*. Nothing else.
 
-        The loaded direction is frozen here as well as by ``set_phase``: the
-        pilot trains ``A_SB`` only, and an ``A_BS`` that moved would change the
-        packing the feedback reads, which is the one thing every arm has to
-        share.
+        Distinct from :meth:`resume`, which continues one experiment and
+        restores the step counter, the optimizer moments, the EMA and the RNG.
+        None of those transfer across phases, and the reasons are separate
+        failures rather than one:
+
+        * the step counter makes the new phase a no-op whenever the two phases
+          share a ``max_steps`` -- the loop breaks on its first batch and still
+          writes a "final" checkpoint;
+        * the optimizer moments load into an optimizer that owns *different*
+          parameters, and because both directions are symmetric six-parameter
+          adapters ``load_state_dict`` matches them by position and succeeds
+          silently, so the previous direction's AdamW state drives the new one.
+
+        So this resets all of it: step to zero, a fresh optimizer over whatever
+        ``set_phase`` left trainable, a fresh EMA, and a reseeded generator.
+        ``prefix`` defaults to whichever direction the *source* checkpoint's
+        phase trained.
         """
         state = torch.load(path, map_location="cpu", weights_only=False)
         if "adapters" not in state:
             raise ValueError(f"{path} is not a coupling checkpoint")
+        source_phase = (state.get("settings") or {}).get("phase")
+        if prefix is None:
+            prefixes = self.PHASE_TRAINS.get(source_phase)
+            if not prefixes:
+                raise ValueError(
+                    f"{path} was written by phase {source_phase!r}, which trains "
+                    "no adapter direction, so there is nothing in it to inherit. "
+                    "Pass prefix= explicitly if you meant something else."
+                )
+        else:
+            prefixes = (prefix,)
+
         source = state["adapters"]
         if state.get("ema"):
-            # Phase 1's own evaluation used the EMA weights, so the policy being
-            # held fixed is the EMA one; loading the raw weights would hold a
-            # different policy fixed than the one that was selected.
-            shadow = state["ema"].get("shadow") or state["ema"].get("params") or {}
+            # The previous phase's own evaluation used its EMA weights, so the
+            # policy being held fixed is the EMA one; loading the raw weights
+            # would hold a different policy fixed than the one selected.
+            shadow = state["ema"].get("shadow") or {}
             source = {**source, **{k: v for k, v in shadow.items() if k in source}}
-        wanted = {k: v for k, v in source.items() if k.startswith(prefix)}
+        wanted = {k: v for k, v in source.items() if k.startswith(tuple(prefixes))}
         if not wanted:
             raise ValueError(
-                f"{path} carries no {prefix}* parameters, so there is no "
-                "Phase-1 policy in it to hold fixed"
+                f"{path} carries no {list(prefixes)} parameters, so there is no "
+                f"phase {source_phase!r} policy in it to hold fixed"
             )
         missing, unexpected = self.adapters.load_state_dict(wanted, strict=False)
-        unexpected = [k for k in unexpected if k.startswith(prefix)]
+        unexpected = [k for k in unexpected if k.startswith(tuple(prefixes))]
         if unexpected:
             raise ValueError(
-                f"{path} has {prefix}* parameters the current adapters do not: "
-                f"{unexpected[:5]}"
+                f"{path} has parameters the current adapters do not: {unexpected[:5]}"
             )
-        still_missing = [k for k in missing if k.startswith(prefix)]
+        still_missing = [k for k in missing if k.startswith(tuple(prefixes))]
         if still_missing:
-            raise ValueError(f"{path} is missing {prefix}* parameters: {still_missing[:5]}")
-        self.adapters.bb_to_sc.requires_grad_(False)
+            raise ValueError(f"{path} is missing parameters: {still_missing[:5]}")
+
+        # Everything that belonged to the previous phase's optimization is
+        # discarded, not carried. Rebuilt rather than assumed fresh: relying on
+        # this only ever being called on a new trainer is what made the claim
+        # true by luck instead of by construction.
+        self.step = 0
+        trainable = [p for p in self.tuned.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(
+            trainable,
+            lr=self.optim_settings.lr,
+            betas=tuple(self.optim_settings.betas),
+            eps=self.optim_settings.eps,
+            weight_decay=self.optim_settings.weight_decay,
+        )
+        if self.settings.ema_decay or self.settings.ema_relative_length:
+            self.ema = EMA(
+                self.tuned,
+                decay=self.settings.ema_decay,
+                relative_length=self.settings.ema_relative_length,
+            )
+        self.generator = torch.Generator().manual_seed(self.settings.seed)
+
         record = dict(
             source=str(path),
+            source_phase=source_phase,
             source_step=int(state.get("step", 0)),
             source_is_ema=bool(state.get("ema")),
-            prefix=prefix,
+            prefixes=list(prefixes),
             loaded=len(wanted),
-            frozen=True,
             step=self.step,
+            optimizer_reset=True,
+            ema_reset=self.ema is not None,
+            trainable_parameters=sum(p.numel() for p in trainable),
         )
         self.initialized_from = record
         return record
@@ -424,6 +473,24 @@ class CoupledTrainer:
         state = torch.load(path, map_location="cpu", weights_only=False)
         if "adapters" not in state:
             raise ValueError(f"{path} is not a coupling checkpoint")
+        source_phase = (state.get("settings") or {}).get("phase")
+        if source_phase is not None and source_phase != self.settings.phase:
+            # Resuming across phases restores the *previous* phase's optimizer
+            # into an optimizer that owns different parameters. Both directions
+            # are symmetric six-parameter adapters, so `load_state_dict` matches
+            # them by position and succeeds without complaint: A_BS's AdamW
+            # moments end up driving A_SB. Measured -- identical exp_avg sums
+            # before and after. Together with the step counter this makes the
+            # documented phase chain a no-op that reports success.
+            raise ValueError(
+                f"{path} was written by phase {source_phase!r} but this run is "
+                f"phase {self.settings.phase!r}. --resume continues one "
+                "experiment: it restores the step counter, the optimizer moments "
+                "and the EMA, none of which transfer across phases (the two "
+                "directions have the same parameter shapes, so the moments load "
+                "silently into the wrong adapter). To start this phase from that "
+                "one's weights, use --init-from."
+            )
         frozen = state.get("frozen") or {}
         if self.frozen_identity and frozen and frozen != self.frozen_identity:
             raise ValueError(
@@ -474,6 +541,23 @@ class CoupledTrainer:
     def train(self, batches: Iterable[CoupledBatch], *, max_steps=None, progress=print):
         """Consume ``batches`` until ``max_steps``. Yields nothing; logs and checkpoints."""
         target = int(max_steps or self.settings.max_steps)
+        if self.step >= target:
+            # The failure this guards is silent and looks like success: the loop
+            # below breaks on its first batch, `save(tag="final")` still writes a
+            # checkpoint, and the returned record still says `steps: <target>`.
+            # The only outward sign is an empty train_log.jsonl. It is reachable
+            # whenever a checkpoint at or past `max_steps` is loaded -- which is
+            # exactly what `--resume <previous phase's final.pt>` does when both
+            # phases share a step budget.
+            raise ValueError(
+                f"the step counter is already at {self.step} and max_steps is "
+                f"{target}, so this run would perform zero optimizer updates "
+                "and still write a 'final' checkpoint. If you meant to continue "
+                "this experiment, raise max_steps above the loaded step; if you "
+                "meant to start a new phase from a previous one's weights, use "
+                "initialize_from() (--init-from), which resets the step "
+                "counter, the optimizer and the EMA."
+            )
         accum = max(1, int(self.settings.grad_accum_steps))
         started = time.time()
         pending = 0

@@ -173,7 +173,7 @@ settled into a choice (shuffled-donor retention on `chi_recovery_20deg`: 20% on
 AFDB val, 53% on CASP14/15, 69% on CASP16), and the gate sweep is likewise
 unpicked. Bypassing does not prevent testing `A_SB`; it means the packing the
 feedback reads is pretrained FaMPNN's, which needs no Phase-1 dependency.
-`--init-from-phase1` exists for when a policy is selected — weights-only, with
+`--init-from` exists for when a policy is selected — weights-only, with
 the optimizer, step counter and EMA reset, because a 2k pilot must start at
 step 0.
 

@@ -206,3 +206,104 @@ def test_checkpoints_resume_and_refuse_mismatched_donors(fampnn, batch_parts, tm
     other.frozen_identity = {"fampnn": "different"}
     with pytest.raises(ValueError, match="different frozen components"):
         other.resume(result["checkpoint"])
+
+
+# --- crossing from one phase to the next ------------------------------------
+#
+# The suite covered same-phase resume only, and the gap hid a live bug: the
+# launcher documented `PHASE=2 RESUME=<phase1 final.pt>`, which performed zero
+# updates and reported success. Both failure modes are pinned below, plus the
+# path that is actually correct.
+
+
+def test_a_run_that_would_do_nothing_is_refused(fampnn, batch_parts, tmp_path):
+    """The root cause, independent of how the step counter got there.
+
+    A loaded checkpoint at or past max_steps made `train` break on its first
+    batch, write a 'final' checkpoint and return `steps: <target>`. Nothing
+    raised; the only sign was an empty train_log.jsonl.
+    """
+    trainer, _adapters, batch = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path)
+    trainer.step = trainer.settings.max_steps
+    with pytest.raises(ValueError, match="zero optimizer updates"):
+        trainer.train((batch for _ in range(4)), progress=None)
+
+
+def test_resuming_across_phases_is_refused(fampnn, batch_parts, tmp_path):
+    """--resume is for one experiment; it does not transfer across phases."""
+    first, _a1, b1 = make_trainer(fampnn, batch_parts, "bb_to_sc", tmp_path / "p1")
+    result = first.train((b1 for _ in range(4)), progress=None)
+    second, _a2, _b2 = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path / "p2")
+    with pytest.raises(ValueError, match="--init-from-phase1"):
+        second.resume(result["checkpoint"])
+
+
+def test_initializing_across_phases_trains_from_step_zero(fampnn, batch_parts, tmp_path):
+    """The correct chain: phase 1's A_BS inherited, A_SB fresh, step 0."""
+    first, adapters1, b1 = make_trainer(fampnn, batch_parts, "bb_to_sc", tmp_path / "p1")
+    result = first.train((b1 for _ in range(4)), progress=None)
+    assert moved(adapters1.bb_to_sc) > 0 and moved(adapters1.sc_to_bb) == 0
+
+    second, adapters2, b2 = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path / "p2")
+    record = second.initialize_from(result["checkpoint"])
+    assert record["source_phase"] == "bb_to_sc"
+    assert record["prefixes"] == ["bb_to_sc."]
+    assert record["step"] == 0 and record["optimizer_reset"] is True
+    # A_BS came across; A_SB is still the exact no-op it starts as.
+    assert moved(adapters2.bb_to_sc) > 0
+    assert moved(adapters2.sc_to_bb) == 0
+
+    # And phase 2 then actually runs, which the --resume path did not.
+    second.train((b2 for _ in range(4)), progress=None)
+    assert second.step == second.settings.max_steps
+    assert moved(adapters2.sc_to_bb) > 0, "phase 2 performed no updates"
+
+
+def test_initialization_does_not_inherit_the_previous_optimizer(
+    fampnn, batch_parts, tmp_path
+):
+    """The second failure: identically shaped adapters load by position.
+
+    A_BS and A_SB are both six-parameter ResidualAdapters, so
+    optimizer.load_state_dict matched them without complaint and phase 1's AdamW
+    moments drove A_SB. initialize_from rebuilds the optimizer instead.
+    """
+    first, _a1, b1 = make_trainer(fampnn, batch_parts, "bb_to_sc", tmp_path / "p1")
+    result = first.train((b1 for _ in range(4)), progress=None)
+    saved = torch.load(result["checkpoint"], map_location="cpu", weights_only=False)
+    phase1_moments = [
+        float(v["exp_avg"].abs().sum()) for v in saved["optimizer"]["state"].values()
+    ]
+    assert any(m > 0 for m in phase1_moments), "phase 1 accumulated no moments"
+
+    second, _a2, _b2 = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path / "p2")
+    second.initialize_from(result["checkpoint"])
+    assert second.optimizer.state_dict()["state"] == {}, (
+        "the new phase started with optimizer moments it did not earn"
+    )
+
+
+def test_initialization_records_what_it_inherited(fampnn, batch_parts, tmp_path):
+    """A checkpoint has to say which policy it was held fixed against."""
+    first, _a1, b1 = make_trainer(fampnn, batch_parts, "bb_to_sc", tmp_path / "p1")
+    result = first.train((b1 for _ in range(4)), progress=None)
+    second, _a2, b2 = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path / "p2")
+    second.initialize_from(result["checkpoint"])
+    written = second.train((b2 for _ in range(4)), progress=None)
+    state = torch.load(written["checkpoint"], map_location="cpu", weights_only=False)
+    record = state["initialized_from"]
+    assert record["source_phase"] == "bb_to_sc"
+    assert record["source"] == str(result["checkpoint"])
+    assert record["source_step"] == first.settings.max_steps
+
+
+def test_a_source_phase_that_trains_nothing_is_refused(fampnn, batch_parts, tmp_path):
+    trainer, _adapters, batch = make_trainer(fampnn, batch_parts, "bb_to_sc", tmp_path)
+    result = trainer.train((batch for _ in range(4)), progress=None)
+    path = tmp_path / "frozen.pt"
+    state = torch.load(result["checkpoint"], map_location="cpu", weights_only=False)
+    state["settings"] = dict(state["settings"], phase="frozen")
+    torch.save(state, path)
+    other, _a, _b = make_trainer(fampnn, batch_parts, "sc_to_bb", tmp_path / "p2")
+    with pytest.raises(ValueError, match="trains no adapter direction"):
+        other.initialize_from(path)

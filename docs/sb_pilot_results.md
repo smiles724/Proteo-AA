@@ -125,6 +125,33 @@ budget. Three things would each be a different experiment:
    promising" is not met: `generic` ≥ `full` at every evaluation point (500,
    1000, 2000), so more steps would be extending the arm that is behind.
 
+## Was this pilot affected by the phase-chaining bug?
+
+No, verified rather than assumed. The documented phase chain
+(`PHASE=2 RESUME=<phase1 final.pt>`) performed **zero** optimizer updates while
+reporting success — `--resume` restored the step counter, so a phase-1
+checkpoint at step 20,000 loaded into a phase-2 run whose `max_steps` is also
+20,000 broke on its first batch and still wrote a "final" checkpoint. It also
+loaded phase 1's AdamW moments into phase 2's optimizer, silently, because the
+two directions are identically shaped six-parameter adapters.
+
+These runs did not go through that path. From the checkpoints:
+
+| arm | step | `resume` | `init_from` | optimizer updates | A_SB ‖W₂‖₁ | A_BS ‖W₂‖₁ |
+|---|---|---|---|---|---|---|
+| `full` | 2000 | None | None | 2000 | 393.3 | 0.0 |
+| `bb_only` | 2000 | None | None | 2000 | 470.4 | 0.0 |
+| `generic` | 2000 | None | None | 2000 | 341.1 | 0.0 |
+
+Each has 80 training log rows (`log_every` 25 × 80 = 2000) and 4 evaluation
+rows, the AdamW step counter reads 2000, and A_SB's zero-initialized output
+projection moved far off zero while A_BS stayed exactly zero (bypass, frozen).
+The step-0 evaluation independently confirms the start point: `val_delta_a_norm`
+0.0 and `bb1` equal to `bb0`.
+
+The pilot never used `--resume` or `--init-from` because `bs_policy` is bypass,
+which applies no BB→SC residual — so there was no Phase-1 policy to inherit.
+
 ## Caveats stated rather than buried
 
 * The paired interval is **protein-level, not cluster-level**: the la-proteina

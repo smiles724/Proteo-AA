@@ -240,6 +240,17 @@ class FixedTarget:
     meaningful up to a rigid motion, so the target is rotated onto its
     reference and the same transform applied to the generated chain, which
     keeps the two in one frame.
+
+    **Applied at three points per step, and the first one matters most.**
+    Pinning only after the Euler update -- the obvious place -- leaves the churn
+    to noise the target before the next denoise: at ``t_hat = 2*sigma`` the churn
+    adds ``sigma*sqrt(3)`` per coordinate, about 1.5 A at sigma = 0.86. The
+    denoiser then conditions the generated chain against a smeared target for
+    the whole trajectory, which shows up as nonsense interface geometry rather
+    than as an error. So the target is pinned after the augmentation, again
+    after the churn (immediately before the denoiser reads it), and on the
+    denoised output -- the last of which is where ``pxdesign_train/stage4.py``
+    applies its own ``torch.where(fixed_atom_mask, fixed_atom_xyz, xyz)``.
     """
 
     def __init__(self, reference, atom_mask):
@@ -351,6 +362,8 @@ def run_trajectory(
             stream.restore(resume.rng, live=True)
             x_noisy = resume.x_noisy.to(device=device, dtype=dtype)
             sigma = resume.sigma.to(device=device, dtype=torch.float32)
+            if fixed_target is not None:
+                x_noisy = fixed_target.apply(x_noisy)
             x_denoised = one_call(
                 x_noisy,
                 sigma,
@@ -359,6 +372,8 @@ def run_trajectory(
                 resume.c_tau_last,
                 resume.c_tau,
             )
+            if fixed_target is not None:
+                x_denoised = fixed_target.apply(x_denoised)
             drift = (x_noisy - x_denoised) / sigma.reshape(-1)[0]
             x_l = (
                 x_noisy
@@ -390,8 +405,15 @@ def run_trajectory(
             x_noisy = x_l + noise_scale_lambda * delta_noise * torch.randn(
                 size=x_l.shape, device=device, dtype=dtype
             )
+            if fixed_target is not None:
+                # Before the denoiser reads it. The churn just put sigma*sqrt(3)
+                # of noise on every atom including the target's.
+                x_noisy = fixed_target.apply(x_noisy)
             sigma = t_hat.reshape(1).to(device=device, dtype=torch.float32)
             x_denoised = one_call(x_noisy, sigma, step_i, 0, c_tau_last, c_tau)
+            if fixed_target is not None:
+                # stage4.py's placement: force the fixed atoms in the prediction.
+                x_denoised = fixed_target.apply(x_denoised)
             drift = (x_noisy - x_denoised) / t_hat
             x_l = x_noisy + step_scale_eta * (c_tau - t_hat) * drift
             if fixed_target is not None:

@@ -226,3 +226,32 @@ def test_the_target_stays_fixed_through_augmentation_and_replay():
 def test_an_empty_target_mask_is_refused():
     with pytest.raises(ValueError, match="at least one target atom"):
         FixedTarget(reference=torch.zeros(1, N_ATOM, 3), atom_mask=torch.zeros(N_ATOM))
+
+
+def test_the_denoiser_reads_the_target_at_its_reference():
+    """The churn noises the target unless it is pinned after the churn.
+
+    At t_hat = 2*sigma the churn adds sigma*sqrt(3) per coordinate -- ~1.5 A at
+    sigma 0.86. Pinning only after the Euler update leaves the denoiser
+    conditioning against a smeared target for the whole trajectory, which
+    surfaces as nonsense interface geometry rather than as an error.
+    """
+    mask = torch.zeros(N_ATOM, dtype=torch.bool)
+    mask[: N_ATOM // 2] = True
+    reference = torch.randn(1, N_ATOM, 3) * 5.0
+    fixed = FixedTarget(reference=reference, atom_mask=mask)
+    seen = []
+
+    def denoise(x_noisy, sigma, *, feedback=None):
+        # What the denoiser actually receives for the fixed atoms.
+        got = x_noisy.reshape(-1, 3)[mask]
+        seen.append(float((got - reference.reshape(-1, 3)[mask]).norm(dim=-1).max()))
+        return x_noisy * 0.25
+
+    mine(41, denoise=denoise, fixed_target=fixed)
+    assert seen, "the denoiser was never called"
+    worst = max(seen)
+    assert worst < 1e-4, (
+        f"the denoiser saw the target displaced by up to {worst:.3f} A; the "
+        "churn is noising the fixed atoms before the model reads them"
+    )

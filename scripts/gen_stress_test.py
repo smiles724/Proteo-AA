@@ -222,9 +222,31 @@ def main(argv=None):
             int(fixed_atoms.sum()),
             n_atom,
         )
-        native = structure.backbone_target.float().to(device)
+        # PXDesign's own fixed-atom channel, not label_dict["coordinate"]:
+        # fixed_atom_xyz/fixed_atom_mask are what the featurizer emits for this
+        # purpose and what pxdesign_train/stage4.py consumes. Cross-checked
+        # against the mask derived from atom_to_token_idx, since two disagreeing
+        # notions of "the target" would be worse than either.
+        feature_fixed = structure.feature_dict.get("fixed_atom_mask")
+        feature_xyz = structure.feature_dict.get("fixed_atom_xyz")
+        if feature_fixed is None or feature_xyz is None:
+            raise SystemExit(
+                "the featurizer emitted no fixed_atom_mask/fixed_atom_xyz, so "
+                "there is no target-conditioning channel to hold fixed"
+            )
+        feature_fixed = feature_fixed.reshape(-1)[:n_atom].bool().to(device)
+        derived = fixed_atoms.to(device)
+        disagreement = int((feature_fixed ^ derived).sum())
+        if disagreement:
+            logger.warning(
+                "%s: fixed_atom_mask and the design-derived target mask differ "
+                "on %d atom(s); using the featurizer's channel",
+                entry.example_id,
+                disagreement,
+            )
         fixed_target = replay.FixedTarget(
-            reference=native[None], atom_mask=fixed_atoms[None].to(device)
+            reference=feature_xyz.reshape(-1, 3)[:n_atom][None].float().to(device),
+            atom_mask=feature_fixed[None],
         )
         conditioning = px_driver.conditioning(structure.feature_dict)
         bound = px_driver.bind(conditioning)

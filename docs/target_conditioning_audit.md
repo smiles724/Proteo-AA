@@ -464,3 +464,73 @@ Check 1 is the load-bearing one. It says this repo's transcription of the
 sampler loop reproduces upstream's own `sample_diffusion` to well below the
 floor -- so the loop substituted for the official one is the official one, and
 `fixed_target`'s removal did not quietly change the trajectory.
+
+### A shadowing hazard worth naming
+
+`scripts/_bootstrap` inserts the repo's `PXDesign`, `Protenix` and `fampnn`
+submodules at the **front** of `sys.path`. Any script that imports it -- and
+`eval_sb_feedback` does, so anything reusing `load_arm` inherits it -- will
+therefore prefer the vendored submodules over whatever is installed. Inside
+the official environment that silently produces the worst available pairing:
+this repo's PXDesign (written against `c3bfc36`) on top of official Protenix
+(`d18aa1da`).
+
+Here it failed loudly, with `No module named protenix.data.parser`. That was
+luck. A shadow that merely changes behaviour would not announce itself, and
+an unannounced version mismatch is precisely what produced the invalid
+baseline this document exists to explain.
+
+`scripts/official_single_event.py` therefore imports the official `pxdesign`
+and `protenix` eagerly, before anything from `scripts/` runs, so they are
+pinned in `sys.modules` and a later path insertion cannot displace them --
+and it re-asserts their file locations *after* the `scripts/` imports, so the
+guarantee is checked rather than assumed.
+
+## 16. Single-event comparison in the official runtime
+
+Baseline / bb_only / full, resumed from one recorded state, sharing one
+FaMPNN sequence, differing only in the residual injected at a single
+`(step, substage)`. No coordinate overwrites.
+
+### The first attempt measured nothing, and said so
+
+At `event_step=100` of 200 every arm reported
+`residual_l2_mean = 0.0`, `residual_rows_nonzero = 0`. The injection had
+fired -- one injection, `tap_injections=1`, width 768 -- but the residual was
+exactly zero, so the arms differed only within the noise floor.
+
+The cause is the trained gate, not the plumbing. `SigmaWindow` is exactly 1 on
+`[0.1, 2.0]` and tapers smoothly to exactly 0 by `sigma_max * taper = 4.0`.
+The denoiser sees the *churned* level `t_hat = 2 * c_tau_last`, and at step 100
+that is **111.95** -- 56x above the window. The adapter was doing exactly what
+it was trained to do: nothing, at a noise level it never saw.
+
+Across a 200-step schedule the gate is open only at steps **161..187**, 27 of
+200. The event step is now chosen by noise level (`--event-sigma`, default
+0.5) rather than by index, and the run logs `event_t_hat` and whether the
+window is open, so a vacuous comparison announces itself.
+
+This is worth recording because the earlier local stress test is *not* guilty
+of it: stage 1 used `events: [0.85]` -> step 169 -> `t_hat = 0.859`, inside the
+window. Its residual was live; its baseline was broken. (The script's default
+`[0.6, 0.85]` would have wasted one of the two: 0.6 -> step 119 -> `t_hat`
+39.6, gate closed.)
+
+### With the event at t_hat = 0.492
+
+| arm | residual l2 mean | rows nonzero | min BB-BB | clashes | contacts < 5 A |
+|---|---|---|---|---|---|
+| baseline | -- (0 injections) | -- | 2.843 A | 0 | 56 |
+| bb_only | 0.348 | 228 / 228 | 2.805 A | 0 | 59 |
+| full | 0.361 | 228 / 228 | 2.803 A | 0 | 59 |
+
+Plumbing verified: mapping 228 of 456 tokens, `contiguous_tail: true`;
+injections 0 / 1 / 1; residual width 768 reaching every generated residue and
+no target token (`scatter_design_residual` raises otherwise); 26 denoiser
+calls per arm, the tail of the schedule from the resumed step.
+
+**No quality claim follows from this table.** It is one target, one seed, one
+event, with no replicate and therefore no floor for the arm-to-arm
+differences. What it establishes is that the intervention is live and
+correctly targeted in the official runtime -- which is the precondition the
+pilot needed, and all it was asked to show.

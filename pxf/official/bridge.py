@@ -47,8 +47,15 @@ def topology(atom_array, feature_dict, n_tokens):
     """A :class:`pxf.couple.controller.Topology` for the official features."""
     from pxf.couple.controller import Topology
 
-    rep = _token_representative(atom_array, feature_dict, n_tokens)
-    res_names = list(np.asarray(atom_array.res_name)[rep])
+    # res_names is PER ATOM, not per token: `bridge.design_mask_from_res_names`
+    # iterates it against `atom_to_token_idx` and reduces to tokens itself.
+    # `pxf.backbone.driver` builds the same thing by expanding its per-token
+    # list back over the atoms. Taking the AtomArray's names directly also
+    # keeps PXDesign's `xpb` marker, which the driver's aatype-derived names
+    # lose to "UNK".
+    res_names = list(np.asarray(atom_array.res_name))
+    if len(res_names) != len(atom_array):
+        raise ValueError("res_names must be per atom")
     residue_index = feature_dict["residue_index"].reshape(-1)[:n_tokens].long()
     chain_index = feature_dict["asym_id"].reshape(-1)[:n_tokens].long()
     return Topology(

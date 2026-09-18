@@ -32,6 +32,33 @@ from pathlib import Path
 import torch
 import yaml
 
+# Pin the OFFICIAL pxdesign/protenix in sys.modules before anything from
+# scripts/ runs. `scripts/_bootstrap` -- pulled in by eval_sb_feedback --
+# inserts the repo's PXDesign and Protenix submodules at the *front* of
+# sys.path, which otherwise shadows the installed official packages and
+# produces the worst possible mix: this repo's PXDesign against official
+# Protenix. That failed loudly here (`No module named
+# protenix.data.parser`), but a shadow that merely changes behaviour would
+# not, and a silent one is what produced the invalid baseline to begin with.
+import pxdesign  # noqa: E402
+import pxdesign.runner.inference  # noqa: E402,F401
+import protenix  # noqa: E402
+
+_OFFICIAL_ROOT = "/hai/scratch/yfsun/pxdesign_official"
+_SITE = "site-packages"
+
+
+def _assert_official():
+    px, ptx = pxdesign.__file__ or "", protenix.__file__ or ""
+    if _OFFICIAL_ROOT not in px and _SITE not in px:
+        raise SystemExit(f"pxdesign is not the official install: {px}")
+    if _SITE not in ptx:
+        raise SystemExit(f"protenix is not the official install: {ptx}")
+    return dict(pxdesign=px, protenix=ptx)
+
+
+_PROVENANCE = _assert_official()
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pxf import atom37
@@ -81,7 +108,12 @@ def main():
                     help="label=path for a trained A_SB")
     ap.add_argument("--config", default="configs/couple_phase2_pilot.yaml")
     ap.add_argument("--n-step", type=int, default=200)
-    ap.add_argument("--event-step", type=int, default=100)
+    ap.add_argument("--event-step", type=int, default=None)
+    ap.add_argument("--event-sigma", type=float, default=0.5,
+                    help="pick the event step whose t_hat is nearest this; "
+                         "the trained gate is a SigmaWindow over [0.1, 2.0], "
+                         "so an event outside it returns an exactly zero "
+                         "residual and the comparison is vacuous")
     ap.add_argument("--seed", type=int, default=101)
     ap.add_argument("--pack-steps", type=int, default=50)
     ap.add_argument("--temperature", type=float, default=0.1)
@@ -89,8 +121,11 @@ def main():
     ap.add_argument("--use-msa", action="store_true")
     args = ap.parse_args()
 
-    from eval_sb_feedback import load_arm
+    from eval_sb_feedback import load_arm  # imports scripts/_bootstrap
     from pxf.couple import torsions
+
+    _assert_official()
+    logger.info('provenance: %s', json.dumps(_PROVENANCE))
     from fampnn.model.sd_model import SeqDenoiser
     from pxf.couple.fampnn_iface import node_feature_dim
 
@@ -141,6 +176,23 @@ def main():
                                  phase="sc_to_bb", pack_steps=args.pack_steps)
 
     schedule = den.schedule(args.n_step)
+    # The denoiser sees t_hat = c_tau_last * (gamma + 1), and PXDesign's
+    # gamma0/gamma_min make that 2 * c_tau_last across the useful range. The
+    # gate is evaluated on that churned level, not on the scheduled one, so
+    # the event step has to be chosen against it.
+    t_hat_by_step = (2.0 * schedule[:-1].to(torch.float64)).cpu()
+    if args.event_step is None:
+        event_step = int((t_hat_by_step - args.event_sigma).abs().argmin())
+    else:
+        event_step = int(args.event_step)
+    event_sigma = float(t_hat_by_step[event_step])
+    in_window = 0.1 <= event_sigma <= 2.0
+    logger.info("event step %d -> t_hat %.4f (gate window [0.1, 2.0]: %s)",
+                event_step, event_sigma, "open" if in_window else "CLOSED")
+    if not in_window:
+        logger.warning(
+            "the event is outside the trained gate; the residual will be zero "
+            "and the arms will differ only by numerical noise")
     common = dict(schedule=schedule, n_atom=den.n_atom, device=device,
                   dtype=torch.float32, batch_shape=tuple(den.s_inputs.shape[:-2]),
                   n_sample=1, step_scale_eta=2.5)
@@ -159,10 +211,10 @@ def main():
         # Baseline trajectory, recording the state the arms resume from.
         _x_base_full, records, _ = run_trajectory(
             denoise=plain, stream=RngStream("bb", args.seed, device=device),
-            record_steps=(args.event_step,), **common,
+            record_steps=(event_step,), **common,
         )
         if not records:
-            print(f"FAILED: nothing recorded at step {args.event_step}")
+            print(f"FAILED: nothing recorded at step {event_step}")
             return 1
         state = records[0].to(device)
 
@@ -206,7 +258,7 @@ def main():
             tap.reset()
             x0, _, stats = run_trajectory(
                 denoise=plain, stream=RngStream("bb", args.seed, device=device),
-                resume=state, event=(args.event_step, 0), feedback=feedback,
+                resume=state, event=(event_step, 0), feedback=feedback,
                 **common,
             )
             rows[arm] = dict(
@@ -222,7 +274,8 @@ def main():
     # arm-vs-arm coordinate differences
     print(json.dumps(dict(
         target=str(data["sample_name"]), n_token=n_tokens, n_atom=den.n_atom,
-        event_step=args.event_step, n_step=args.n_step, eta=2.5,
+        event_step=event_step, event_t_hat=round(event_sigma, 6),
+        gate_window_open=in_window, n_step=args.n_step, eta=2.5,
         sequence_length=len(sequence),
         mapping=token_map.identity(), arms=rows,
     ), indent=2))

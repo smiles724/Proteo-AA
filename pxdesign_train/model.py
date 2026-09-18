@@ -243,12 +243,27 @@ class ProtenixDesignTrain(ProtenixDesign):
             elif self.aa_backend == "sc_only":
                 from pxdesign_train.stage4 import SUPERVISED_SC_PHASES
 
-                phase = str(getattr(getattr(configs, "stage4", object()), "phase", ""))
-                if phase not in SUPERVISED_SC_PHASES:
+                s4 = getattr(configs, "stage4", object())
+                phase = str(getattr(s4, "phase", ""))
+                # `feedback_adapt` trains the feedback modules (stage4.py:
+                # `enabled = feedback or (sc and train_sc) or bb`) and decodes a
+                # sequence only through the SC->AA channel. With that channel off
+                # there is no AA head to need, which is the side-chain ->
+                # BACKBONE feedback configuration. The training script's
+                # equivalent guard carries the same exception; both are kept
+                # because one is reachable from a config and the other from a
+                # command line.
+                allowed = set(SUPERVISED_SC_PHASES)
+                if phase == "feedback_adapt" and not bool(getattr(s4, "sc_to_aa", True)):
+                    allowed.add("feedback_adapt")
+                if phase not in allowed:
+                    hint = ("" if phase != "feedback_adapt" else
+                            " (feedback_adapt is allowed when stage4.sc_to_aa is off)")
                     raise ValueError(
                         f"aa_backend='sc_only' builds no AA head, so phase {phase!r} "
-                        f"cannot run; it is only valid for {SUPERVISED_SC_PHASES}, which "
-                        "supervise side chains against native types and decode nothing."
+                        f"cannot run; it is only valid for {sorted(allowed)}, which "
+                        f"supervise side chains against native types and decode "
+                        f"nothing.{hint}"
                     )
                 if self.enable_residue_type_head:
                     raise ValueError(
@@ -1304,14 +1319,26 @@ class ProtenixDesignTrain(ProtenixDesign):
             # The representation h_res / S_phi read (one coherent state). For the
             # s_inputs baseline this is just s_inputs (no per-sample axis exists).
             out["h_res_candidate"] = token_repr
-            # Reduced logits for S_phi / type routing (single [..., N_token, 20]).
-            out["aa_logits_reduced"] = self.design_residue_type_head(token_repr, aa_t=aa_t)
-            # AA-loss logits: per-sample under diffusion_internal ([..., N_sample,
-            # N_token, 20]); the reduced logits for the sigma-free s_inputs baseline.
-            out["aa_logits"] = (
-                self.design_residue_type_head(a_full, aa_t=aa_t)
-                if a_full is not None else out["aa_logits_reduced"]
-            )
+            # This branch is entered for `enable_residue_type_head OR
+            # enable_sidechain`, because the side chain needs `h_res_candidate`
+            # even when nothing decodes a sequence. The logits below need the
+            # head, which `aa_backend='sc_only'` does not build -- so they are
+            # gated separately rather than on the branch condition.
+            #
+            # Until now the only `sc_only` phases were the supervised SC ones,
+            # and those return early through `adaptation_forward`, so this line
+            # was never reached without a head. A side-chain -> backbone
+            # feedback run is `sc_only` AND goes through the ordinary forward,
+            # which is the combination that found it.
+            if self.enable_residue_type_head:
+                # Reduced logits for S_phi / type routing ([..., N_token, 20]).
+                out["aa_logits_reduced"] = self.design_residue_type_head(token_repr, aa_t=aa_t)
+                # AA-loss logits: per-sample under diffusion_internal; the
+                # reduced logits for the sigma-free s_inputs baseline.
+                out["aa_logits"] = (
+                    self.design_residue_type_head(a_full, aa_t=aa_t)
+                    if a_full is not None else out["aa_logits_reduced"]
+                )
 
         self.pack_backbone_state(input_feature_dict, out)
 
@@ -1440,7 +1467,23 @@ class ProtenixDesignTrain(ProtenixDesign):
             # chain tensors (ids / mask / frames) are tiled to the flattened batch
             # by the existing `expand(B, ...)` logic below. NOT a reduce/low-sigma
             # mixed representation.
-            use_per_sigma = self.sc_per_sigma and out.get("h_res_sigma") is not None
+            # `aa_logits` is absent when no AA head was built (`aa_backend=
+            # 'sc_only'`), so the per-sigma path is unavailable then -- its whole
+            # point is pairing each sigma row with that row's logits. The types
+            # come from the ground truth instead, which `force_gt_type_logits`
+            # supplies at the end of this method; the placeholder below only has
+            # to be the right shape, because it is overwritten before use.
+            no_aa_head = out.get("aa_logits") is None
+            if no_aa_head and not getattr(self, "sc_force_gt_type_logits", False):
+                raise ValueError(
+                    "No AA head built (aa_backend='sc_only') and "
+                    "sidechain.force_gt_type_logits is off, so nothing supplies "
+                    "the residue types S_phi instantiates its atoms from. Set "
+                    "force_gt_type_logits for a packing run with no sequence head."
+                )
+            use_per_sigma = (self.sc_per_sigma
+                             and out.get("h_res_sigma") is not None
+                             and not no_aa_head)
             sigma_flat = None
             if use_per_sigma:
                 hs = out["h_res_sigma"]             # [.., N_sample, L, C]
@@ -1462,7 +1505,11 @@ class ProtenixDesignTrain(ProtenixDesign):
             else:
                 h_res = out["h_res_candidate"]      # [N_token, c_res] or [B, N_token, c_res]
                 # S_phi conditions on the REDUCED AA distribution (warmup baseline).
-                aa_logits = out["aa_logits_reduced"]
+                # With no AA head, a correctly shaped placeholder: it is replaced
+                # by the GT one-hot at the end of this method, and building it
+                # from `h_res` keeps device and dtype right without a branch.
+                aa_logits = (out["aa_logits_reduced"] if not no_aa_head else
+                             h_res.new_zeros(*h_res.shape[:-1], 20))
                 squeeze = h_res.dim() == 2          # batch=1 collapsed upstream
                 if squeeze:
                     h_res = h_res.unsqueeze(0)
@@ -1496,7 +1543,11 @@ class ProtenixDesignTrain(ProtenixDesign):
                 # Assignments, inventories and loss routing retain item/sample axes.
                 ptype = out.get("assigned_aa")
                 if ptype is None:
-                    ptype = aa_logits.argmax(dim=-1) if use_per_sigma else out["aa_logits_reduced"].argmax(dim=-1)
+                    # `aa_logits` is the local already resolved above -- the
+                    # reduced logits when a head exists, otherwise a placeholder
+                    # that force_gt_type_logits replaces with the GT one-hot. Re-
+                    # reading the dict here assumed a head and raised without one.
+                    ptype = aa_logits.argmax(dim=-1)
                 sc_ids, sc_slot = instantiate_from_type_indices(ptype)
                 # sc_mask remains the independent native observation mask.
                 sc_type_idx = ptype
@@ -2303,7 +2354,9 @@ class ProtenixDesignTrain(ProtenixDesign):
             if self.sc_route_by_type or getattr(self, "sc_predicted_mask", False):
                 aa_clean = input_feature_dict.get("aa_clean")
                 if aa_clean is not None:
-                    pred = sc_type_idx if getattr(self, "sc_predicted_mask", False) else out["aa_logits_reduced"].argmax(-1)
+                    reduced = out.get("aa_logits_reduced")
+                    pred = (sc_type_idx if getattr(self, "sc_predicted_mask", False)
+                            or reduced is None else reduced.argmax(-1))
                     aa_clean = aa_clean.to(pred.device)
                     if use_per_sigma:
                         aa_clean = _tile_per_sigma(aa_clean, trailing_ndim=1)

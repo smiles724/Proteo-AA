@@ -182,6 +182,23 @@ class PXDesignTrainer:
                 overlay_aa_head_path, self.AA_HEAD_PREFIXES, label="AA head",
             )
 
+        # Side-chain packer overlay. Same ordering rule as the AA head: after the
+        # primary load, because the point is to replace whatever packer that
+        # checkpoint carried with an external one (APM's released weights). The
+        # overlay raises if nothing matched, so a wrong prefix cannot leave a
+        # randomly initialised packer behind a command line that says otherwise.
+        overlay_sc = str(getattr(self.configs.training, "overlay_sc_packer_path", "") or "")
+        if overlay_sc:
+            if load_checkpoint_path and not checkpoint_params_only:
+                raise ValueError(
+                    "Refusing to overlay a side-chain packer on top of a FULL "
+                    f"resume ({load_checkpoint_path}): the resume restores the "
+                    "packer this run already has, and overlaying would roll it "
+                    "back while the optimizer state kept going.")
+            self.overlay_module_from_checkpoint(
+                overlay_sc, self.SC_PREFIXES, label="side-chain packer",
+            )
+
         self._init_ema()
         if load_checkpoint_path and not checkpoint_params_only:
             saved = torch.load(load_checkpoint_path, map_location=self.device, weights_only=False)
@@ -207,6 +224,11 @@ class PXDesignTrainer:
     # current model does not build it, so overlaying it would only produce
     # "unexpected key" noise.
     AA_HEAD_PREFIXES = ("design_residue_type_head.",)
+    # Imported name, not a second literal: `pxdesign_train.checkpoints` owns the
+    # component-prefix vocabulary and a divergent copy here would overlay the
+    # wrong tensors.
+    from pxdesign_train.checkpoints import SC_PREFIXES as _SC_PREFIXES
+    SC_PREFIXES = _SC_PREFIXES
     AA_DIAGNOSTIC_PREFIXES = ("design_residue_type_head.", "aa_head.")
 
     def overlay_module_from_checkpoint(
@@ -303,6 +325,26 @@ class PXDesignTrainer:
 
 
     def _apply_trainable_filter(self) -> None:
+        # `frozen_param_keywords` is an EXCLUDE list, applied after the include
+        # list. It exists because "train everything except one component" cannot
+        # be written as a keyword whitelist without enumerating every other
+        # module -- which would silently freeze anything added later.
+        frozen = list(getattr(self.configs.training, "frozen_param_keywords", []) or [])
+        if frozen:
+            n_frozen = 0
+            for name, param in self.raw_model.named_parameters():
+                if any(str(k) in name for k in frozen):
+                    param.requires_grad_(False)
+                    n_frozen += param.numel()
+            if n_frozen == 0:
+                raise ValueError(
+                    "frozen_param_keywords matched no parameters: "
+                    + ", ".join(map(str, frozen))
+                    + " -- a freeze that freezes nothing would train the component "
+                      "the run says is frozen."
+                )
+            self._log(f"Frozen {n_frozen:,} parameters matching: "
+                      + ", ".join(map(str, frozen)))
         keywords = list(getattr(self.configs.training, "trainable_param_keywords", []) or [])
         if not keywords:
             return

@@ -219,3 +219,97 @@ def test_cache_is_reset_between_forwards():
         "_sc_env_cache must be initialised in __init__ AND cleared per forward; "
         "found fewer than two assignments to None")
     assert "self._sc_env_cache = env_term" in src
+
+
+def test_feedback_adapt_actually_trains_the_new_module():
+    """The failure this catches: `apply_phase` matches FEEDBACK_PREFIXES, so a
+    module missing from that tuple gets requires_grad_(False) while the run
+    looks healthy -- the older injectors keep the loss descending and all three
+    arms return the same numbers, which reads as "the coordinate feedback does
+    not help".
+
+    Asserted on requires_grad of the real parameters, not on the tuple's
+    contents, so renaming the attribute cannot satisfy it vacuously.
+    """
+    import torch.nn as nn
+
+    from pxdesign_train.checkpoints import FEEDBACK_PREFIXES
+    from pxdesign_train.stage4 import apply_phase
+
+    class _Cfg:
+        phase = "feedback_adapt"
+        bb_trainable_prefixes = ()
+        feedback_trainable_prefixes = FEEDBACK_PREFIXES
+        train_sc = False
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.sc_env_feedback = SidechainEnvFeedback(
+                c_atom=C_ATOM, c_trunk=C_TRUNK, n_blocks=1)
+            self.sidechain_module = nn.Linear(4, 4)      # must end up frozen
+            self.diffusion_module = nn.Linear(4, 4)      # must end up frozen
+
+        class _Configs:
+            pass
+
+    m = _Model()
+    m.configs = _Model._Configs()
+    m.configs.stage4 = _Cfg()
+    apply_phase(m)
+
+    env = [n for n, p in m.named_parameters()
+           if n.startswith("sc_env_feedback.") and p.requires_grad]
+    assert env, ("no sc_env_feedback parameter is trainable under "
+                 "feedback_adapt; the three arms would be identical")
+    assert not any(p.requires_grad for n, p in m.named_parameters()
+                   if n.startswith("sidechain_module.")), "packer must stay frozen"
+    assert not any(p.requires_grad for n, p in m.named_parameters()
+                   if n.startswith("diffusion_module.")), "backbone must stay frozen"
+
+
+def _phase_model(train_sc, bb_prefixes):
+    import torch.nn as nn
+
+    from pxdesign_train.checkpoints import FEEDBACK_PREFIXES
+    from pxdesign_train.stage4 import apply_phase
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.sc_env_feedback = SidechainEnvFeedback(
+                c_atom=C_ATOM, c_trunk=C_TRUNK, n_blocks=1)
+            self.sidechain_module = nn.Linear(4, 4)
+            self.diffusion_module = nn.Linear(4, 4)
+
+    m = _Model()
+
+    class _Cfg:
+        phase = "feedback_adapt"
+    cfg = _Cfg()
+    cfg.bb_trainable_prefixes = bb_prefixes
+    cfg.feedback_trainable_prefixes = FEEDBACK_PREFIXES
+    cfg.train_sc = train_sc
+
+    class _Configs:
+        pass
+    m.configs = _Configs()
+    m.configs.stage4 = cfg
+    apply_phase(m)
+    return {p: any(q.requires_grad for n, q in m.named_parameters()
+                   if n.startswith(p))
+            for p in ("sc_env_feedback.", "sidechain_module.", "diffusion_module.")}
+
+
+def test_one_phase_expresses_both_feedback_experiments():
+    """Experiment 1 must train ONLY the feedback; experiment 2 must also train
+    the packer and the backbone. If both came out the same, the two runs would
+    differ in name only and the attributable experiment would be lost.
+    """
+    only_fb = _phase_model(train_sc=False, bb_prefixes=())
+    assert only_fb == {"sc_env_feedback.": True, "sidechain_module.": False,
+                       "diffusion_module.": False}, only_fb
+
+    like_s3 = _phase_model(train_sc=True, bb_prefixes=("diffusion_module.",))
+    assert like_s3 == {"sc_env_feedback.": True, "sidechain_module.": True,
+                       "diffusion_module.": True}, like_s3

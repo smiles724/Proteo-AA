@@ -371,9 +371,75 @@ def build_source_components(
     return components, len(src)
 
 
+def build_cif_dir_components(args: argparse.Namespace):
+    """Training components over a DIRECTORY OF mmCIFs, via `CifFileProvider`.
+
+    The monomer path above reads Protenix's preprocessed bioassembly index. A
+    plain CIF directory has no index, so this is a separate source rather than
+    a flag on that one. It reuses `DesignSourceDataset` with the same arguments,
+    so the featurisation, crop policy and inference-safe binder handling are the
+    ones the other sources were validated under -- only the provider differs.
+
+    The provider is the same one the CASP benchmark and the a_token bridge use,
+    so its parse path is already exercised.
+    """
+    from torch.utils.data import Subset
+
+    from pxdesign_train.data import CurriculumMultiDataset, CurriculumSchedule
+    from pxdesign_train.runner import DesignSourceDataset, TrainerComponents
+    from pxdesign_train.runner.cif_provider import CifFileProvider
+
+    root = Path(args.cif_dir).expanduser().resolve()
+    files = sorted(str(p) for p in root.glob("*.cif")) + \
+            sorted(str(p) for p in root.glob("*.cif.gz"))
+    if not files:
+        raise ValueError(f"--cif-dir {root} contains no .cif or .cif.gz files")
+    if int(args.dataset_limit) > 0:
+        files = files[: int(args.dataset_limit)]
+    source_name = "cif_dir"
+    provider = CifFileProvider(cif_paths=files)
+    src = DesignSourceDataset(
+        provider=provider,
+        source_name=source_name,
+        crop_size=int(args.crop_size),
+        max_binder_fraction=1.0,
+        hotspot_force_zero_prob=1.0,
+        aa_mask_mode=args.aa_mask_mode,
+        aa_mask_prob=float(args.aa_mask_prob),
+        aa_mask_min_prob=float(args.aa_mask_min_prob),
+        aa_mask_max_prob=float(args.aa_mask_max_prob),
+        compute_sidechain=not args.disable_sidechain,
+        backbone_only_binder=True,
+        inference_safe_binder=not args.allow_binder_sidechain_leakage,
+        ref_pos_augment=bool(args.ref_pos_augment),
+        # A CIF that does not parse is a property of the FILE, and one bad entry
+        # must not kill a DataLoader worker mid-run -- the retry budget is what
+        # the pinder path learned to carry (job 113955 died on an element "X").
+        max_crop_retries=int(args.max_crop_retries),
+        seed=int(args.seed),
+    )
+    multi = CurriculumMultiDataset(
+        datasets=[src], source_names=[source_name],
+        per_item_weights=[[1.0] * len(src)],
+    )
+    schedule = CurriculumSchedule(
+        stage1={source_name: 1.0}, stage2={source_name: 1.0},
+        stage1_end_step=0, stage2_start_step=0,
+    )
+    components = TrainerComponents(
+        train_dataset=multi, schedule=schedule,
+        train_samples_per_epoch=int(args.train_samples_per_epoch),
+    )
+    logging.getLogger(__name__).info(
+        "cif_dir source: %d files from %s", len(files), root)
+    return components, len(src)
+
+
 def build_components(args: argparse.Namespace, filtered_index: Path):
     from pxdesign_train.runner import select_protenix_chain_1
 
+    if getattr(args, "cif_dir", ""):
+        return build_cif_dir_components(args)
     return build_source_components(
         args,
         filtered_index,
@@ -1047,10 +1113,21 @@ def build_configs(args: argparse.Namespace, device):
         sc_only_aa = str(args.aa_backend) == "sc_only"
         if sc_only_aa:
             from pxdesign_train.stage4 import SUPERVISED_SC_PHASES
-            if args.stage4_phase not in SUPERVISED_SC_PHASES:
+            # `feedback_adapt` trains the feedback modules and nothing else
+            # (stage4.py: `enabled = feedback or (sc and train_sc)`), so it needs
+            # an AA head only if the SC->AA channel is on. With it off there is
+            # no sequence to decode and the guard's stated reason does not apply
+            # -- which is what a side-chain -> BACKBONE feedback experiment
+            # wants. FaMPNN is a sequence-decoder backend and is unrelated.
+            sc_only_ok = set(SUPERVISED_SC_PHASES)
+            if args.stage4_phase == "feedback_adapt" and not args.stage4_sc_to_aa:
+                sc_only_ok.add("feedback_adapt")
+            if args.stage4_phase not in sc_only_ok:
+                extra = ("" if args.stage4_phase != "feedback_adapt" else
+                         " (feedback_adapt is allowed with --no-stage4-sc-to-aa)")
                 raise ValueError(
                     f"--aa-backend sc_only builds no AA head; phase {args.stage4_phase} "
-                    f"decodes a sequence. Valid phases: {SUPERVISED_SC_PHASES}"
+                    f"decodes a sequence. Valid phases: {sorted(sc_only_ok)}{extra}"
                 )
             if args.fampnn_checkpoint:
                 raise ValueError("--aa-backend sc_only and --fampnn-checkpoint contradict each other")
@@ -1128,6 +1205,44 @@ def build_configs(args: argparse.Namespace, device):
             configs.sidechain.pack_loss=float(configs.stage4.weight_physical)
             configs.loss.weight_bb_post=0.
 
+
+    # Placed AFTER every training-stage preset on purpose: the earlier
+    # position was before them, so the stage4 block's
+    # `force_gt_type_logits = False` silently undid the flag and the run
+    # raised as if it had never been passed.
+    # Coordinate feedback. Assigned one flag at a time and only when the user
+    # passed it, so a default here cannot silently override a stage preset --
+    # and so `test_every_sc_flag_is_read_somewhere` can see each `args.` read.
+    if args.sc_force_gt_type_logits is not None:
+        configs.sidechain.force_gt_type_logits = bool(args.sc_force_gt_type_logits)
+        # With the native types feeding the packer, the residue-type head's
+        # logits are discarded, so supervising it would train a head nothing
+        # reads and mix its gradient into a feedback experiment. `coevolution`
+        # sets weight_aa = 1.0; turn it off together with the override that made
+        # the head unread, so the two cannot drift apart.
+        if bool(args.sc_force_gt_type_logits):
+            configs.loss.weight_aa = 0.0
+            configs.loss.weight_aa_post = 0.0
+    if args.sc_env_feedback is not None:
+        configs.sidechain.env_feedback = args.sc_env_feedback
+    if args.sc_env_blocks is not None:
+        configs.sidechain.env_blocks = int(args.sc_env_blocks)
+    if args.sc_env_neighbors is not None:
+        configs.sidechain.env_neighbors = int(args.sc_env_neighbors)
+    if args.sc_env_use_neighbourhood is not None:
+        configs.sidechain.env_use_neighbourhood = bool(args.sc_env_use_neighbourhood)
+    if args.sc_env_detach is not None:
+        configs.sidechain.env_detach = bool(args.sc_env_detach)
+    if args.sc_freeze_packer and not args.sc_load_packer_from:
+        raise ValueError(
+            "--sc-freeze-packer without --sc-load-packer-from would freeze a "
+            "randomly initialised packer, and the run would look like it had a "
+            "packer while feeding the feedback noise.")
+    # Assigned unconditionally so the flag's effect is visible in one place and
+    # `test_every_sc_flag_reaches_the_sidechain_config` can see it -- a flag that
+    # only gates an assignment can be read and still change nothing.
+    configs.training.frozen_param_keywords = ["sidechain_module."] if args.sc_freeze_packer else []
+    configs.training.overlay_sc_packer_path = str(Path(args.sc_load_packer_from).resolve()) if args.sc_load_packer_from else ""
 
     unfreeze_last = int(getattr(args, "unfreeze_last_diffusion_blocks", 0))
     if unfreeze_last < 0:
@@ -1713,6 +1828,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bb-trainable-prefixes", nargs="*", default=[])
     p.add_argument("--weight-refine", type=float, default=0.)
     p.add_argument("--weight-denoise", type=float, default=4.)
+    p.add_argument(
+        "--cif-dir", default="",
+        help="Train on a directory of mmCIFs instead of Protenix's monomer "
+             "index, through CifFileProvider. Used for the AFDB/La-Proteina "
+             "snapshot at /hai/scratch/yfsun/afdb_laproteina/cif_phase1.",
+    )
     p.add_argument("--backbone-checkpoint", default="")
     p.add_argument("--sidechain-checkpoint", default="")
     p.add_argument("--sidechain-init", choices=["checkpoint", "scratch"], default="checkpoint",
@@ -1755,6 +1876,65 @@ def parse_args() -> argparse.Namespace:
         help="THE ablation. Which sequence channel is added to the node embedding, "
              "at exactly the point APM adds its PLM: none / a_token (Stage 1's "
              "token) / plm (frozen ESM-2 650M, APM's setting) / both.",
+    )
+    # ---- side-chain -> backbone coordinate feedback (docs/sc_to_bb_hres_feedback_zh.md) ----
+    p.add_argument(
+        "--sc-force-gt-type-logits", dest="sc_force_gt_type_logits",
+        action="store_true", default=None,
+        help="Feed S_phi the NATIVE residue types instead of the AA head's "
+             "logits. Required when no AA head is built (aa_backend='sc_only') "
+             "outside the supervised SC phases, which set it themselves -- "
+             "otherwise nothing supplies the types the side chain is built from.",
+    )
+    p.add_argument("--no-sc-force-gt-type-logits",
+                   dest="sc_force_gt_type_logits", action="store_false")
+    p.add_argument(
+        "--sc-env-feedback", choices=["off", "packer", "atom_id"], default=None,
+        help="Feed the packer's side-chain COORDINATES back into the refinement "
+             "pass, as a second additive term beside --sc-hres-inject's feature "
+             "term. 'packer' uses the packer's per-atom features; 'atom_id' "
+             "replaces them with a plain atom-name embedding, which is the "
+             "control separating 'the coordinates helped' from 'APM's node_embed "
+             "helped'.",
+    )
+    p.add_argument(
+        "--sc-env-blocks", type=int, default=None,
+        help="Cross-atom neighbourhood blocks in the coordinate feedback.",
+    )
+    p.add_argument(
+        "--sc-env-neighbors", type=int, default=None,
+        help="Residues per neighbourhood, by CA distance. The memory knob: the "
+             "gather is [B, L, M, A, *].",
+    )
+    p.add_argument(
+        "--sc-env-use-neighbourhood", dest="sc_env_use_neighbourhood",
+        action="store_true", default=None,
+        help="Arm C: run the cross-atom blocks. --no-sc-env-use-neighbourhood is "
+             "arm F, which pools the features straight into the injector and is "
+             "the baseline that must run first.",
+    )
+    p.add_argument("--no-sc-env-use-neighbourhood", dest="sc_env_use_neighbourhood",
+                   action="store_false")
+    p.add_argument(
+        "--sc-env-detach", dest="sc_env_detach", action="store_true", default=None,
+        help="Cut the gradient at the feedback's inputs, reproducing APM's "
+             "RefineModel. --no-sc-env-detach lets it reach the frames, so the "
+             "backbone learns to emit frames whose side chains pack well -- the "
+             "comparison APM did not run.",
+    )
+    p.add_argument("--no-sc-env-detach", dest="sc_env_detach", action="store_false")
+    p.add_argument(
+        "--sc-load-packer-from", default=None,
+        help="Overlay `sidechain_module.*` from this checkpoint after the main "
+             "load. Use it to put APM's released packer in place: it is the "
+             "external fixed reference (1.3469 symmetry_rmsd), so the feedback's "
+             "effect does not get entangled with how good our own packer is.",
+    )
+    p.add_argument(
+        "--sc-freeze-packer", action="store_true",
+        help="Freeze `sidechain_module.*`. With --sc-load-packer-from this is "
+             "the design's frozen-packer setting; without it you would be "
+             "freezing a randomly initialised packer.",
     )
     p.add_argument("--sc-packer-plm-checkpoint", default=None,
                    help="fair-esm ESM-2 650M weights; required by the plm/both arms.")

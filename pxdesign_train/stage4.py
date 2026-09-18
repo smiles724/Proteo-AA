@@ -346,7 +346,18 @@ def apply_phase(model):
         elif phase in ("sc_warmup", "sc_geometry_repair", "sc_complex_adapt", "sc_adapt"):
             enabled = sc
         elif phase == "feedback_adapt":
-            enabled = feedback or (sc and bool(getattr(cfg, "train_sc", False)))
+            # `bb` is honoured here too, so ONE phase expresses both feedback
+            # experiments instead of needing a second phase with its own
+            # semantics to keep in sync:
+            #   train_sc=False, bb=()        -> only the feedback trains, so an
+            #       effect is attributable to the feedback and nothing else.
+            #   train_sc=True,  bb=(...)     -> feedback + packer + backbone, the
+            #       Stage III degrees of freedom, which answers "how far does
+            #       this get end to end" rather than "does the feedback help".
+            # `bb` defaults to empty, so this is additive for existing runs.
+            enabled = (feedback
+                       or (sc and bool(getattr(cfg, "train_sc", False)))
+                       or bool(bb and name.startswith(bb)))
         elif phase in ("aa_adapt", "IV-A"):
             enabled = aa or (sc and phase == "aa_adapt" and bool(getattr(cfg, "train_sc", False)))
         else:

@@ -13,7 +13,12 @@ import torch
 SCHEMA_VERSION = 1
 BACKBONE_PREFIXES = ("design_condition_embedder.", "diffusion_module.")
 SC_PREFIXES = ("sidechain_module.",)
-FEEDBACK_PREFIXES = ("sidechain_feedback.", "hres_injector.", "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding")
+# `sc_env_feedback.` belongs here or `apply_phase("feedback_adapt")` freezes it:
+# `enabled = feedback or ...` matches on these prefixes, so a module absent from
+# this tuple trains nothing while the run looks healthy (the older injectors keep
+# the loss moving). `tests/test_sc_env_feedback.py` asserts requires_grad
+# directly rather than trusting this list.
+FEEDBACK_PREFIXES = ("sidechain_feedback.", "hres_injector.", "a_token_fusion", "q_atom_fusion", "refinement_pass_embedding", "sc_env_feedback.")
 SC_LAYOUT_KEYS = ("bb_context", "centre_coord_input", "frame_aware_head", "template_residual", "type_logits_input", "edm", "a_bs_concat", "q_bs", "chi_output")
 # Added after the first SC donors were written, so they are compared against a
 # default instead of being required: a pre-existing donor legitimately has no
@@ -145,11 +150,21 @@ def compose_components(model, *, backbone_checkpoint, sidechain_checkpoint=None,
         raise ValueError("Scratch SC initialization cannot also load an SC donor")
     if sidechain_init == "scratch" and not getattr(model, "enable_sidechain", False):
         raise ValueError("Scratch SC initialization requires an SC module")
-    if getattr(model, "aa_backend", None) not in ("fampnn", "sc_only"):
+    if getattr(model, "aa_backend", None) not in ("fampnn", "sc_only", "mlp"):
         raise ValueError(
             "Component composition requires the strictly initialized FAMPNN adapter, "
-            "or aa_backend='sc_only' for a supervised SC phase that builds no AA head"
+            "aa_backend='sc_only' for a supervised SC phase that builds no AA head, "
+            "or aa_backend='mlp' for a phase that builds one but does not train it"
         )
+    # `mlp` is admitted for a phase that builds the ordinary residue-type head and
+    # leaves it untrained (weight_aa=0, not in the phase's trainable set, and its
+    # logits overridden by force_gt_type_logits). It is admitted because the
+    # alternative was worse: `sc_only` builds no head at all, and outside the
+    # supervised SC phases -- which return early through `adaptation_forward` --
+    # the ordinary forward and everything downstream assume one exists. Chasing
+    # that assumption produced four separate failures in a row (a missing
+    # attribute, two KeyErrors, then a shape mismatch) with no bound on how many
+    # remained. A few million unread parameters is the cheaper correctness.
     # All validation precedes any writes; FAMPNN was strictly initialized by its adapter.
     backbone = read_checkpoint(backbone_checkpoint)
     state = component_state(model, backbone, BACKBONE_PREFIXES)

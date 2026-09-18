@@ -1,5 +1,10 @@
 # 设计：侧链 → 主链的坐标回馈（frozen APM packer）
 
+> **已被取代（2026-09-17）**：注入点改回旧 Stage II-B 的 `h_res'` → `s_trunk`，
+> 见 `sc_to_bb_hres_feedback_zh.md`。本文保留，因为第 2 节那个
+> `xpb` 只有 5 个原子槽的约束、以及 PXDesign 经 `conditional_templ` 送几何的
+> 机制，两者都仍然成立且仍然相关。
+
 > 2026-09-17。设计文档，未实现。目标是把 APM released packer 摆出的侧链
 > **坐标**送回主链模块，作为 Stage-2 的 SC→BB 回馈。
 

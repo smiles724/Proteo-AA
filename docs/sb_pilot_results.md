@@ -119,6 +119,43 @@ The adapter also pushes a relatively *larger* residual as σ rises (rel. residua
 0.0132 → 0.0219 while ‖Δa‖ falls 0.630 → 0.482) — it tries hardest exactly where
 it achieves least.
 
+## The reported gain is EMA-dependent; the control's is not
+
+The table above scores EMA weights (`--ema`, the default, `ema_relative_length`
+0.25 on a 2,000-step run). Re-scoring the same checkpoints raw:
+
+| arm | EMA | raw (`--no-ema`) |
+|---|---|---|
+| `full` | +0.0007 [+0.0005, +0.0010] | **+0.0001 [−0.0003, +0.0004]** |
+| `bb_only` | +0.0008 [+0.0005, +0.0011] | **−0.0001 [−0.0004, +0.0003]** |
+| `generic` | +0.0004 [+0.0003, +0.0006] | **+0.0004 [+0.0003, +0.0006]** |
+
+Per σ (EMA / raw), `*` = interval excludes zero:
+
+| arm | 0.105 | 0.314 | 0.847 | 1.939 |
+|---|---|---|---|---|
+| `full` | +0.0004* / +0.0001 | +0.0013* / +0.0008* | +0.0010* / +0.0004 | +0.0003 / **−0.0010** |
+| `bb_only` | +0.0005* / +0.0000 | +0.0015* / +0.0012* | +0.0012* / +0.0005 | −0.0000 / **−0.0018** |
+| `generic` | +0.0003* / +0.0003* | +0.0008* / +0.0008* | +0.0006* / +0.0006* | +0.0000 / +0.0001 |
+
+`generic` is identical to four decimals under either weighting, at every σ. The
+two feature-reading arms are not: raw, their pooled gains span zero and at
+σ=1.939 they become actively harmful. **So the only gain robust to the
+weight-averaging choice is the σ-only control's.** What the side-chain and
+backbone-feature readouts appeared to contribute was EMA smoothing of noisy
+weights rather than a learned correction.
+
+Predicted the wrong way round, and worth recording as such: from W₂'s norm
+(EMA 16% below raw) the expectation was that EMA *understates* the effect. The
+norm was the wrong instrument — the smaller averaged W₂ generalizes better than
+the raw one.
+
+This is also the first direct evidence for the undertraining caveat rather than
+a hedge about it: `full` and `bb_only` are not converged at 2,000 steps, since
+averaging flips the sign of their high-σ effect. It does not make more steps a
+route to SC-specificity — `generic` is robust and still wins — but "2,000 steps
+sufficed" is not established for the two feature-reading arms.
+
 ## Cost
 
 Equal denoiser-call counts are not equal cost. Deployed cost per corrective

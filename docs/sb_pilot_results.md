@@ -76,6 +76,49 @@ having a simpler function to fit.
 So the optimizer found no use for side-chain information at this injection site,
 rather than the information being unavailable.
 
+## Per noise level
+
+Pooling hid the structure. 64 targets at each σ; `*` marks a paired interval
+that excludes zero.
+
+| arm | σ=0.105 | σ=0.314 | σ=0.847 | σ=1.939 |
+|---|---|---|---|---|
+| `bb0` BB RMSD | 0.0832 | 0.1820 | 0.3657 | 0.7055 |
+| `full` improvement | +0.0004* | +0.0013* | +0.0010* | +0.0003 |
+| `bb_only` improvement | +0.0005* | +0.0015* | +0.0012* | −0.0000 |
+| `generic` improvement | +0.0003* | +0.0008* | +0.0006* | +0.0000 |
+| `refine` improvement | −0.0000 | −0.0001 | −0.0003 | **+0.0006** |
+
+Three things only visible here:
+
+**The gain lives where there is least to gain.** The three significant points
+are the three lowest-σ ones, where the proposal is already within 0.37 Å. At
+σ=1.939, with 0.71 Å of error available, every feedback arm is inert.
+
+**`refine` is the mirror image and wins at the top.** Neutral-to-harmful at low
+σ, and the only arm that helps at σ=1.939 (+0.0006, beating `full`'s +0.0003). A
+sampler step pays when real noise remains; feedback pays when the estimate has
+nearly converged. So "the second call buys nothing wherever it is spent" is too
+flat — *where* it is spent matters, it is just that neither reaches the
+criterion.
+
+**SC-specificity fails at every σ, and inverts at one.** `full` vs `bb_only`:
+
+| σ | delta | 95% CI | verdict |
+|---|---|---|---|
+| 0.105 | −0.0001 | [−0.0002, +0.0000] | indistinguishable |
+| 0.314 | −0.0003 | [−0.0004, −0.0001] | **`bb_only` better** |
+| 0.847 | −0.0001 | [−0.0005, +0.0002] | indistinguishable |
+| 1.939 | +0.0003 | [−0.0004, +0.0010] | indistinguishable |
+
+At σ=0.314 the side-chain input measurably *hurts*, consistent with it spending
+fitting budget for nothing. `perturbed` ≈ `full` at all four levels (−0.0000 to
+−0.0001), so rotamer-scrambling is inert everywhere rather than only on average.
+
+The adapter also pushes a relatively *larger* residual as σ rises (rel. residual
+0.0132 → 0.0219 while ‖Δa‖ falls 0.630 → 0.482) — it tries hardest exactly where
+it achieves least.
+
 ## Cost
 
 Equal denoiser-call counts are not equal cost. Deployed cost per corrective
@@ -114,10 +157,14 @@ A negative result here concerns **this late injection site** (after
 `layernorm_a`, before `atom_attention_decoder`) at **this σ window**, with this
 budget. Three things would each be a different experiment:
 
-1. **Headroom.** `bb0` is already at 0.334 Å here, so `max(0.05 Å, 3%)` demands a
-   ~15% relative improvement. A higher-σ window has more error to remove — and
-   less determined side-chain evidence to remove it with, which is the tension
-   the window was chosen to balance.
+1. ~~**Headroom.**~~ **Contradicted by the per-σ breakdown below — do not chase
+   this.** The original argument was that `bb0` at 0.334 Å leaves little to
+   correct, so a higher-σ window with more error would give the adapter more to
+   work with. The sweep says the reverse: across σ ∈ {0.105, 0.314, 0.847,
+   1.939} the proposal's error ranges 0.083 → 0.706 Å, and every trained arm
+   helps *significantly* at the three low-σ points and does **nothing** at the
+   highest (`full` +0.0003 Å, interval includes zero). More headroom produced
+   less gain, not more.
 2. **Injection site.** Feedback before the diffusion transformer is the plan's
    named follow-up and is a capacity experiment, not a repeat of this one.
 3. **Budget.** `full` has the most input dimensions to fit in the same 2,000

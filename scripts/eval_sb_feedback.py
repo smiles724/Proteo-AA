@@ -344,6 +344,32 @@ def report(record):
         "  parameter counts match, so the controls as RUN do compute a packing\n"
         "  and discard it; that is an artefact of the matching, not the method.)\n"
     )
+    for entry in record.get("per_sigma") or []:
+        base = (entry["arms"].get("bb0") or {}).get("backbone_rmsd")
+        head = f"  [sigma_B = {entry['sigma']:.3f} A]"
+        print(f"{head}   bb0 backbone RMSD {base:.4f} A" if base else head)
+        print(
+            f"    {'arm':12s} {'BB RMSD':>9s} {'vs bb0':>10s} {'95% CI':>20s} "
+            f"{'|delta_a|':>10s}"
+        )
+        for name, arm in entry["arms"].items():
+            against = (entry["paired"].get(name) or {}).get("vs_bb0")
+            if against:
+                flag = "*" if against["low"] > 0 else " "
+                delta = f"{against['mean']:+.4f}{flag}"
+                interval = f"[{against['low']:+.4f}, {against['high']:+.4f}]"
+            else:
+                delta, interval = "-", ""
+            norm = arm.get("delta_a_norm")
+            norm_cell = f"{norm:10.4f}" if norm is not None else f"{'-':>10s}"
+            print(
+                f"    {name:12s} {arm['backbone_rmsd']:9.4f} {delta:>10s} "
+                f"{interval:>20s} {norm_cell}"
+            )
+        print()
+    print("  * = the paired interval excludes zero. Read these rows, not just the")
+    print("  pooled table: the proposal's own difficulty varies ~8x across the")
+    print("  sweep, so pooling averages over regimes that behave differently.\n")
     passed, lines = verdict(record)
     for line in lines:
         print(f"  {line}")
@@ -804,6 +830,42 @@ def main(argv=None):
             if any(f"sc_{key}" in r for r in arm_rows):
                 entry[f"sc_{key}"] = _mean(arm_rows, f"sc_{key}")
         arms[name] = entry
+
+    # Per sigma as well as pooled. Not optional reporting: the proposal's own
+    # difficulty varies ~8x across this sweep, so a pooled number averages over
+    # regimes that behave differently -- and an arm that helps at low noise and
+    # not at high noise is a real outcome that pooling hides entirely.
+    def at(name, value):
+        return [r for r in by_arm.get(name, []) if abs(r["sigma"] - value) < 1e-9]
+
+    per_sigma = []
+    for value in sigmas:
+        entry = dict(sigma=float(value), arms={}, paired={})
+        for name in arm_names:
+            rows_at = at(name, value)
+            if not rows_at:
+                continue
+            summary = {key: _mean(rows_at, key) for key in bb_metrics.HEADLINE}
+            summary["n"] = len(rows_at)
+            for key in ("delta_a_norm", "relative_residual"):
+                if any(key in r for r in rows_at):
+                    summary[key] = _mean(rows_at, key)
+            entry["arms"][name] = summary
+        for name in entry["arms"]:
+            if name == "bb0":
+                continue
+            entry["paired"][name] = {}
+            for base in dict.fromkeys(["bb0", "refine", "bb_only", "generic"]):
+                if base == name or base not in entry["arms"]:
+                    continue
+                deltas = _paired_deltas(at(name, value), at(base, value), "backbone_rmsd")
+                if not deltas:
+                    continue
+                mean, low, high = ev.paired_bootstrap(list(deltas.values()), seed=args.seed)
+                entry["paired"][name][f"vs_{base}"] = dict(
+                    mean=mean, low=low, high=high, n=len(deltas)
+                )
+        per_sigma.append(entry)
 
     # Paired intervals: the delta is formed within a target before anything is
     # averaged, because per-target difficulty varies far more than the

@@ -971,9 +971,25 @@ def main(argv=None):
         result["upstream_cache"] = upstream_cache.stats()
         result["conditioning_cache"] = conditioning_cache.stats()
         logger.info("caches: %s", json.dumps(result["upstream_cache"], default=str))
-        if args.cache_upstream:
+        # Only the run that computed something writes. Arms that loaded a
+        # complete cache have zero misses and nothing to add, and rewriting a
+        # 500 MB file they did not change is both wasted work and a race: the
+        # three arms share one cache path by design, and two of them running
+        # concurrently would interleave torch.save on it. The previous suite got
+        # away with that; it was luck, not design.
+        if args.cache_upstream and upstream_cache.misses:
             upstream_cache.save(args.cache_upstream)
-            logger.info("wrote upstream cache -> %s", args.cache_upstream)
+            logger.info(
+                "wrote upstream cache (%d new state(s)) -> %s",
+                upstream_cache.misses,
+                args.cache_upstream,
+            )
+        elif args.cache_upstream:
+            logger.info(
+                "upstream cache unchanged (%d hits, 0 misses); not rewriting %s",
+                upstream_cache.hits,
+                args.cache_upstream,
+            )
     logger.info("done: %s", result)
     (out / "result.json").write_text(json.dumps(result, indent=2))
     return 0

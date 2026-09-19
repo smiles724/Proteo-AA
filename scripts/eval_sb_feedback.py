@@ -1294,6 +1294,14 @@ def main(argv=None):
         fampnn=provenance.weight_record(checkpoint, variant=args.fampnn_weights),
         arms=arms,
         paired=paired,
+        # Computed just above -- one bootstrap per (sigma, arm, reference) --
+        # and, until now, dropped on the floor: never written here and so never
+        # printed by report(), which has always had the code to display it. The
+        # per-sigma breakdown is where the late pilot's two sharpest findings
+        # came from (the gain lives where there is least to gain; SC-specificity
+        # inverts at one noise level), and both had to be recovered from
+        # per_target.csv by hand because the tool silently withheld them.
+        per_sigma=per_sigma,
         skipped=skipped,
         seconds=round(time.time() - started, 1),
     )

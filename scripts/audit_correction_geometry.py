@@ -106,13 +106,18 @@ def displacement_stats(before, after, keep):
     supervised backbone atoms. Superposition uses the evaluator's own Kabsch so
     the alignment convention matches every other number in this pipeline.
     """
-    a, b = before.reshape(-1, 3)[keep], after.reshape(-1, 3)[keep]
+    # On the CPU: superposed_rmsd builds its weight tensor there, so a CUDA
+    # input is a device mismatch inside the einsum rather than an error here.
+    a = before.reshape(-1, 3)[keep].detach().cpu()
+    b = after.reshape(-1, 3)[keep].detach().cpu()
     offset = (b - a).norm(dim=-1)
     rms = float(offset.pow(2).mean().sqrt())
-    weight = torch.ones(a.shape[0], device=a.device)
-    aligned = bb_metrics._kabsch(b[None], a[None], weight[None])[0]
-    residual = (aligned - a).norm(dim=-1)
-    rms_super = float(residual.pow(2).mean().sqrt())
+    # The evaluator's own superposition, called the way it expects. _kabsch
+    # takes UNBATCHED [L, 3] and returns post-superposition DISTANCES, not
+    # aligned coordinates; passing it a batched pair and subtracting the result
+    # is a shape error at best. superposed_rmsd is the wrapper that gets both
+    # right, so use it rather than reaching past it.
+    rms_super = bb_metrics.superposed_rmsd(b, a)
     quantiles = torch.tensor([0.5, 0.95], device=offset.device)
     median, p95 = (float(v) for v in torch.quantile(offset, quantiles))
     return dict(
@@ -122,7 +127,9 @@ def displacement_stats(before, after, keep):
         # 1.0 means the correction is purely a pose change; 0.0 means it is
         # entirely internal.
         rigid_fraction=(
-            float(max(0.0, 1.0 - (rms_super**2) / rms**2)) if rms > 1e-12 else 0.0
+            float(max(0.0, 1.0 - (rms_super**2) / rms**2))
+            if rms > 1e-12 and rms_super == rms_super  # nan-safe
+            else 0.0
         ),
         displacement_median=median,
         displacement_p95=p95,

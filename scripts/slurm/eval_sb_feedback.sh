@@ -29,7 +29,7 @@
 # E2 have different same-architecture BB-only controls, and a single verdict
 # cannot speak for both.
 #
-#   CONFIG=configs/couple_early_e1.yaml TAG=e1_exit \
+#   CONFIG=configs/couple_early_e1.yaml TAG=e1_exit CANDIDATE=early_s_full \
 #   ARMS="early_s_full=$R/early_s_full_*/checkpoints/final.pt \
 #         early_s_bb_only=$R/early_s_bb_only_*/checkpoints/final.pt \
 #         early_s_generic=$R/early_s_generic_*/checkpoints/final.pt" \
@@ -59,6 +59,11 @@ N_SIGMA="${N_SIGMA:-4}"
 MAX_TARGETS="${MAX_TARGETS:-64}"
 PERTURB_DEGREES="${PERTURB_DEGREES:-60}"
 SEED="${SEED:-0}"
+# Which arm the verdict is for, and which the matched-conformation control
+# perturbs. Required whenever two arms are variant='full' -- atom_sz_full and
+# atom_s_full both are, so without it the answer would depend on the order the
+# ARMS list happens to be in.
+CANDIDATE="${CANDIDATE:-}"
 
 mkdir -p "$OUT"
 cd "$ROOT"
@@ -94,6 +99,7 @@ python scripts/eval_sb_feedback.py \
     --max-targets "$MAX_TARGETS" \
     --perturb-degrees "$PERTURB_DEGREES" \
     --seed "$SEED" \
+    ${CANDIDATE:+--candidate "$CANDIDATE"} \
     ${EXTRA_ARGS:-}
 
 echo "sb exit evaluation done -> $OUT"

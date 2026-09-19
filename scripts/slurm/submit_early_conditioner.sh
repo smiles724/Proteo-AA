@@ -9,13 +9,19 @@
 # it rather than whichever prefix fit.
 #
 #   ARMS="atom_sz_full atom_sz_bb_only atom_s_full" \
-#   AFTEROK=119659 bash scripts/slurm/submit_early_conditioner.sh
+#   AFTEROK=119661:119662:119663 bash scripts/slurm/submit_early_conditioner.sh
 #
-# AFTEROK gates the arms behind a smoke job. It is resolved at submit time
-# rather than passed through blindly: a dependency on an already-COMPLETED job
-# is satisfied immediately (so it is dropped), and one on a job that FAILED
-# would leave the arms permanently unsatisfiable (so the whole batch is
-# abandoned, which is the point of the gate).
+# AFTEROK is a colon-separated list of job ids the arms wait for. It is resolved
+# at submit time rather than passed through blindly: ids that have already
+# COMPLETED are dropped (the dependency is satisfied), and if any has FAILED the
+# whole batch is abandoned, which is the point of a gate.
+#
+# WHAT THIS DOES AND DOES NOT ENFORCE. Gating E2 on E1's job ids makes the
+# ORDER real -- E2 cannot start before E1 finishes. It does not make E2
+# conditional on anyone having READ E1's result, and no Slurm dependency can.
+# If E1 reads out badly, `scancel` the E2 jobs; nothing here will do it.
+# Submitting E2 and relying on the account's submit cap to hold it back is not
+# staging at all: the cap frees at an unrelated moment.
 set -uo pipefail
 
 ARMS="${ARMS:?set ARMS to a space-separated list of arm names}"
@@ -38,23 +44,30 @@ unset CUDA_VISIBLE_DEVICES
 
 say() { echo "[$(date -Is)] $*" | tee -a "$LOG"; }
 
-gate_state() {
-    [ -z "$AFTEROK" ] && { echo NONE; return; }
-    local state
-    state=$(sacct -n -X -j "$AFTEROK" -o State 2>/dev/null | head -1 | tr -d ' ')
-    echo "${state:-UNKNOWN}"
+# Drop satisfied gates, abandon on a failed one, keep the rest. Echoes the
+# remaining gate list on stdout; returns 1 if the batch should be abandoned.
+resolve_gates() {
+    local remaining="" id state
+    for id in $(echo "$AFTEROK" | tr ':' ' '); do
+        state=$(sacct -n -X -j "$id" -o State 2>/dev/null | head -1 | tr -d ' ')
+        case "${state:-UNKNOWN}" in
+            COMPLETED) say "gate $id completed" >&2 ;;
+            FAILED|CANCELLED*|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY)
+                say "gate $id ended $state" >&2; return 1 ;;
+            *) remaining="${remaining:+$remaining:}$id" ;;
+        esac
+    done
+    echo "$remaining"
 }
 
 pending="$ARMS"
 started=$(date +%s)
 while [ -n "$pending" ]; do
-    state=$(gate_state)
-    case "$state" in
-        COMPLETED) say "gate $AFTEROK completed; submitting without a dependency"
-                   AFTEROK="" ;;
-        FAILED|CANCELLED*|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY)
-                   say "gate $AFTEROK ended $state; abandoning [$pending]"; exit 1 ;;
-    esac
+    if [ -n "$AFTEROK" ]; then
+        if ! AFTEROK=$(resolve_gates); then
+            say "a gate job ended badly; abandoning [$pending]"; exit 1
+        fi
+    fi
     dep=""
     [ -n "$AFTEROK" ] && dep="--dependency=afterok:$AFTEROK"
 

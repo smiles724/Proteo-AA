@@ -43,8 +43,15 @@ the wrong one is a shape error at the hook rather than a silent broadcast.
 `pxf.couple.readout.FeedbackReadout` exactly as it stands: same feature groups
 in the same order, same LayerNorm, same sequence embedding, same
 `full`/`bb_only`/`generic` controls. Only the destination changes. This is the
-controlled version of "the site was the problem", and its null result would
-mean the representation, not the site, is what the late pilot was limited by.
+controlled version of "the site was the problem".
+
+What its null result would and would not license: it would rule out *the site
+alone* as the explanation, holding the representation, the budget and the data
+fixed. It would **not** establish that the representation is the bottleneck —
+2,000 steps, the frozen donors' capacity, the 512-event pool and the σ window
+are all still live alternatives, and the late pilot already showed that two of
+its own arms were not converged at this budget. E2 tests one of those
+alternatives; it does not test them all.
 
 **E2 — the site and the representation.** `AtomConditioner` encodes the
 predicted atoms directly: a learned atom37-slot embedding, residue-local
@@ -95,15 +102,46 @@ The claim requires beating the **same-architecture BB-only control** by
 regression. Explicitly *not* evidence: a larger residual, stronger perturbation
 sensitivity, or any improvement over `bb0` alone.
 
+`verdict()` enforces all of that, and returns one of three outcomes rather than
+a boolean. **`incomplete`** is not `do not proceed`: a run that never produced
+the evidence has neither shown nor disproved anything, and collapsing the two is
+how a missing control becomes a pass. It is returned when the candidate is
+ambiguous, when no same-architecture control ran, when a required paired
+interval is absent, or when `--no-sidechains` forfeited the chemistry half.
+Every condition is binding — including the side-chain tolerances
+(`SC_REGRESSION_LIMITS`), which were previously printed underneath the verdict
+without affecting it.
+
+One caveat the verdict cannot enforce: side-chain metrics are scored after
+transferring predictions onto native residue frames, which measures local
+packing accuracy well but says less about attachment geometry and environmental
+clashes on the arm's *own* backbone. `lddt_sc_env` and `bad_bond_fraction` are
+computed on the predicted structure and partly cover this; a dedicated
+per-backbone clash measurement does not exist yet and is not claimed.
+
 Three comparisons per experiment:
 
 * `early_s_full` vs `early_s_bb_only` — the SC-specificity test for E1;
 * `atom_sz_full` vs `atom_sz_bb_only` — the same test for E2;
 * `atom_sz_full` vs `atom_s_full` — whether the pair term earns its cost.
 
-Plus the `perturbed` arm (the candidate reading a rotamer-perturbed packing,
-backbone and sequence fixed) and `refine` (one real sampler step, the
+Plus the `perturbed` arm and `refine` (one real sampler step, the
 comparable-cost baseline that is not feedback at all).
+
+The `perturbed` arm **re-encodes**. Substituting perturbed coordinates into the
+existing packed state leaves `h_packed` — FaMPNN's node readout for the
+*original* structure — untouched, so every arm that reads it (`late_*`,
+`early_s_*`) would be handed original node features alongside perturbed χ and
+environment features. That is a partial intervention reported as a full one, and
+it understates the response in the direction that flatters the arm. `psCE` is
+carried over unchanged and the packer is not re-run, so this is explicitly a
+**geometry-only** intervention: the confidences describe the packing that was
+produced, not the one being read. E2 is unaffected either way, since it
+recomputes everything from `coords37`.
+
+Which arm gets perturbed is prespecified via `--candidate`, not taken as "the
+first arm whose variant is `full`" — `atom_sz_full` and `atom_s_full` are both
+`full`, so that made it depend on flag order.
 
 ## Why the results are comparable to the late pilot's
 
@@ -146,9 +184,19 @@ disagreement is resolved once, in the module, rather than per call site:
   σ. Frozen as the standard Gaussian with σ = 0.8 Å (the second form).
 * **Local coordinate scale** — "`q/10`" and "in Å". Frozen as `q/10`.
 
-Both alternatives differ only by a scale the first linear layer can absorb,
-which is exactly why leaving the choice implicit would have been a silent
-inconsistency between arms rather than a visible one.
+These are **not** equivalent choices that a linear layer absorbs, and saying so
+would have been wrong in one of the two cases:
+
+* `q/10` is a genuine reparameterization the first `Linear` can represent — but
+  initialization scale and a finite optimization budget are not invariant to it,
+  so it is recorded rather than shrugged at.
+* RBF bandwidth is **not** absorbable at all. It changes the nonlinear basis
+  functions, so the same weights mean something else. σ = 0.8 Å matches the last
+  explicit formula given and is frozen on that basis.
+
+Either way, leaving the choice implicit would have been a silent inconsistency
+between arms; the checkpoint compatibility check above is what makes it a loud
+one.
 
 Ties are broken deterministically by index (stable sort) in both the residue
 graph and the atom-pair selection, so two runs on one structure select the same
@@ -176,8 +224,27 @@ encoder gradient there would mean the control is reading something.
 
 Activation checkpointing stays off. Protenix recomputes the forward during
 backward and the injection hooks make the recomputation diverge
-(`CheckpointError: a different number of tensors was saved`). The conditioners
-are small and the backbone is frozen, so the memory is not needed.
+(`CheckpointError: a different number of tensors was saved`).
+
+"The backbone is frozen, so the memory is not needed" would be the wrong reason.
+Frozen *weights* do not make *activations* free: the late adapter's gradient
+reached three decoder blocks, while `Δz` enters `z_pair`, which every one of the
+24 transformer blocks reads as an attention bias — so the retained graph is a
+different size. Measured on the longest structure in the training manifest
+(`AF-A0A0F9IL42`, L = 510), peak RSS over a loaded-models baseline of 4.40 GB:
+
+| arm | peak RSS | activations |
+|---|---|---|
+| `late_full` | 5.27 GB | +0.87 |
+| `early_s_full` | 5.85 GB | +1.45 |
+| `atom_s_full` | 5.89 GB | +1.49 |
+| `atom_sz_full` | 6.90 GB | **+2.50** |
+
+So the early site costs ~1.7× the late one and the pair branch ~2.9×, which is
+comfortable against an H200 and a 128 GB host allocation but is a measurement
+rather than an assumption. These are CPU numbers, so they include the
+interpreter and the weights and are an upper bound on device allocation; the
+ordering is the transferable part.
 
 ## Checkpoints refuse the wrong architecture
 
@@ -206,6 +273,32 @@ check that cannot fire:
   and refuses any record whose `(arch, variant, pair)` triple is not a row of
   `ARMS`.
 
+There *is* a second independent source of truth, though, and it is not the
+weights: it is **the feature construction the installed code implements**. A
+checkpoint records what it was trained against, so the two can be compared, and
+the settings split in two:
+
+* **Reconstructed** — `max_neighbours`, `neighbour_radius`, `max_atom_pairs`,
+  `atom_pair_radius`, `d_hidden`, `d_noise`, the readout's `sequence` width.
+  These are constructor arguments, so a loaded module is rebuilt with the
+  checkpoint's values and is the function that was trained. An override of
+  today's default is logged, not silently applied.
+* **Refused** — `rbf_sigma`, `rbf_centres`, `coordinate_scale`, `pair_types` and
+  every layer width. These are not constructor arguments, so a checkpoint
+  recording different ones came from code this build does not implement; the
+  shapes still match and the weights would load, describing a different function
+  of a different input.
+
+`zero_initialized` and `parameters` are excluded: both are properties of a
+particular set of weights, and a trained checkpoint necessarily disagrees with a
+fresh module on the first.
+
+Separately, `check_arms_comparable` refuses a *set* of arms trained under
+different reconstructed settings. Each can load correctly and the set still not
+be an experiment — 16 neighbours against 32 differ in receptive field and
+capacity, so the delta between them is not attributable to the information, and
+nothing in either checkpoint alone can see it.
+
 ## Running it
 
 ```bash
@@ -223,19 +316,34 @@ for arm in atom_sz_full atom_sz_bb_only atom_s_full; do
     ARM=$arm sbatch scripts/slurm/train_early_conditioner.sh
 done
 
-# One architecture per evaluation run.
+# One architecture per evaluation run. CANDIDATE names the arm the verdict is
+# for and the arm the perturbed control perturbs; it is required for E2, where
+# atom_sz_full and atom_s_full are both variant='full'.
 R=/hai/scratch/yfsun/proteo_aa_runs/pxf_early_cond
-CONFIG=configs/couple_early_e1.yaml TAG=e1_exit \
+CONFIG=configs/couple_early_e1.yaml TAG=e1_exit CANDIDATE=early_s_full \
 ARMS="early_s_full=$R/early_s_full_<job>/checkpoints/final.pt \
       early_s_bb_only=$R/early_s_bb_only_<job>/checkpoints/final.pt \
       early_s_generic=$R/early_s_generic_<job>/checkpoints/final.pt" \
 sbatch scripts/slurm/eval_sb_feedback.sh
 ```
 
-Report both weightings. The late pilot's only gain robust to the EMA choice was
-the σ-only control's; `--no-ema` re-scores the same checkpoints raw, and a
-candidate whose advantage exists only under weight averaging has not been shown
-to have learned a correction.
+The arm labels are the names in `ARMS`, and each checkpoint is held to the label
+it is given — pointing `early_s_full=` at the control's file is refused rather
+than reported under the wrong name.
+
+**E2 runs after E1, and the dependency is explicit.** `submit_early_conditioner.sh`
+gates E2 on E1's job ids, so the order is real. It is *not* review-gated, and no
+Slurm dependency can be: if E1 reads out badly, `scancel` the E2 jobs.
+
+Report both weightings. EMA at `relative_length` 0.25 is the **prespecified**
+evaluation policy — fixed before these runs, the same one the late pilot used —
+so a gain measured under it is legitimate evidence, not a weaker kind of result.
+`--no-ema` re-scores the same checkpoints raw as a *sensitivity check*: it says
+how much of the effect depends on the weight-averaging choice, which is worth
+knowing because the late pilot's two feature-reading arms changed sign at high σ
+under it while its σ-only control did not. A candidate that survives only under
+EMA has still met the criterion; it has also shown it is not converged, which
+belongs in the writeup rather than in the verdict.
 
 ## What is deliberately not in these two experiments
 

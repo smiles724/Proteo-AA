@@ -973,10 +973,18 @@ def main(argv=None):
                     if cycle.bb1_flat is not None
                     else 0.0
                 )
-                row["delta_a_norm"] = float(cycle.feedback_stats.get("delta_a_norm", 0.0))
-                row["relative_residual"] = float(
-                    cycle.feedback_stats.get("relative_residual", 0.0)
+                # Whichever residual this architecture emits. The late adapter
+                # reports delta_a_norm; an early conditioner reports
+                # delta_s_norm (and delta_z_norm), so reading only the first
+                # left the column a flat 0.0000 for every early arm -- a
+                # diagnostic that silently says "no correction" while
+                # val_max_abs_change shows 1.9 A of movement.
+                stats = cycle.feedback_stats
+                row["delta_a_norm"] = float(
+                    stats.get("delta_a_norm", stats.get("delta_s_norm", 0.0))
                 )
+                row["delta_z_norm"] = float(stats.get("delta_z_norm", 0.0))
+                row["relative_residual"] = float(stats.get("relative_residual", 0.0))
                 rows.append(row)
             if was_training:
                 adapters.train()
@@ -991,6 +999,7 @@ def main(argv=None):
                 val_improvement=mean("bb0") - mean("bb1"),
                 val_fraction_improved=improved / len(rows),
                 val_delta_a_norm=mean("delta_a_norm"),
+                val_delta_z_norm=mean("delta_z_norm"),
                 val_relative_residual=mean("relative_residual"),
                 val_max_abs_change=max(r["max_abs_change"] for r in rows),
             )

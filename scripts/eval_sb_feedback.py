@@ -54,7 +54,6 @@ import logging
 import math
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
@@ -187,6 +186,14 @@ def parse_args(argv=None):
         help="score the EMA weights when a checkpoint has them (default)",
     )
     p.add_argument("--no-ema", dest="ema", action="store_false")
+    p.add_argument(
+        "--candidate",
+        default=None,
+        help="which arm label the verdict is for. Required when more than one "
+        "arm could be the candidate -- E2's atom_sz_full and atom_s_full are "
+        "both variant='full', so picking one by position would make the verdict "
+        "depend on the order the --checkpoint flags were typed",
+    )
     p.add_argument("--allow-unpinned-sources", action="store_true")
     p.add_argument("--fail-on-no-gain", action="store_true")
     return p.parse_args(argv)
@@ -205,75 +212,184 @@ def required_gain(baseline):
     return max(MIN_ABSOLUTE_GAIN, MIN_RELATIVE_GAIN * float(baseline))
 
 
-def verdict(record):
-    """The exit decision, and the reasons for it. Returns ``(passed, lines)``."""
+# The prespecified no-regression checks, as (metric, absolute tolerance). A
+# correction that buys backbone accuracy by wrecking side-chain chemistry has
+# not bought anything, so these are part of the criterion rather than context
+# printed underneath it. Tolerances are absolute on the sc0 -> sc1 change and
+# are deliberately loose: the question is "no MATERIAL regression", and a tight
+# bound would fail on packing-sampler noise.
+SC_REGRESSION_LIMITS = (
+    ("symmetry_rmsd", 0.05),
+    ("bad_bond_fraction", 0.005),
+    ("rotamer_outlier_fraction_40deg", 0.02),
+)
+
+# Verdicts. `incomplete` is distinct from `fail` on purpose: a run that did not
+# produce the evidence has not disproved anything, and collapsing the two into
+# a boolean is how a missing control becomes a pass.
+PASS, FAIL, INCOMPLETE = "pass", "do not proceed", "incomplete"
+
+
+def same_architecture_controls(arms, candidate):
+    """The controls that can speak for ``candidate``: its own architecture only.
+
+    An E1 BB-only arm is not a control for an E2 candidate. It differs in
+    representation, capacity and cost, so beating it would say nothing about
+    whether *this* architecture's side-chain input earned anything. When both
+    experiments are scored in one run, selecting the best-looking BB-only arm
+    across architectures is exactly the comparison the criterion forbids.
+    """
+    arch = arms[candidate].get("arch")
+    return [
+        name
+        for name, arm in arms.items()
+        if name != candidate
+        and arm.get("arch") == arch
+        and arm.get("variant") in ("bb_only", "generic")
+    ]
+
+
+def comparison_plan(arms):
+    """``(candidates, {candidate: [reference, ...]})`` -- stated, not inferred.
+
+    Built once and used for the pooled intervals, the per-sigma intervals and
+    the verdict alike, so the three cannot disagree about which comparisons the
+    experiment was supposed to make. Inferring them from variant names was how
+    the per-sigma table came to omit every control whose arm was not literally
+    named ``bb_only``.
+    """
+    candidates = [
+        name
+        for name, arm in arms.items()
+        if arm.get("variant") == "full" and name not in ("bb0", "zero", "refine")
+    ]
+    plan = {}
+    for name in candidates:
+        references = ["bb0", "refine", *same_architecture_controls(arms, name)]
+        # The pair branch's own ablation: same architecture, same variant, pair
+        # switched off. Not reachable by variant name -- both are "full".
+        references += [
+            other
+            for other in candidates
+            if other != name
+            and arms[other].get("arch") == arms[name].get("arch")
+            and arms[other].get("pair") != arms[name].get("pair")
+        ]
+        # The matched-conformation control, when it was produced for this arm.
+        if arms.get("perturbed", {}).get("source_arm") == name:
+            references.append("perturbed")
+        plan[name] = [r for r in dict.fromkeys(references) if r in arms]
+    return candidates, plan
+
+
+def pairings(arms):
+    """``{arm: [reference, ...]}`` -- every paired interval the run should form.
+
+    A superset of :func:`comparison_plan`: the candidates' planned references,
+    plus every other arm against ``bb0`` so the table can still report what each
+    one did on its own. One function, so the pooled intervals, the per-sigma
+    intervals and the verdict cannot disagree about what was compared.
+    """
+    _candidates, plan = comparison_plan(arms)
+    out = {}
+    for name in arms:
+        if name == "bb0":
+            continue
+        references = ["bb0", *plan.get(name, [])]
+        if arms.get(name, {}).get("variant") in ("bb_only", "generic"):
+            references.append("refine")
+        if name == "perturbed" and arms[name].get("source_arm"):
+            # The direction the mechanism question is asked in: how much of the
+            # candidate's gain survives re-encoding a perturbed packing.
+            references.append(arms[name]["source_arm"])
+        out[name] = [r for r in dict.fromkeys(references) if r in arms and r != name]
+    return out
+
+
+def verdict(record, candidate=None):
+    """The exit decision and its reasons. Returns ``(outcome, lines)``.
+
+    Every condition below is binding. An earlier version printed the missing
+    ones and returned True anyway: a synthetic record with no trained control at
+    all and a bad-bond fraction going 0.002 -> 0.500 passed, because only the
+    RMSD arithmetic touched the return value. Anything the criterion names and
+    the run did not measure now produces ``incomplete``.
+    """
     arms = record["arms"]
     lines = []
-    candidates = [name for name in arms if arms[name].get("variant") == "full"]
+    paired = record.get("paired", {})
+    candidates, plan = comparison_plan(arms)
     if not candidates:
-        return False, ["no arm records variant='full', so there is no candidate"]
-    candidate = candidates[0]
-    if len(candidates) > 1:
-        # Two architectures in one run have two different same-architecture
-        # controls, so one verdict cannot speak for both.
-        lines.append(
-            f"{len(candidates)} arms record variant='full' ({', '.join(candidates)}); "
-            f"the verdict below is for {candidate} only. Score each architecture "
-            "in its own run, against its own BB-only control"
-        )
+        return INCOMPLETE, ["no arm records variant='full', so there is no candidate"]
+    if candidate is None:
+        if len(candidates) > 1:
+            return INCOMPLETE, [
+                f"{len(candidates)} arms could be the candidate "
+                f"({', '.join(candidates)}) and nothing in the record says which "
+                "was prespecified. Pass --candidate, or score one architecture "
+                "per run: each needs its own same-architecture BB-only control"
+            ]
+        candidate = candidates[0]
+    if candidate not in arms:
+        return INCOMPLETE, [f"--candidate {candidate!r} did not run"]
+    lines.append(
+        f"candidate: {candidate} "
+        f"(arch={arms[candidate].get('arch')}, pair={arms[candidate].get('pair')})"
+    )
+
+    failures, missing = [], []
 
     # The wiring check gates everything: without it the comparison is not
     # between bb0 and a correction, it is between two different calls.
     wiring = arms.get("zero", {}).get("max_abs_deviation_from_bb0")
     if wiring is None:
-        lines.append("WIRING: not measured -- the zero-feedback arm did not run")
-        wired = False
+        missing.append("the zero-feedback wiring arm did not run")
     else:
-        wired = wiring <= WIRING_TOLERANCE
         site = arms.get("zero", {}).get("zero_site") or "decoder"
         lines.append(
             f"WIRING: zero feedback at the {site} site deviates from bb0 by "
             f"{wiring:.2e} A, tolerance {WIRING_TOLERANCE:.0e} "
-            f"({'ok' if wired else 'FAILED'}). GPU non-determinism alone "
-            f"measures ~{GPU_NONDETERMINISM:.1e} A"
+            f"({'ok' if wiring <= WIRING_TOLERANCE else 'FAILED'}). GPU "
+            f"non-determinism alone measures ~{GPU_NONDETERMINISM:.1e} A"
         )
-
-    baseline_name, baseline = None, None
-    # The strongest useful comparable-cost alternative, not the weakest.
-    for name in (
-        "refine",
-        *[n for n in arms if arms[n].get("variant") in ("bb_only", "generic")],
-    ):
-        if name not in arms or name == candidate:
-            continue
-        value = arms[name].get("backbone_rmsd")
-        if value is None:
-            continue
-        if baseline is None or value < baseline:
-            baseline_name, baseline = name, value
-    if baseline is None:
-        lines.append(
-            "no comparable-cost alternative ran, so only the weak comparison "
-            "against the uncorrected proposal is available"
-        )
+        if wiring > WIRING_TOLERANCE:
+            failures.append("the zero-feedback arm does not reproduce bb0")
 
     proposal = arms["bb0"]["backbone_rmsd"]
     got = arms[candidate]["backbone_rmsd"]
     lines.append(f"bb0 backbone RMSD {proposal:.4f} A")
     lines.append(f"{candidate} backbone RMSD {got:.4f} A  (delta {proposal - got:+.4f})")
 
-    passed = wired
-    interval = record.get("paired", {}).get(candidate, {}).get("vs_bb0")
-    if interval:
-        mean, low, high = interval["mean"], interval["low"], interval["high"]
+    # 1. A correction happened at all.
+    interval = paired.get(candidate, {}).get("vs_bb0")
+    if not interval:
+        missing.append("no paired interval against bb0")
+    else:
         lines.append(
-            f"paired improvement over bb0: {mean:+.4f} A "
-            f"[{low:+.4f}, {high:+.4f}] (n={interval['n']})"
+            f"paired improvement over bb0: {interval['mean']:+.4f} A "
+            f"[{interval['low']:+.4f}, {interval['high']:+.4f}] (n={interval['n']})"
         )
-        if not (low > 0):
-            passed = False
-            lines.append("  the interval includes zero: not a demonstrated correction")
-    if baseline is not None:
+        if not interval["low"] > 0:
+            failures.append("the interval against bb0 includes zero")
+
+    # 2. A same-architecture BB-only control ran, and the candidate beats the
+    #    strongest comparable-cost alternative by the threshold.
+    controls = same_architecture_controls(arms, candidate)
+    if not controls:
+        missing.append(
+            f"no trained BB-only or generic control of architecture "
+            f"{arms[candidate].get('arch')!r} ran. Beating bb0 shows a correction "
+            "happened; a SIDE-CHAIN-specific claim needs the matched control"
+        )
+    alternatives = [
+        (name, arms[name]["backbone_rmsd"])
+        for name in ["refine", *controls]
+        if name in arms and arms[name].get("backbone_rmsd") is not None
+    ]
+    if not alternatives:
+        missing.append("no comparable-cost alternative ran")
+    else:
+        baseline_name, baseline = min(alternatives, key=lambda row: row[1])
         need = required_gain(baseline)
         gain = baseline - got
         lines.append(
@@ -281,45 +397,75 @@ def verdict(record):
             f"{baseline:.4f} A; gain {gain:+.4f} A, need >= {need:.4f}"
         )
         if gain < need:
-            passed = False
-            lines.append("  below the criterion")
-        against = record.get("paired", {}).get(candidate, {}).get(f"vs_{baseline_name}")
-        if against and not (against["low"] > 0):
-            passed = False
-            lines.append(
-                f"  paired interval against {baseline_name} includes zero: "
-                f"{against['mean']:+.4f} [{against['low']:+.4f}, {against['high']:+.4f}]"
+            failures.append(f"gain over {baseline_name} is below the criterion")
+        against = paired.get(candidate, {}).get(f"vs_{baseline_name}")
+        if not against:
+            missing.append(f"no paired interval against {baseline_name}")
+        elif not against["low"] > 0:
+            failures.append(
+                f"the paired interval against {baseline_name} includes zero "
+                f"({against['mean']:+.4f} [{against['low']:+.4f}, {against['high']:+.4f}])"
             )
-    else:
-        passed = False
 
-    specific = [
-        name for name in arms if arms[name].get("variant") in ("bb_only", "generic")
-    ]
-    if not specific:
-        lines.append(
-            "NO trained control ran. Beating bb0 shows a correction; claiming a "
-            "SIDE-CHAIN-specific benefit additionally requires beating the "
-            "trained BB-only and generic arms"
-        )
-    perturbed = arms.get("perturbed", {}).get("backbone_rmsd")
-    if perturbed is not None:
-        lines.append(
-            f"perturbed-SC arm {perturbed:.4f} A: the candidate keeps "
-            f"{got - perturbed:+.4f} A of its gain when the packing it reads is "
-            "rotamer-perturbed (more negative is better evidence of dependence "
-            "on the matched conformation)"
-        )
-    for key in ("symmetry_rmsd", "bad_bond_fraction", "rotamer_outlier_fraction_40deg"):
+    # 3. No material side-chain or chemistry regression. Part of the criterion,
+    #    not a footnote: buying backbone accuracy with broken geometry is not a
+    #    gain, and printing the numbers without testing them let a bad-bond
+    #    fraction of 0.5 through.
+    for key, tolerance in SC_REGRESSION_LIMITS:
         before = arms["bb0"].get(f"sc_{key}")
         after = arms[candidate].get(f"sc_{key}")
         if before is None or after is None:
+            missing.append(
+                f"side-chain metric {key} was not scored (--no-sidechains forfeits "
+                "the no-regression half of the criterion)"
+            )
             continue
-        lines.append(f"side chains, {key}: {before:.4f} -> {after:.4f} (sc0 -> sc1)")
-    return passed, lines
+        change = after - before
+        lines.append(
+            f"side chains, {key}: {before:.4f} -> {after:.4f} "
+            f"({change:+.4f}, tolerance +{tolerance:g})"
+        )
+        if change > tolerance:
+            failures.append(f"{key} regressed by {change:+.4f}")
+
+    # Reported, never scored: dependence on the matched conformation is
+    # diagnostic of the mechanism, and a threshold on it is not part of the
+    # criterion.
+    perturbed = arms.get("perturbed", {}).get("backbone_rmsd")
+    if perturbed is not None:
+        against = paired.get("perturbed", {}).get(f"vs_{candidate}")
+        detail = ""
+        if against:
+            detail = (
+                f", paired {against['mean']:+.4f} "
+                f"[{against['low']:+.4f}, {against['high']:+.4f}]"
+            )
+        lines.append(
+            f"perturbed-SC arm {perturbed:.4f} A: the candidate keeps "
+            f"{got - perturbed:+.4f} A of its gain when the packing it reads is "
+            f"re-encoded after a rotamer perturbation{detail} (diagnostic, not "
+            "part of the criterion)"
+        )
+    for other in plan.get(candidate, []):
+        if arms.get(other, {}).get("variant") != "full":
+            continue
+        against = paired.get(candidate, {}).get(f"vs_{other}")
+        if against:
+            lines.append(
+                f"pair branch, {candidate} vs {other}: {against['mean']:+.4f} A "
+                f"[{against['low']:+.4f}, {against['high']:+.4f}]"
+            )
+
+    for line in missing:
+        lines.append(f"  MISSING: {line}")
+    for line in failures:
+        lines.append(f"  FAILED: {line}")
+    if missing:
+        return INCOMPLETE, lines
+    return (FAIL if failures else PASS), lines
 
 
-def report(record):
+def report(record, candidate=None):
     print(f"\n=== SC -> BB corrective event: {record['label']} ===")
     print(
         f"  {record['n_targets']} target(s), {record['n_events']} event(s), "
@@ -387,16 +533,22 @@ def report(record):
     print("  * = the paired interval excludes zero. Read these rows, not just the")
     print("  pooled table: the proposal's own difficulty varies ~8x across the")
     print("  sweep, so pooling averages over regimes that behave differently.\n")
-    passed, lines = verdict(record)
+    outcome, lines = verdict(record, candidate=candidate)
     for line in lines:
         print(f"  {line}")
-    print(f"\n  VERDICT: {'PASS' if passed else 'do not proceed'}")
+    print(f"\n  VERDICT: {outcome}")
+    if outcome == INCOMPLETE:
+        print(
+            "  'incomplete' is not 'do not proceed': the run did not produce\n"
+            "  evidence the criterion requires, so it has neither shown nor\n"
+            "  disproved anything. Supply the missing arms and re-score.\n"
+        )
     print(
         "  Passing licenses inserting the corrected estimate into the sampler's\n"
         "  normal update and testing one event in a full rollout. It does not\n"
         "  license the two-event training stage, which is a separate experiment.\n"
     )
-    return passed
+    return outcome
 
 
 # --- the arms ---------------------------------------------------------------
@@ -421,7 +573,10 @@ def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device, expect=
     from pxf.couple.conditioning import (
         AtomConditioner,
         EarlySingleConditioner,
+        check_feature_schema,
         check_is_the_expected_arm,
+        overridden_settings,
+        reconstruct_kwargs,
     )
     from pxf.couple.readout import FeedbackPath, SigmaWindow
 
@@ -436,31 +591,41 @@ def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device, expect=
     gate_cfg = {k: v for k, v in gate_cfg.items() if k != "kind"}
     gate = SigmaWindow(**gate_cfg) if gate_cfg else None
     settings = state.get("settings") or {}
-    d_hidden = int(identity.get("d_hidden", 256))
     # Before building anything: the record has to name an arm, and the arm the
     # caller's label claims. A constructor would also reject an impossible
     # variant, but it would name whichever field it happened to read first
     # rather than the actual problem.
     arm_name = check_is_the_expected_arm(identity, expect, path=path) if identity else None
+    # Rebuild the function that was TRAINED, not the one today's constants
+    # describe. Every setting the checkpoint records and the constructor accepts
+    # is taken from the checkpoint; anything left over is compared below.
+    built = reconstruct_kwargs(identity)
+    for name, value, default in overridden_settings(identity):
+        logger.warning(
+            "%s was trained with %s=%r; this build defaults to %r. Using the "
+            "checkpoint's value -- and note this arm is not comparable to one "
+            "trained on the default",
+            path,
+            name,
+            value,
+            default,
+        )
     if arch == "late":
-        module = FeedbackPath(
-            c_h_V, c_token, variant=variant, gate=gate, d_hidden=d_hidden
-        )
+        module = FeedbackPath(c_h_V, c_token, variant=variant, gate=gate, **built)
     elif arch == "early_s":
-        module = EarlySingleConditioner(
-            c_h_V, c_s, variant=variant, gate=gate, d_hidden=d_hidden
-        )
+        module = EarlySingleConditioner(c_h_V, c_s, variant=variant, gate=gate, **built)
     elif arch == "atom":
+        built.pop("sequence_width", None)  # E2 has its own embedding, not the readout's
         module = AtomConditioner(
-            c_s,
-            c_z,
-            variant=variant,
-            pair=bool(identity.get("pair", True)),
-            gate=gate,
-            d_hidden=d_hidden,
+            c_s, c_z, variant=variant, pair=bool(identity.get("pair", True)),
+            gate=gate, **built,
         )
     else:
         raise SystemExit(f"{path} records unknown SC->BB architecture {arch!r}")
+    if identity:
+        # The one comparison with an independent second source of truth: what
+        # the checkpoint says its features were, against what this code computes.
+        check_feature_schema(identity, module.identity(), path=path)
     weights = {
         k[len("sc_to_bb.") :]: v
         for k, v in state["adapters"].items()
@@ -489,6 +654,33 @@ def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device, expect=
         bs_policy=settings.get("bs_policy"),
         pack_steps=settings.get("pack_steps"),
     )
+
+
+def check_arms_comparable(trained):
+    """Refuse a comparison between arms trained under different settings.
+
+    Each arm can load correctly and the set still not be an experiment: one
+    trained with 16 neighbours against one trained with 32 differ in receptive
+    field and capacity, so the delta between them is not attributable to the
+    information. Nothing in either checkpoint alone can see this.
+    """
+    from pxf.couple.conditioning import comparability
+
+    identities = {
+        label: arm["module"].identity()
+        for label, arm in trained.items()
+        if hasattr(arm["module"], "identity")
+    }
+    if len(identities) < 2:
+        return
+    differences = comparability(identities)
+    if differences:
+        raise SystemExit(
+            "these arms were trained under different feature settings, so a "
+            "difference between them is not attributable to the information "
+            "they read: "
+            + "; ".join(f"{key}={values}" for key, values in differences)
+        )
 
 
 def zero_payload(trained, *, length, c_token, c_s, c_z, device):
@@ -537,8 +729,8 @@ def main(argv=None):
         path = Path(args.report) / METRICS_FILE
         if not path.is_file():
             raise SystemExit(f"{path} does not exist; run the evaluation first")
-        passed = report(json.loads(path.read_text()))
-        return 0 if passed or not args.fail_on_no_gain else 1
+        outcome = report(json.loads(path.read_text()), candidate=args.candidate)
+        return 0 if outcome == PASS or not args.fail_on_no_gain else 1
 
     import yaml
     from fampnn.model.sd_model import SeqDenoiser
@@ -629,6 +821,7 @@ def main(argv=None):
             trained[label]["is_ema"],
             trained[label]["bs_policy"],
         )
+    check_arms_comparable(trained)
     policies = {a["bs_policy"] for a in trained.values() if a["bs_policy"]}
     if len(policies) > 1:
         raise SystemExit(
@@ -654,8 +847,25 @@ def main(argv=None):
     bs_delta_h = None if bs_policy == "bypass" else UNSET
 
     arm_names = ["bb0", "zero", *trained, "refine"]
+    # Which arm the matched-conformation control perturbs. Stated once here
+    # rather than re-derived per event as "the first arm whose variant is full",
+    # which made it depend on the order the --checkpoint flags were typed as
+    # soon as two arms shared that variant (atom_sz_full and atom_s_full do).
+    perturb_source = None
     if trained:
+        if args.candidate and args.candidate in trained:
+            perturb_source = args.candidate
+        else:
+            full_arms = [k for k, a in trained.items() if a["variant"] == "full"]
+            if len(full_arms) > 1:
+                raise SystemExit(
+                    f"{len(full_arms)} arms are variant='full' ({full_arms}); pass "
+                    "--candidate to say which one the perturbed control should "
+                    "perturb, or the answer depends on flag order"
+                )
+            perturb_source = full_arms[0] if full_arms else next(iter(trained))
         arm_names.append("perturbed")
+        logger.info("matched-conformation control perturbs %s", perturb_source)
     rows, skipped = [], []
     timing = {name: [0.0, 0] for name in arm_names}
     featurized = featurize_structures(
@@ -758,6 +968,7 @@ def main(argv=None):
                         dict(
                             variant=arm["variant"],
                             arch=arm["arch"],
+                            pair=arm["pair"],
                             needs_packing=needs,
                             delta_a_norm=stats.get("delta_a_norm"),
                             delta_s_norm=stats.get("delta_s_norm"),
@@ -771,10 +982,7 @@ def main(argv=None):
                 # fixed. Preferred over cross-protein shuffling, which changes
                 # the sequence and the feature distribution too.
                 if trained:
-                    label = next(
-                        (k for k, a in trained.items() if a["variant"] == "full"),
-                        next(iter(trained)),
-                    )
+                    label = perturb_source
                     adapters.sc_to_bb = trained[label]["module"]
                     deltas = torsions.random_chi_deltas(
                         upstream.packed.aatype,
@@ -788,10 +996,28 @@ def main(argv=None):
                         available=upstream.packed.available,
                     )
                     clock = time.perf_counter()
+                    # RE-ENCODE, rather than substituting coords37 into the
+                    # existing packed state. h_packed is FaMPNN's node readout
+                    # for the structure it was computed on, and an arm that
+                    # reads it -- every `late_*` and `early_s_*` variant -- would
+                    # otherwise be handed the ORIGINAL node features alongside
+                    # perturbed chi and environment features. That is a partial
+                    # intervention reported as a full one, and it understates
+                    # the response in the direction that flatters the arm.
+                    # pxf/couple/probes.py and scripts/audit_sb_sensitivity.py
+                    # already did it this way; this path did not.
+                    perturbed_packed = controller.encode_predicted_packing(
+                        upstream.inputs,
+                        moved[..., sidechain_slots, :],
+                        h_base=upstream.packed.h_base,
+                        # Carried over unchanged: this is a GEOMETRY-only
+                        # intervention. The packer is not re-run, so there is no
+                        # new psCE to report, and inventing one would make the
+                        # arm test two things at once.
+                        psce=upstream.packed.psce,
+                    )
                     delta, stats = adapters.delta_a(
-                        replace(upstream.packed, coords37=moved),
-                        sigma,
-                        reference=reference,
+                        perturbed_packed, sigma, reference=reference
                     )
                     corrected, _a = controller.backbone(x_noisy, sigma, feedback=delta)
                     produced["perturbed"] = (
@@ -801,6 +1027,8 @@ def main(argv=None):
                         dict(
                             needs_packing=True,
                             source_arm=label,
+                            arch=trained[label]["arch"],
+                            perturbed_psce="carried over (geometry-only)",
                             perturb_degrees=args.perturb_degrees,
                             delta_a_norm=stats.get("delta_a_norm"),
                         ),
@@ -920,6 +1148,12 @@ def main(argv=None):
             (r.get("variant") for r in arm_rows if r.get("variant")), None
         )
         entry["arch"] = next((r.get("arch") for r in arm_rows if r.get("arch")), None)
+        entry["pair"] = next(
+            (r.get("pair") for r in arm_rows if r.get("pair") is not None), None
+        )
+        entry["source_arm"] = next(
+            (r.get("source_arm") for r in arm_rows if r.get("source_arm")), None
+        )
         if name == "zero":
             entry["zero_site"] = next(
                 (r.get("zero_site") for r in arm_rows if r.get("zero_site")), None
@@ -966,11 +1200,14 @@ def main(argv=None):
                 if any(key in r for r in rows_at):
                     summary[key] = _mean(rows_at, key)
             entry["arms"][name] = summary
-        for name in entry["arms"]:
-            if name == "bb0":
-                continue
+        # The same plan the pooled table and the verdict use. Hard-coding the
+        # reference NAMES here silently dropped every control of this
+        # experiment: an arm labelled `early_s_bb_only` is not called
+        # `bb_only`, so `base not in entry["arms"]` skipped it and the per-sigma
+        # table showed the candidate against bb0 and nothing else.
+        for name, references in pairings(entry["arms"]).items():
             entry["paired"][name] = {}
-            for base in dict.fromkeys(["bb0", "refine", "bb_only", "generic"]):
+            for base in references:
                 if base == name or base not in entry["arms"]:
                     continue
                 deltas = _paired_deltas(at(name, value), at(base, value), "backbone_rmsd")
@@ -986,14 +1223,9 @@ def main(argv=None):
     # averaged, because per-target difficulty varies far more than the
     # correction does and an unpaired interval would be dominated by it.
     paired = {}
-    for name in arms:
-        if name == "bb0":
-            continue
+    for name, references in pairings(arms).items():
         paired[name] = {}
-        references = ["bb0", "refine"] + [
-            n for n in arms if arms[n].get("variant") in ("bb_only", "generic")
-        ]
-        for base in dict.fromkeys(references):
+        for base in references:
             if base == name or base not in arms:
                 continue
             deltas = _paired_deltas(by_arm[name], by_arm[base], "backbone_rmsd")
@@ -1054,8 +1286,8 @@ def main(argv=None):
         writer.writeheader()
         writer.writerows(rows)
     logger.info("wrote %s", out / METRICS_FILE)
-    passed = report(record)
-    return 0 if passed or not args.fail_on_no_gain else 1
+    outcome = report(record, candidate=args.candidate)
+    return 0 if outcome == PASS or not args.fail_on_no_gain else 1
 
 
 def _paired_deltas(candidate_rows, reference_rows, metric):

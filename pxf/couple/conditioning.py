@@ -766,6 +766,170 @@ def build_conditioner(arm, *, c_h_V, c_token, c_s, c_z, gate=None, d_hidden=D_HI
     )
 
 
+# Settings a checkpoint may legitimately differ from today's defaults on, and
+# which are therefore RECONSTRUCTED from it rather than compared against them.
+# They are constructor arguments: a module built with the recorded values is the
+# function that was trained.
+RECONSTRUCTED = {
+    "neighbourhood": (
+        "max_neighbours",
+        "neighbour_radius",
+        "max_atom_pairs",
+        "atom_pair_radius",
+    ),
+    "top": ("d_hidden", "d_noise"),
+}
+# Feature-definition constants that are NOT constructor arguments. A checkpoint
+# recording different values was produced by code this build does not implement,
+# so its weights describe a different function of a different input and loading
+# them is a silent relabelling rather than an error.
+HARD_CODED_FEATURES = ("rbf_centres", "rbf_sigma", "coordinate_scale", "pair_types")
+
+
+# Which module constant each reconstructed setting defaults to, so an override
+# can be reported. Kept beside RECONSTRUCTED rather than derived by upper-casing
+# the name: a silent lookup miss would make the "overrides are logged" promise
+# quietly false, which is how this table came to exist.
+DEFAULT_CONSTANT = {
+    "max_neighbours": "MAX_NEIGHBOURS",
+    "neighbour_radius": "NEIGHBOUR_RADIUS",
+    "max_atom_pairs": "MAX_ATOM_PAIRS",
+    "atom_pair_radius": "ATOM_PAIR_RADIUS",
+    "d_hidden": "D_HIDDEN",
+    "d_noise": "D_NOISE",
+    "sequence_width": "DEFAULT_SEQUENCE_WIDTH",
+}
+
+
+def overridden_settings(identity):
+    """``[(name, checkpoint value, this build's default)]`` for what differs.
+
+    Reported by the loader so an arm running on something other than today's
+    constants says so, instead of being quietly reconstructed and silently
+    incomparable to an arm that was not.
+    """
+    from pxf.couple import readout as _readout
+
+    here = dict(globals())
+    here["DEFAULT_SEQUENCE_WIDTH"] = _readout.DEFAULT_SEQUENCE_WIDTH
+    out = []
+    for name, value in sorted(reconstruct_kwargs(identity).items()):
+        constant = DEFAULT_CONSTANT.get(name)
+        if constant is None or constant not in here:
+            raise KeyError(
+                f"{name!r} is reconstructed from checkpoints but has no entry in "
+                "DEFAULT_CONSTANT, so an override of it could not be reported"
+            )
+        if here[constant] != value:
+            out.append((name, value, here[constant]))
+    return out
+
+
+def reconstruct_kwargs(identity):
+    """Constructor arguments a checkpoint records, for rebuilding what it trained.
+
+    Without this a checkpoint is rebuilt on today's constants: change
+    ``MAX_NEIGHBOURS`` or ``RBF_SIGMA`` and every existing checkpoint is
+    silently re-evaluated under a different feature definition, with the same
+    parameter shapes and no error anywhere.
+    """
+    identity = identity or {}
+    kwargs = {
+        name: identity[name] for name in RECONSTRUCTED["top"] if identity.get(name)
+    }
+    neighbourhood = identity.get("neighbourhood") or {}
+    kwargs.update(
+        {
+            name: neighbourhood[name]
+            for name in RECONSTRUCTED["neighbourhood"]
+            if neighbourhood.get(name) is not None
+        }
+    )
+    readout = (identity.get("readout") or {}).get("widths") or {}
+    if readout.get("sequence"):
+        kwargs["sequence_width"] = readout["sequence"]
+    return kwargs
+
+
+def feature_schema(identity):
+    """The parts of an identity that describe the FUNCTION, not the fit.
+
+    Deliberately excludes ``zero_initialized`` and ``parameters``: both are
+    properties of a particular set of weights at a particular moment, and a
+    trained checkpoint necessarily disagrees with a freshly built module on the
+    first. Comparing them would make every real load fail.
+    """
+    identity = identity or {}
+    schema = {}
+    if identity.get("widths"):
+        schema["widths"] = dict(identity["widths"])
+    neighbourhood = identity.get("neighbourhood") or {}
+    for name in HARD_CODED_FEATURES:
+        if name in neighbourhood:
+            schema[name] = neighbourhood[name]
+    readout = (identity.get("readout") or {}).get("widths")
+    if readout:
+        # The readout's own group widths: a changed environment or reliability
+        # block is a different z with the same total width.
+        schema["readout_widths"] = {
+            k: v for k, v in readout.items() if k != "sequence"  # a ctor argument
+        }
+    return schema
+
+
+def check_feature_schema(recorded, built, *, path=None):
+    """Refuse a checkpoint whose feature definition this build does not implement.
+
+    The independent source of truth the arm-label check does not have: the
+    feature construction is implemented by the installed code, and the
+    checkpoint states what it was trained against. Configurable settings are
+    reconstructed before this runs, so anything left over is a genuine
+    disagreement about what the inputs mean.
+    """
+    want, have = feature_schema(recorded), feature_schema(built)
+    mismatch = [
+        (key, want.get(key), have.get(key))
+        for key in sorted(set(want) | set(have))
+        if want.get(key) != have.get(key)
+    ]
+    if mismatch:
+        where = f"{path}: " if path else ""
+        raise ValueError(
+            where
+            + "this checkpoint was trained against a feature definition this "
+            "build does not implement. The parameter shapes still match, so the "
+            "weights would load and describe a different function of a different "
+            "input: "
+            + "; ".join(f"{k}: checkpoint={a!r} installed={b!r}" for k, a, b in mismatch)
+        )
+    return True
+
+
+def comparability(identities):
+    """Which recorded settings differ across a set of arms. Empty means comparable.
+
+    Two arms that each load correctly can still be incomparable -- one trained
+    with 16 neighbours and one with 32 differ in capacity and receptive field,
+    not only in information -- and nothing in either checkpoint alone would say
+    so. ``{label: identity}`` in, a list of ``(field, {label: value})`` out.
+    """
+    fields = {}
+    for label, identity in identities.items():
+        settings = dict(reconstruct_kwargs(identity))
+        settings.update(feature_schema(identity))
+        settings["version"] = (identity or {}).get("version")
+        for key, value in settings.items():
+            fields.setdefault(key, {})[label] = value
+    return [
+        (key, values)
+        for key, values in sorted(fields.items())
+        if len({repr(v) for v in values.values()}) > 1
+        # A variant that has no pair branch records no pair settings; that is a
+        # difference between arms by design, not a mismatched setting.
+        and len(values) == len(identities)
+    ]
+
+
 # Fields that make two conditioners *incomparable* rather than merely differently
 # trained. A mismatch here means the weights describe a different function of a
 # different input, so loading them would silently mislabel an arm.

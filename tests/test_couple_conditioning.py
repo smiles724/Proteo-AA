@@ -575,6 +575,106 @@ def test_every_named_arm_records_its_architecture(c_h_V):
             assert identity["version"] == cond.CONDITIONER_VERSION
 
 
+# --- the feature definition a checkpoint was trained against ----------------
+
+
+def test_configurable_settings_are_reconstructed_from_the_checkpoint():
+    """A loaded arm must be the function that was TRAINED, not today's defaults."""
+    trained = cond.AtomConditioner(
+        C_S, C_Z, variant="full", pair=True, gate=GATE,
+        max_neighbours=8, neighbour_radius=15.0, max_atom_pairs=12,
+        atom_pair_radius=9.0,
+    )
+    kwargs = cond.reconstruct_kwargs(trained.identity())
+    assert kwargs["max_neighbours"] == 8
+    assert kwargs["neighbour_radius"] == 15.0
+    assert kwargs["max_atom_pairs"] == 12
+    assert kwargs["atom_pair_radius"] == 9.0
+    rebuilt = cond.AtomConditioner(C_S, C_Z, variant="full", pair=True, gate=GATE, **kwargs)
+    assert rebuilt.identity()["neighbourhood"] == trained.identity()["neighbourhood"]
+    # And a rebuild that ignored them would silently be a different function.
+    assert cond.AtomConditioner(C_S, C_Z, gate=GATE).max_neighbours != 8
+
+
+def test_every_reconstructed_setting_can_report_an_override():
+    """The promise that overrides are logged has to be able to fire.
+
+    It could not: the loader looked up `conditioning.max_neighbours`, and the
+    constant is `MAX_NEIGHBOURS`. Every miss returned None and was read as
+    "matches the default", so an arm reconstructed onto non-default settings
+    said nothing at all.
+    """
+    trained = cond.AtomConditioner(
+        C_S, C_Z, variant="full", pair=True, gate=GATE, max_neighbours=8,
+        atom_pair_radius=9.0, d_hidden=128,
+    )
+    overridden = {name: (was, now) for name, was, now in
+                  cond.overridden_settings(trained.identity())}
+    assert overridden["max_neighbours"] == (8, cond.MAX_NEIGHBOURS)
+    assert overridden["atom_pair_radius"] == (9.0, cond.ATOM_PAIR_RADIUS)
+    assert overridden["d_hidden"] == (128, cond.D_HIDDEN)
+    # An arm on the defaults reports nothing.
+    assert not cond.overridden_settings(e2().identity())
+    # And every reconstructed name must have a default to compare against, or
+    # the report silently skips it. E1 contributes sequence_width.
+    assert not cond.overridden_settings(e1(c_h_V=128, variant="full").identity())
+
+
+def test_a_changed_hard_coded_feature_constant_is_refused(monkeypatch):
+    """The reviewer's reproduction: changing the RBF bandwidth used to pass.
+
+    RBF width is not a scale the first linear layer can absorb -- it changes the
+    nonlinear basis, so the same weights mean something else. It is not a
+    constructor argument, so a checkpoint recording a different one was produced
+    by code this build does not implement.
+    """
+    trained = e2().identity()
+    monkeypatch.setattr(cond, "RBF_SIGMA", 1.6)
+    rebuilt = e2().identity()
+    assert cond.check_compatible(trained, rebuilt), "the arm check cannot see this"
+    with pytest.raises(ValueError, match="rbf_sigma"):
+        cond.check_feature_schema(trained, rebuilt)
+
+
+def test_a_changed_coordinate_scale_is_refused(monkeypatch):
+    trained = e2().identity()
+    monkeypatch.setattr(cond, "COORDINATE_SCALE", 1.0)
+    with pytest.raises(ValueError, match="coordinate_scale"):
+        cond.check_feature_schema(trained, e2().identity())
+
+
+def test_a_changed_width_is_refused(monkeypatch):
+    trained = e2().identity()
+    monkeypatch.setattr(cond, "D_ATOM_SLOT", 8)
+    with pytest.raises(ValueError, match="widths"):
+        cond.check_feature_schema(trained, e2().identity())
+
+
+def test_runtime_properties_are_not_part_of_the_schema(c_h_V):
+    """A trained checkpoint necessarily disagrees with a fresh module on these."""
+    fresh = e2()
+    trained = e2()
+    _wake(trained)
+    assert fresh.identity()["zero_initialized"] != trained.identity()["zero_initialized"]
+    assert cond.check_feature_schema(trained.identity(), fresh.identity())
+
+
+def test_arms_trained_under_different_settings_are_not_comparable():
+    """Each loads correctly; the SET is still not an experiment."""
+    sixteen = cond.AtomConditioner(C_S, C_Z, gate=GATE, max_neighbours=16).identity()
+    thirtytwo = cond.AtomConditioner(C_S, C_Z, gate=GATE, max_neighbours=32).identity()
+    assert not cond.comparability({"a": sixteen, "b": dict(sixteen)})
+    differences = dict(cond.comparability({"a": sixteen, "b": thirtytwo}))
+    assert "max_neighbours" in differences
+
+
+def test_comparability_ignores_settings_only_one_arm_has(c_h_V):
+    """A pair-less ablation records no pair settings; that is design, not drift."""
+    both = e2(pair=True).identity()
+    single = e2(pair=False).identity()
+    assert not cond.comparability({"sz": both, "s": single})
+
+
 # --- the frame convention ---------------------------------------------------
 
 

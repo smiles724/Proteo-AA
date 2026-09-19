@@ -186,9 +186,25 @@ are small and the backbone is frozen, so the memory is not needed.
 is the point of the controls — so the wrong one loads cleanly and every later
 report labels it as the arm it is not. Each checkpoint therefore carries an
 architecture identity (`kind`, `version`, `arch`, `variant`, `pair`, `c_s`,
-`c_z`), `check_compatible` refuses a mismatch, and the evaluator rebuilds each
-arm as the architecture *its own checkpoint* records rather than as the one the
-config names.
+`c_z`), and the evaluator rebuilds each arm as the architecture *its own
+checkpoint* records rather than as the one the config names.
+
+Which of the two checks applies depends on where the comparison has a second
+source of truth, and this is worth stating because getting it wrong yields a
+check that cannot fire:
+
+* **In the trainer** (`resume`, `initialize_from`) the module is built from the
+  run's *config* and then meets a checkpoint. Those are independent, so
+  `check_compatible` is a real comparison.
+* **In the evaluator** the module is built *from* the recorded identity, so
+  comparing the two can only ever agree. The metadata is the sole record of
+  which arm produced a given set of weights — there is nothing in the file to
+  cross-examine it against. What *is* checkable is the caller's claim:
+  `--checkpoint early_s_full=<the control's file>` is a command-line slip that
+  otherwise produces a completely self-consistent run with the wrong names on
+  the results table. `check_is_the_expected_arm` holds each file to its label,
+  and refuses any record whose `(arch, variant, pair)` triple is not a row of
+  `ARMS`.
 
 ## Running it
 

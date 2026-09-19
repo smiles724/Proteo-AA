@@ -772,6 +772,70 @@ def build_conditioner(arm, *, c_h_V, c_token, c_s, c_z, gate=None, d_hidden=D_HI
 COMPATIBILITY_KEYS = ("kind", "version", "arch", "variant", "pair", "c_s", "c_z")
 
 
+def arm_for(identity):
+    """The arm name an architecture identity describes, or ``None`` if no row fits.
+
+    ``(arch, variant, pair)`` is what distinguishes the rows, and every trained
+    checkpoint should be one of them. A record that matches nothing is either
+    hand-edited or written by code that no longer exists, and in both cases the
+    label a report would give it is unsupported.
+    """
+    recorded = recorded_triple(identity)
+    for name, spec in ARMS.items():
+        if (spec["arch"], spec["variant"], bool(spec["pair"])) == recorded:
+            return name
+    return None
+
+
+def recorded_triple(identity):
+    identity = identity or {}
+    return (
+        identity.get("arch", "late"),
+        identity.get("variant"),
+        bool(identity.get("pair", False)),
+    )
+
+
+def check_is_a_known_arm(identity, *, path=None):
+    """Refuse an identity that describes no arm in the registry."""
+    name = arm_for(identity)
+    if name is None:
+        where = f"{path}: " if path else ""
+        raise ValueError(
+            where
+            + f"the recorded architecture {recorded_triple(identity)} "
+            "(arch, variant, pair) is not a row of ARMS, so there is no arm this "
+            f"checkpoint can be reported as. Known: {sorted(ARMS)}"
+        )
+    return name
+
+
+def check_is_the_expected_arm(identity, expected, *, path=None):
+    """Refuse a checkpoint that is not the arm its label claims.
+
+    This is the check that has teeth on load, and the reason it is separate from
+    :func:`check_compatible`: an evaluator rebuilds the module *from* the
+    recorded identity, so comparing the two can only ever agree. The metadata is
+    the sole record of which arm produced a given set of weights -- E1's ``full``
+    and ``bb_only`` are the same shapes -- so nothing in the file can be
+    cross-examined against it. What can be checked is the label the caller
+    attached: ``--checkpoint early_s_full=<path>`` pointed at the control's
+    checkpoint is a mislabelled results table, and that is a mistake a person
+    makes at the command line rather than a corruption of the file.
+    """
+    name = check_is_a_known_arm(identity, path=path)
+    if expected in ARMS and name != expected:
+        where = f"{path}: " if path else ""
+        raise ValueError(
+            where
+            + f"labelled {expected!r} but the checkpoint records arm {name!r} "
+            f"({recorded_triple(identity)}). The two arms have the same parameter "
+            "shapes, so nothing later would catch this and the report would name "
+            "the wrong one"
+        )
+    return name
+
+
 def check_compatible(recorded, built, *, path=None):
     """Refuse a checkpoint whose architecture metadata differs from the module.
 
@@ -779,6 +843,12 @@ def check_compatible(recorded, built, *, path=None):
     arms have identical parameter shapes by construction -- that is the point of
     the controls -- so the wrong one loads cleanly and the run reports the wrong
     variant. The metadata is what distinguishes them.
+
+    Useful only where ``built`` was configured *independently* of ``recorded`` --
+    the trainer, which builds from its config and then meets a checkpoint. An
+    evaluator that constructs the module from the recorded identity and then
+    calls this is comparing a record with itself; use
+    :func:`check_is_the_expected_arm` there instead.
     """
     recorded = recorded or {}
     mismatch = [

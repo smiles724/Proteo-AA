@@ -402,20 +402,26 @@ def report(record):
 # --- the arms ---------------------------------------------------------------
 
 
-def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device):
+def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device, expect=None):
     """One trained SC->BB arm, rebuilt as the architecture it was trained as.
 
     The architecture comes from the checkpoint, never from this script's config:
     E1's ``full`` and ``bb_only`` are the same shapes with different groups
     zeroed, and the late and early architectures both hang off the same
     ``sc_to_bb.`` prefix, so guessing would produce a clean load of the wrong
-    thing. :func:`pxf.couple.conditioning.check_compatible` then refuses a
-    checkpoint whose metadata disagrees with what was built.
+    thing.
+
+    Which is also why the metadata cannot be cross-checked against the weights
+    here -- it is the only record of which arm produced them. What is checked is
+    that the record names a real arm, and that it is the arm the caller's label
+    claims. ``--checkpoint early_s_full=<the control's checkpoint>`` is a
+    command-line slip that produces a fully self-consistent run with the wrong
+    names on the table, and ``expect`` is what catches it.
     """
     from pxf.couple.conditioning import (
         AtomConditioner,
         EarlySingleConditioner,
-        check_compatible,
+        check_is_the_expected_arm,
     )
     from pxf.couple.readout import FeedbackPath, SigmaWindow
 
@@ -431,6 +437,11 @@ def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device):
     gate = SigmaWindow(**gate_cfg) if gate_cfg else None
     settings = state.get("settings") or {}
     d_hidden = int(identity.get("d_hidden", 256))
+    # Before building anything: the record has to name an arm, and the arm the
+    # caller's label claims. A constructor would also reject an impossible
+    # variant, but it would name whichever field it happened to read first
+    # rather than the actual problem.
+    arm_name = check_is_the_expected_arm(identity, expect, path=path) if identity else None
     if arch == "late":
         module = FeedbackPath(
             c_h_V, c_token, variant=variant, gate=gate, d_hidden=d_hidden
@@ -450,8 +461,6 @@ def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device):
         )
     else:
         raise SystemExit(f"{path} records unknown SC->BB architecture {arch!r}")
-    if identity:
-        check_compatible(identity, module.identity(), path=path)
     weights = {
         k[len("sc_to_bb.") :]: v
         for k, v in state["adapters"].items()
@@ -470,6 +479,7 @@ def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device):
     module.eval().requires_grad_(False)
     return dict(
         module=module.to(device),
+        arm=arm_name,
         variant=variant,
         arch=arch,
         pair=bool(identity.get("pair", False)),
@@ -605,6 +615,9 @@ def main(argv=None):
             sb_cfg=sb_cfg,
             use_ema=args.ema,
             device=device,
+            # The label is the caller's claim about the file. When it names a
+            # known arm, hold the file to it.
+            expect=label,
         )
         logger.info(
             "arm %s: arch=%s variant=%s pair=%s step=%d ema=%s bs_policy=%s",
@@ -1009,7 +1022,10 @@ def main(argv=None):
         ),
         checkpoints={
             k: {
-                **{x: v[x] for x in ("path", "variant", "arch", "pair", "step", "is_ema")},
+                **{
+                    x: v[x]
+                    for x in ("path", "arm", "variant", "arch", "pair", "step", "is_ema")
+                },
                 "identity": v["module"].identity(),
             }
             for k, v in trained.items()

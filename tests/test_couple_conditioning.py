@@ -529,6 +529,39 @@ def test_the_single_only_ablation_is_not_the_pair_arm():
         cond.check_compatible(e2(pair=True).identity(), e2(pair=False).identity())
 
 
+def test_an_identity_maps_back_to_the_arm_that_produced_it(c_h_V):
+    for arm in cond.ARMS:
+        module = cond.build_conditioner(
+            arm, c_h_V=c_h_V, c_token=C_TOKEN, c_s=C_S, c_z=C_Z, gate=GATE
+        )
+        assert cond.arm_for(module.identity()) == arm
+
+
+def test_a_record_that_names_no_arm_is_refused(c_h_V):
+    identity = dict(e1(c_h_V, "full").identity(), variant="not_an_arm")
+    assert cond.arm_for(identity) is None
+    with pytest.raises(ValueError, match="not a row of ARMS"):
+        cond.check_is_a_known_arm(identity)
+
+
+def test_a_checkpoint_is_held_to_the_label_it_was_given(c_h_V):
+    """The mistake the load-time check actually catches, and the one it cannot.
+
+    It cannot cross-examine the metadata against the weights: the metadata is
+    the *only* record of which arm produced them, since the controls are the
+    same shapes on purpose. What it can catch is the caller's claim --
+    ``--checkpoint early_s_full=<the control's file>`` is a command-line slip
+    that otherwise yields a completely self-consistent run with the wrong names
+    on the results table.
+    """
+    control = e1(c_h_V, "bb_only").identity()
+    assert cond.check_is_the_expected_arm(control, "early_s_bb_only") == "early_s_bb_only"
+    with pytest.raises(ValueError, match="labelled 'early_s_full'"):
+        cond.check_is_the_expected_arm(control, "early_s_full")
+    # A label that is not an arm name is a free-form column heading, not a claim.
+    assert cond.check_is_the_expected_arm(control, "control") == "early_s_bb_only"
+
+
 def test_every_named_arm_records_its_architecture(c_h_V):
     for arm, spec in cond.ARMS.items():
         module = cond.build_conditioner(

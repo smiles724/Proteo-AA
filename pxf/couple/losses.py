@@ -184,13 +184,24 @@ def backbone_feedback_loss(
     loss = backbone_denoising_loss(
         predicted, target, sigma=sigma, sigma_data=sigma_data, atom_mask=atom_mask
     )
-    loss.stats["delta_a_norm"] = (
-        torch.tensor(0.0)
-        if cycle.delta_a is None
-        else cycle.delta_a.detach().norm(dim=-1).mean()
-    )
+    loss.stats.update(feedback_norms(cycle.delta_a))
     loss.stats["used_correction"] = torch.tensor(float(cycle.bb1_flat is not None))
     return loss
+
+
+def feedback_norms(feedback):
+    """How big the correction is, whichever injection site produced it.
+
+    The late adapter emits one ``[B, L, c_token]`` residual; an early conditioner
+    emits a ``ConditioningFeedback`` carrying one or two residuals of different
+    widths at different places. Reporting a single ``delta_a_norm`` for both
+    would put two incomparable quantities in one column of the same log.
+    """
+    if feedback is None:
+        return dict(delta_a_norm=torch.tensor(0.0))
+    if torch.is_tensor(feedback):
+        return dict(delta_a_norm=feedback.detach().norm(dim=-1).mean())
+    return {k: torch.tensor(v) for k, v in feedback.norms().items()}
 
 
 # ---- phase selection -------------------------------------------------------

@@ -31,7 +31,12 @@ import torch.utils.checkpoint  # noqa: F401
 from pxf import atom37
 from pxf.backbone import proteoaa
 from pxf.couple.controller import Topology
-from pxf.couple.pxdesign_iface import BackboneTap, Conditioning, token_feature_dim
+from pxf.couple.pxdesign_iface import (
+    BackboneTap,
+    Conditioning,
+    conditioning_widths,
+    token_feature_dim,
+)
 
 logger = logging.getLogger("pxf.backbone.driver")
 
@@ -87,11 +92,14 @@ def load_backbone_model(donor_checkpoint, *, device=None, proteoaa_root=None):
         model.to(device)
     from pxf import provenance
 
+    c_s, c_z = conditioning_widths(model)
     record = dict(
         backend="pxdesign",
         model_name=DONOR_MODEL_NAME,
         weights=provenance.weight_record(path),
         c_token=token_feature_dim(model),
+        c_s=c_s,
+        c_z=c_z,
         sigma_data=float(model.diffusion_module.sigma_data),
         driver="pxdesign_train",
         proteoaa=bundle.record(),
@@ -140,6 +148,11 @@ class PXDesignBackboneDriver:
         self.chunk_size = chunk_size
         self.inplace_safe = bool(inplace_safe)
         self.c_token = token_feature_dim(model)
+        # The early injection site's widths, read off the loaded conditioning
+        # module. Neither equals c_token (384 and 128 against 768 on this
+        # donor), which is why a conditioner is sized from these rather than
+        # from the adapter's backbone dimension.
+        self.c_s, self.c_z = conditioning_widths(model)
         self.sigma_data = float(model.diffusion_module.sigma_data)
         # Protenix 2.0 made pair_z/p_lm/c_l required parameters even though all
         # three are optional caches computed on demand; older revisions do not
@@ -157,6 +170,8 @@ class PXDesignBackboneDriver:
         """
         return dict(
             c_token=self.c_token,
+            c_s=self.c_s,
+            c_z=self.c_z,
             sigma_data=self.sigma_data,
             activation_checkpointing=self.activation_checkpointing,
             blocks_cleared=self.blocks_cleared,

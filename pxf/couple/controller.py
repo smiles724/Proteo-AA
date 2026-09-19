@@ -149,7 +149,11 @@ class CycleOutput:
     sidechains: torch.Tensor | None = None  # sc0, [B, L, 33, 3] global
     h_packed: torch.Tensor | None = None
     packed: object | None = None  # visibility.PackedStructure for the re-encode
-    delta_a: torch.Tensor | None = None
+    # Either a ``[B, L, c_token]`` residual for the late decoder site, or a
+    # `pxf.couple.pxdesign_iface.ConditioningFeedback` for the early one. The
+    # type is what selects the injection site, so it is kept rather than
+    # normalized away.
+    delta_a: object | None = None
     feedback_stats: dict = field(default_factory=dict)
     bb1_flat: torch.Tensor | None = None
     bb1_dense: torch.Tensor | None = None  # [B, L, 37, 3]
@@ -470,7 +474,7 @@ class CoupledDenoiser:
         )
         if out.delta_a is None:
             return out
-        if torch.is_grad_enabled() and not out.delta_a.requires_grad:
+        if torch.is_grad_enabled() and not bool(out.delta_a.requires_grad):
             trainable = [
                 name
                 for name, p in getattr(self.adapters, "named_parameters", lambda: [])()
@@ -717,6 +721,13 @@ class CoupledDenoiser:
         delta, stats = result if isinstance(result, tuple) else (result, {})
         if delta is None:
             return None, dict(stats)
+        if not torch.is_tensor(delta):
+            # An early conditioner's payload addresses `s_single` and `z_pair`,
+            # which live on different axes and different widths from `a_token`.
+            # Matching it to the token axis here would be a shape error at best
+            # and a silently wrong broadcast at worst; the widths are checked
+            # where the payload is applied, against the model's own c_s and c_z.
+            return delta, dict(stats)
         return self._match(delta, reference), dict(stats)
 
     @staticmethod

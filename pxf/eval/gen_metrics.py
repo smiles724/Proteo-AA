@@ -195,6 +195,15 @@ def arm_feedback(arm, *, trained, adapters, controller, prep, token_map, torsion
         delta_gen, _stats = adapters.delta_a(packed, state.sigma)
         if delta_gen is None:
             return None
+        if not torch.is_tensor(delta_gen):
+            raise ValueError(
+                "the generation stress test scatters the residual onto the "
+                "design region of the token axis, which only the late "
+                "decoder-input adapter produces. An early conditioner's payload "
+                "addresses s_single and z_pair, where 'the design region' is a "
+                "different set of indices on a different axis; masking it here "
+                "would silently apply the wrong restriction"
+            )
         # Scatter and mask AFTER the projections and their bias.
         return scatter_design_residual(delta_gen, token_map)
 

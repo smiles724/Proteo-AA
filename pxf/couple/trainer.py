@@ -21,6 +21,7 @@ donor weights than they were trained against.
 """
 
 import json
+import logging
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -32,6 +33,8 @@ import torch
 from pxf.couple import losses as couple_losses
 from pxf.train.ema import EMA
 from pxf.train.trainer import OptimSettings, learning_rate
+
+logger = logging.getLogger("pxf.couple.trainer")
 
 
 @dataclass
@@ -374,6 +377,38 @@ class CoupledTrainer:
         "frozen": (),
     }
 
+    def _check_architecture(self, state, path):
+        """Refuse weights written by a different SC->BB architecture.
+
+        ``load_state_dict`` cannot catch this on its own. E1's ``full`` and
+        ``bb_only`` arms are the same module with different feature groups
+        zeroed -- identical parameter shapes, deliberately, so the controls match
+        in capacity -- so the wrong one loads without complaint and every later
+        report labels it as the arm it is not. The architecture identity the
+        checkpoint carries is the only thing that distinguishes them.
+        """
+        module = getattr(self.adapters, "sc_to_bb", None)
+        record = getattr(module, "identity", None)
+        if not callable(record):
+            return None
+        built = record()
+        recorded = ((state.get("controller") or {}).get("adapters") or {}).get("sc_to_bb")
+        if not isinstance(recorded, dict):
+            # Written before the identity was recorded. Say so rather than
+            # silently accepting it: the pairing may still be right, but nothing
+            # in the file establishes that.
+            logger.warning(
+                "%s records no SC->BB architecture, so the arm it was trained as "
+                "cannot be verified against the one built here (%s/%s)",
+                path,
+                built.get("arch"),
+                built.get("variant"),
+            )
+            return None
+        from pxf.couple.conditioning import check_compatible
+
+        return check_compatible(recorded, built, path=str(path))
+
     def initialize_from(self, path, *, prefix=None):
         """Start this phase from a previous phase's *weights*. Nothing else.
 
@@ -398,6 +433,7 @@ class CoupledTrainer:
         state = torch.load(path, map_location="cpu", weights_only=False)
         if "adapters" not in state:
             raise ValueError(f"{path} is not a coupling checkpoint")
+        self._check_architecture(state, path)
         source_phase = (state.get("settings") or {}).get("phase")
         if prefix is None:
             prefixes = self.PHASE_TRAINS.get(source_phase)
@@ -473,6 +509,7 @@ class CoupledTrainer:
         state = torch.load(path, map_location="cpu", weights_only=False)
         if "adapters" not in state:
             raise ValueError(f"{path} is not a coupling checkpoint")
+        self._check_architecture(state, path)
         source_phase = (state.get("settings") or {}).get("phase")
         if source_phase is not None and source_phase != self.settings.phase:
             # Resuming across phases restores the *previous* phase's optimizer

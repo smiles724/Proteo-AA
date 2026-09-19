@@ -668,6 +668,32 @@ def test_arms_trained_under_different_settings_are_not_comparable():
     assert "max_neighbours" in differences
 
 
+def test_comparability_is_within_an_architecture_not_across(c_h_V):
+    """Arms of different architectures are SUPPOSED to differ.
+
+    Refusing on that blocked the one run worth doing: a late arm beside an early
+    one on a single panel, which is the only way to get a paired interval
+    between the two injection sites. An older late checkpoint also records no
+    `version` at all, so the cross-architecture comparison refused on a field
+    that simply did not exist yet.
+    """
+    late = cond.build_conditioner(
+        "late_full", c_h_V=c_h_V, c_token=C_TOKEN, c_s=C_S, c_z=C_Z, gate=GATE
+    ).identity()
+    late.pop("version", None)  # as an older checkpoint records it
+    early = e1(c_h_V, "full").identity()
+    assert not cond.comparability({"late_full": late, "early_s_full": early})
+    # Within an architecture the check still bites.
+    drifted = cond.AtomConditioner(C_S, C_Z, gate=GATE, max_neighbours=32).identity()
+    differences = dict(cond.comparability({"a": e2().identity(), "b": drifted}))
+    assert "max_neighbours" in differences
+    # And a drifted pair does not become comparable by adding a third arch.
+    differences = dict(
+        cond.comparability({"a": e2().identity(), "b": drifted, "c": late})
+    )
+    assert "max_neighbours" in differences
+
+
 def test_comparability_ignores_settings_only_one_arm_has(c_h_V):
     """A pair-less ablation records no pair settings; that is design, not drift."""
     both = e2(pair=True).identity()

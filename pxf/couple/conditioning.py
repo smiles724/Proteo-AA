@@ -906,28 +906,45 @@ def check_feature_schema(recorded, built, *, path=None):
 
 
 def comparability(identities):
-    """Which recorded settings differ across a set of arms. Empty means comparable.
+    """Which recorded settings differ WITHIN an architecture. Empty means comparable.
 
     Two arms that each load correctly can still be incomparable -- one trained
     with 16 neighbours and one with 32 differ in capacity and receptive field,
     not only in information -- and nothing in either checkpoint alone would say
     so. ``{label: identity}`` in, a list of ``(field, {label: value})`` out.
+
+    **Grouped by architecture**, because arms of different architectures are
+    *supposed* to differ: a late adapter and an early conditioner have different
+    feature definitions by construction, and an older checkpoint records no
+    ``version`` at all. Comparing across them refused exactly the run worth
+    doing -- scoring a late arm beside an early one on one panel, which is the
+    only way to get a PAIRED interval between the two injection sites. The
+    protection that matters is within an architecture, where a difference is
+    drift rather than design.
     """
-    fields = {}
+    by_arch = {}
     for label, identity in identities.items():
-        settings = dict(reconstruct_kwargs(identity))
-        settings.update(feature_schema(identity))
-        settings["version"] = (identity or {}).get("version")
-        for key, value in settings.items():
-            fields.setdefault(key, {})[label] = value
-    return [
-        (key, values)
-        for key, values in sorted(fields.items())
-        if len({repr(v) for v in values.values()}) > 1
-        # A variant that has no pair branch records no pair settings; that is a
-        # difference between arms by design, not a mismatched setting.
-        and len(values) == len(identities)
-    ]
+        by_arch.setdefault((identity or {}).get("arch", "late"), {})[label] = identity
+    out = []
+    for group in by_arch.values():
+        if len(group) < 2:
+            continue
+        fields = {}
+        for label, identity in group.items():
+            settings = dict(reconstruct_kwargs(identity))
+            settings.update(feature_schema(identity))
+            settings["version"] = (identity or {}).get("version")
+            for key, value in settings.items():
+                fields.setdefault(key, {})[label] = value
+        out += [
+            (key, values)
+            for key, values in sorted(fields.items())
+            if len({repr(v) for v in values.values()}) > 1
+            # A variant with no pair branch records no pair settings; that is a
+            # difference between arms by design, not a mismatched setting.
+            and len(values) == len(group)
+        ]
+    return out
 
 
 # Fields that make two conditioners *incomparable* rather than merely differently

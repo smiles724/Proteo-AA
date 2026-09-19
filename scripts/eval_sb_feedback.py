@@ -249,6 +249,21 @@ def same_architecture_controls(arms, candidate):
     ]
 
 
+def candidate_relation(arms, a, b):
+    """What comparing two candidates is a comparison OF.
+
+    Labelled rather than left to the reader: "atom_sz_full vs atom_s_full" and
+    "early_s_full vs late_full" are both full-versus-full, and they answer
+    completely different questions -- whether the pair branch earns its cost,
+    and whether the injection site matters.
+    """
+    if arms.get(a, {}).get("arch") != arms.get(b, {}).get("arch"):
+        return "injection site"
+    if arms.get(a, {}).get("pair") != arms.get(b, {}).get("pair"):
+        return "pair branch"
+    return "candidates"
+
+
 def comparison_plan(arms):
     """``(candidates, {candidate: [reference, ...]})`` -- stated, not inferred.
 
@@ -266,15 +281,17 @@ def comparison_plan(arms):
     plan = {}
     for name in candidates:
         references = ["bb0", "refine", *same_architecture_controls(arms, name)]
-        # The pair branch's own ablation: same architecture, same variant, pair
-        # switched off. Not reachable by variant name -- both are "full".
-        references += [
-            other
-            for other in candidates
-            if other != name
-            and arms[other].get("arch") == arms[name].get("arch")
-            and arms[other].get("pair") != arms[name].get("pair")
-        ]
+        # Every OTHER candidate, whatever its architecture. Two relationships
+        # hide here and neither is reachable by variant name, because both arms
+        # are "full":
+        #   same arch, different pair -> the pair branch's own ablation
+        #   different arch            -> the injection-site comparison
+        # The second is the whole reason to score two architectures on one
+        # panel: without it the run yields two independent tables to compare by
+        # eye, when what is wanted is a per-target PAIRED interval between the
+        # sites. Restricting this to the same architecture silently produced
+        # exactly that, while the surrounding prose claimed otherwise.
+        references += [other for other in candidates if other != name]
         # The matched-conformation control, when it was produced for this arm.
         if arms.get("perturbed", {}).get("source_arm") == name:
             references.append("perturbed")
@@ -452,7 +469,8 @@ def verdict(record, candidate=None):
         against = paired.get(candidate, {}).get(f"vs_{other}")
         if against:
             lines.append(
-                f"pair branch, {candidate} vs {other}: {against['mean']:+.4f} A "
+                f"{candidate_relation(arms, candidate, other)}, {candidate} vs "
+                f"{other}: {against['mean']:+.4f} A "
                 f"[{against['low']:+.4f}, {against['high']:+.4f}]"
             )
 

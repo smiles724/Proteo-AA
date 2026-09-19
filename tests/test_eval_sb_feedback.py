@@ -425,6 +425,45 @@ def test_the_plan_finds_controls_whose_names_are_not_bb_only(mod):
     assert "refine" in plan["atom_sz_full"]
 
 
+def test_the_cross_site_comparison_is_planned(mod):
+    """The paired interval between injection sites, which is why both are scored.
+
+    comparison_plan restricted candidate-versus-candidate to one architecture,
+    so early_s_full vs late_full was never computed and a run containing both
+    produced two independent tables -- exactly what scoring them together is
+    meant to avoid.
+    """
+    arms = record()["arms"]
+    arms["early_s_full"] = dict(
+        backbone_rmsd=0.78, variant="full", arch="early_s", pair=False, **CLEAN_SC
+    )
+    arms["early_s_bb_only"] = dict(
+        backbone_rmsd=0.88, variant="bb_only", arch="early_s", pair=False
+    )
+    _candidates, plan = mod.comparison_plan(arms)
+    assert "late_full" not in plan  # the late candidate is labelled "full" here
+    assert "full" in plan["early_s_full"], "no paired interval between the sites"
+    assert "early_s_full" in plan["full"]
+    # And it is labelled for what it is, not lumped in with the pair ablation.
+    assert mod.candidate_relation(arms, "early_s_full", "full") == "injection site"
+    assert mod.candidate_relation(arms, "full", "full") == "candidates"
+
+
+def test_the_pair_ablation_and_the_site_are_different_relations(mod):
+    arms = two_full_arms()["arms"]
+    assert mod.candidate_relation(arms, "atom_sz_full", "atom_s_full") == "pair branch"
+
+
+def test_a_cross_site_reference_is_not_a_control(mod):
+    """Pairing against the other site must not make it a baseline for the bar."""
+    arms = record()["arms"]
+    arms["early_s_full"] = dict(
+        backbone_rmsd=0.78, variant="full", arch="early_s", pair=False, **CLEAN_SC
+    )
+    assert mod.same_architecture_controls(arms, "early_s_full") == []
+    assert "bb_only" not in mod.same_architecture_controls(arms, "early_s_full")
+
+
 def test_the_plan_does_not_mix_architectures(mod):
     arms = record()["arms"]
     arms["other_bb"] = dict(backbone_rmsd=0.70, variant="bb_only", arch="atom", pair=True)

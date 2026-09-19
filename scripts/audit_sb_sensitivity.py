@@ -99,6 +99,31 @@ def relative(a, b):
     return float((delta.norm(dim=-1) / scale.clamp_min(1e-8)).mean())
 
 
+def payload_relative(before, after):
+    """``{"single": x, "pair": y}`` relative change, whichever payload it is.
+
+    The late adapter emits one residual and an early conditioner emits one or
+    two, at different widths. Collapsing them to a single number would compare
+    a residual on ``a_token`` against one on ``s_single`` as though they were the
+    same quantity, so each component is reported under its own name and the
+    single residual is the headline for both architectures.
+    """
+    if torch.is_tensor(before):
+        return dict(single=relative(before, after), pair=None)
+    return dict(
+        single=(
+            None
+            if before.delta_single is None
+            else relative(before.delta_single, after.delta_single)
+        ),
+        pair=(
+            None
+            if before.delta_pair is None
+            else relative(before.delta_pair, after.delta_pair)
+        ),
+    )
+
+
 def rms(a, b, mask=None):
     """RMS coordinate difference, no superposition. Same frame by construction."""
     d = a.reshape(-1, 3).float() - b.reshape(-1, 3).float()
@@ -163,12 +188,15 @@ def main(argv=None):
         args.checkpoint,
         c_h_V=c_h_V,
         c_token=px_driver.c_token,
+        c_s=px_driver.c_s,
+        c_z=px_driver.c_z,
         sb_cfg=sb_cfg,
         use_ema=args.ema,
         device=device,
     )
     logger.info(
-        "auditing A_SB: variant=%s step=%d ema=%s",
+        "auditing A_SB: arch=%s variant=%s step=%d ema=%s",
+        arm["arch"],
         arm["variant"],
         arm["step"],
         arm["is_ema"],
@@ -276,7 +304,9 @@ def main(argv=None):
                 d_pert, s_pert = adapters.delta_a(
                     packed_perturbed, sigma, reference=reference
                 )
-                delta_change = relative(d_orig, d_pert)
+                changed = payload_relative(d_orig, d_pert)
+                delta_change = changed["single"]
+                delta_pair_change = changed["pair"]
                 delta_rel_orig = s_orig.get("relative_residual")
                 delta_rel_pert = s_pert.get("relative_residual")
 
@@ -315,9 +345,12 @@ def main(argv=None):
                     sidechain_rms_moved=sc_rms,
                     # stage 2
                     delta_a_change=delta_change,
+                    delta_pair_change=delta_pair_change,
+                    arch=arm["arch"],
                     delta_a_rel_residual=delta_rel_orig,
                     delta_a_rel_residual_perturbed=delta_rel_pert,
-                    delta_a_norm=s_orig.get("delta_a_norm"),
+                    delta_a_norm=s_orig.get("delta_a_norm")
+                    or s_orig.get("delta_s_norm"),
                     # stage 3
                     coord_floor=coord_floor,
                     coord_rms_feedback_vs_bypass=coord_orig_vs_bypass,
@@ -402,7 +435,7 @@ def _summarise(rows, sigmas):
                 **{
                     k: _mean(at, k)
                     for k in rows[0]
-                    if k not in ("target", "sigma", "length")
+                    if k not in ("target", "sigma", "length", "arch")
                 },
             )
         )
@@ -426,6 +459,7 @@ def report(record):
         )
         print(
             f"    stage 2  A_SB       change {entry['delta_a_change']:.3e}   "
+            f"pair change {entry['delta_pair_change']:.3e}   "
             f"residual/BB feat {entry['delta_a_rel_residual']:.4f}"
         )
         print(

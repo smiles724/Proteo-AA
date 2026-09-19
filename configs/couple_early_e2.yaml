@@ -1,0 +1,55 @@
+# E2: predicted atoms -> U_i and V_ij -> residuals for s_single and z_pair
+#
+# Changes the representation as well as the site. The residue term is pooled
+# from the predicted atoms directly rather than from FaMPNN's node summary --
+# E1 already tests that summary at this site, and mixing the two would make
+# "what did the geometry contribute" unanswerable. The pair term is the
+# capability the late site did not have at all: z_pair reaches the atom encoder
+# and every transformer block, so a side chain can say something about a pair of
+# residues rather than only about its own.
+#
+# Widths and neighbour limits are frozen in pxf.couple.conditioning and recorded
+# in every checkpoint's architecture identity. They are pilot defaults, not
+# findings; they must not differ between arms, and a checkpoint that disagrees
+# with the module built to load it is refused rather than loaded.
+#
+# Same pool, packing length, BB->SC policy, sigma window, optimizer and budget
+# as E1 and as the late pilot, so all three are comparable.
+couple:
+  phase: sc_to_bb
+  max_steps: 2000
+  grad_accum_steps: 1
+  pack_steps: 50
+  corrective_event: true
+  bs_policy: bypass
+  sigma_data_backbone: 16.0
+  sidechain_reduction: per_residue
+  log_every: 25
+  checkpoint_every: 500
+  eval_steps: [500, 1000, 2000]
+  ema_relative_length: 0.25
+  seed: 0
+sigma:
+  mode: trajectory
+  sigma_min: 0.1
+  sigma_max: 2.0
+  n_step: 400
+adapters:
+  d_hidden: 256
+  d_noise: 64
+sb_feedback:
+  # atom_sz_full | atom_sz_bb_only | atom_s_full -- set by --sb-arm.
+  #   atom_sz_full     predicted SC atoms, single + pair
+  #   atom_sz_bb_only  BB atoms and sequence only, same architecture
+  #   atom_s_full      the single-only ablation of atom_sz_full
+  arm: atom_sz_full
+  gate:
+    sigma_min: 0.1
+    sigma_max: 2.0
+    taper: 2.0
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_steps: 100
+  max_grad_norm: 1.0
+  schedule: constant

@@ -23,6 +23,18 @@
 #         generic=$R/generic_118217/checkpoints/final.pt" \
 #   sbatch scripts/slurm/eval_sb_feedback.sh
 #
+# The same launcher scores the early conditioners. Each arm is rebuilt as the
+# architecture its own checkpoint records, so no flag selects it -- but point
+# CONFIG at that experiment's file, and score ONE architecture per run: E1 and
+# E2 have different same-architecture BB-only controls, and a single verdict
+# cannot speak for both.
+#
+#   CONFIG=configs/couple_early_e1.yaml TAG=e1_exit \
+#   ARMS="early_s_full=$R/early_s_full_*/checkpoints/final.pt \
+#         early_s_bb_only=$R/early_s_bb_only_*/checkpoints/final.pt \
+#         early_s_generic=$R/early_s_generic_*/checkpoints/final.pt" \
+#   sbatch scripts/slurm/eval_sb_feedback.sh
+#
 # Submit with SLURM_* cleared; see scripts/slurm/train_sb_pilot.sh.
 set -euo pipefail
 

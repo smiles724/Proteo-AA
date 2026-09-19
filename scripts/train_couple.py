@@ -61,6 +61,13 @@ def readout_variants():
     return set(VARIANTS)
 
 
+def conditioner_arms():
+    """The named (architecture, variant) rows of E1 and E2."""
+    from pxf.couple.conditioning import ARMS
+
+    return set(ARMS)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -159,6 +166,17 @@ def parse_args(argv=None):
         "encoding with every SC-derived group zeroed. generic: the trained "
         "sigma-only control, z identically zero. All three have the same "
         "parameter count, so they differ in information and not in capacity",
+    )
+    p.add_argument(
+        "--sb-arm",
+        default=None,
+        choices=sorted(conditioner_arms()),
+        help="which named SC->BB arm to train, selecting the architecture and "
+        "the variant together. late_*: the existing decoder-input adapter. "
+        "early_s_*: the same readout injected into s_single instead (E1). "
+        "atom_*: predicted atoms encoded into s_single and z_pair (E2). "
+        "Mutually exclusive with --sb-variant, which names a variant of the "
+        "late architecture only",
     )
     p.add_argument(
         "--bs-policy",
@@ -408,8 +426,16 @@ def main(argv=None):
     ):
         if value is not None:
             couple_cfg[key] = value
+    if args.sb_variant is not None and args.sb_arm is not None:
+        raise SystemExit(
+            "--sb-arm names an architecture and a variant together; --sb-variant "
+            "names a variant of the late architecture only. Passing both leaves "
+            "it ambiguous which one the run is"
+        )
     if args.sb_variant is not None:
         sb_cfg["variant"] = args.sb_variant
+    if args.sb_arm is not None:
+        sb_cfg["arm"] = args.sb_arm
     run_pilot = bool(couple_cfg.get("corrective_event"))
     if run_pilot and args.backbone != "pxdesign":
         raise SystemExit(
@@ -509,18 +535,43 @@ def main(argv=None):
     logger.info("%s", sigma_schedule.describe())
     sb_module = None
     if sb_cfg:
+        from pxf.couple.conditioning import ARMS, build_conditioner
         from pxf.couple.readout import FeedbackPath, SigmaWindow
 
         gate_cfg = dict(sb_cfg.get("gate") or {})
         gate = SigmaWindow(**gate_cfg) if gate_cfg else None
-        sb_module = FeedbackPath(
-            c_h_V,
-            c_token,
-            d_hidden=int(adapter_cfg.get("d_hidden", 256)),
-            d_noise=int(adapter_cfg.get("d_noise", 64)),
-            variant=sb_cfg.get("variant", "full"),
-            gate=gate,
-        )
+        arm = sb_cfg.get("arm")
+        if arm is None:
+            # The legacy path, unchanged: a variant name alone means the late
+            # decoder-input adapter. Existing configs and checkpoints keep
+            # producing exactly the module they produced before.
+            sb_module = FeedbackPath(
+                c_h_V,
+                c_token,
+                d_hidden=int(adapter_cfg.get("d_hidden", 256)),
+                d_noise=int(adapter_cfg.get("d_noise", 64)),
+                variant=sb_cfg.get("variant", "full"),
+                gate=gate,
+            )
+        else:
+            if ARMS[arm]["arch"] != "late" and px_driver is None:
+                raise SystemExit(
+                    f"arm {arm!r} injects into the conditioning output, which "
+                    "only the real PXDesign driver has. The stub backbone has no "
+                    "DiffusionConditioning to hook, so this run would train "
+                    "against a shim rather than the model"
+                )
+            sb_module = build_conditioner(
+                arm,
+                c_h_V=c_h_V,
+                c_token=c_token,
+                c_s=None if px_driver is None else px_driver.c_s,
+                c_z=None if px_driver is None else px_driver.c_z,
+                gate=gate,
+                d_hidden=int(adapter_cfg.get("d_hidden", 256)),
+                d_noise=int(adapter_cfg.get("d_noise", 64)),
+            )
+        sb_cfg["arm"] = arm
         logger.info("SC->BB arm: %s", json.dumps(sb_module.identity(), default=str))
     adapters = CouplingAdapters(c_token, c_h_V, sc_to_bb=sb_module, **adapter_cfg).to(
         device

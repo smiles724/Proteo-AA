@@ -209,9 +209,18 @@ def verdict(record):
     """The exit decision, and the reasons for it. Returns ``(passed, lines)``."""
     arms = record["arms"]
     lines = []
-    candidate = next((name for name in arms if arms[name].get("variant") == "full"), None)
-    if candidate is None:
+    candidates = [name for name in arms if arms[name].get("variant") == "full"]
+    if not candidates:
         return False, ["no arm records variant='full', so there is no candidate"]
+    candidate = candidates[0]
+    if len(candidates) > 1:
+        # Two architectures in one run have two different same-architecture
+        # controls, so one verdict cannot speak for both.
+        lines.append(
+            f"{len(candidates)} arms record variant='full' ({', '.join(candidates)}); "
+            f"the verdict below is for {candidate} only. Score each architecture "
+            "in its own run, against its own BB-only control"
+        )
 
     # The wiring check gates everything: without it the comparison is not
     # between bb0 and a correction, it is between two different calls.
@@ -221,10 +230,12 @@ def verdict(record):
         wired = False
     else:
         wired = wiring <= WIRING_TOLERANCE
+        site = arms.get("zero", {}).get("zero_site") or "decoder"
         lines.append(
-            f"WIRING: zero-feedback arm deviates from bb0 by {wiring:.2e} A, "
-            f"tolerance {WIRING_TOLERANCE:.0e} ({'ok' if wired else 'FAILED'}). "
-            f"GPU non-determinism alone measures ~{GPU_NONDETERMINISM:.1e} A"
+            f"WIRING: zero feedback at the {site} site deviates from bb0 by "
+            f"{wiring:.2e} A, tolerance {WIRING_TOLERANCE:.0e} "
+            f"({'ok' if wired else 'FAILED'}). GPU non-determinism alone "
+            f"measures ~{GPU_NONDETERMINISM:.1e} A"
         )
 
     baseline_name, baseline = None, None
@@ -317,13 +328,19 @@ def report(record):
     )
     print(f"  structures: {record['structures']}\n")
     keys = [k for k in bb_metrics.HEADLINE]
-    print(f"  {'arm':14s} {'variant':10s} " + " ".join(f"{k:>14s}" for k in keys))
+    print(
+        f"  {'arm':14s} {'arch':9s} {'variant':10s} "
+        + " ".join(f"{k:>14s}" for k in keys)
+    )
     for name, arm in record["arms"].items():
         cells = " ".join(
             f"{arm[k]:14.4f}" if isinstance(arm.get(k), float) else f"{'-':>14s}"
             for k in keys
         )
-        print(f"  {name:14s} {str(arm.get('variant') or '-'):10s} {cells}")
+        print(
+            f"  {name:14s} {str(arm.get('arch') or '-'):9s} "
+            f"{str(arm.get('variant') or '-'):10s} {cells}"
+        )
     print()
     print(
         f"  {'arm':14s} {'calls':>6s} {'packing':>8s} {'seconds/event':>14s} {'vs bb0':>9s}"
@@ -385,25 +402,56 @@ def report(record):
 # --- the arms ---------------------------------------------------------------
 
 
-def load_arm(path, *, c_h_V, c_token, sb_cfg, use_ema, device):
-    """One trained A_SB from a pilot checkpoint, with its recorded variant."""
+def load_arm(path, *, c_h_V, c_token, c_s, c_z, sb_cfg, use_ema, device):
+    """One trained SC->BB arm, rebuilt as the architecture it was trained as.
+
+    The architecture comes from the checkpoint, never from this script's config:
+    E1's ``full`` and ``bb_only`` are the same shapes with different groups
+    zeroed, and the late and early architectures both hang off the same
+    ``sc_to_bb.`` prefix, so guessing would produce a clean load of the wrong
+    thing. :func:`pxf.couple.conditioning.check_compatible` then refuses a
+    checkpoint whose metadata disagrees with what was built.
+    """
+    from pxf.couple.conditioning import (
+        AtomConditioner,
+        EarlySingleConditioner,
+        check_compatible,
+    )
     from pxf.couple.readout import FeedbackPath, SigmaWindow
 
     state = torch.load(path, map_location="cpu", weights_only=False)
     if "adapters" not in state:
         raise SystemExit(f"{path} is not a coupling checkpoint")
     identity = ((state.get("controller") or {}).get("adapters") or {}).get("sc_to_bb")
-    variant = (identity or {}).get("variant") or sb_cfg.get("variant", "full")
-    gate_cfg = ((identity or {}).get("gate") or {}) or dict(sb_cfg.get("gate") or {})
+    identity = identity if isinstance(identity, dict) else {}
+    variant = identity.get("variant") or sb_cfg.get("variant", "full")
+    arch = identity.get("arch", "late")
+    gate_cfg = (identity.get("gate") or {}) or dict(sb_cfg.get("gate") or {})
     gate_cfg = {k: v for k, v in gate_cfg.items() if k != "kind"}
+    gate = SigmaWindow(**gate_cfg) if gate_cfg else None
     settings = state.get("settings") or {}
-    module = FeedbackPath(
-        c_h_V,
-        c_token,
-        variant=variant,
-        gate=SigmaWindow(**gate_cfg) if gate_cfg else None,
-        d_hidden=int((identity or {}).get("d_hidden", 256)),
-    )
+    d_hidden = int(identity.get("d_hidden", 256))
+    if arch == "late":
+        module = FeedbackPath(
+            c_h_V, c_token, variant=variant, gate=gate, d_hidden=d_hidden
+        )
+    elif arch == "early_s":
+        module = EarlySingleConditioner(
+            c_h_V, c_s, variant=variant, gate=gate, d_hidden=d_hidden
+        )
+    elif arch == "atom":
+        module = AtomConditioner(
+            c_s,
+            c_z,
+            variant=variant,
+            pair=bool(identity.get("pair", True)),
+            gate=gate,
+            d_hidden=d_hidden,
+        )
+    else:
+        raise SystemExit(f"{path} records unknown SC->BB architecture {arch!r}")
+    if identity:
+        check_compatible(identity, module.identity(), path=path)
     weights = {
         k[len("sc_to_bb.") :]: v
         for k, v in state["adapters"].items()
@@ -423,11 +471,40 @@ def load_arm(path, *, c_h_V, c_token, sb_cfg, use_ema, device):
     return dict(
         module=module.to(device),
         variant=variant,
+        arch=arch,
+        pair=bool(identity.get("pair", False)),
         step=int(state.get("step", 0)),
         path=str(path),
         is_ema=bool(use_ema and state.get("ema")),
         bs_policy=settings.get("bs_policy"),
         pack_steps=settings.get("pack_steps"),
+    )
+
+
+def zero_payload(trained, *, length, c_token, c_s, c_z, device):
+    """The wiring arm's feedback: exactly zero, at the site the arms inject into.
+
+    The check is only worth anything at the *same* site. A zero ``a_token``
+    residual would prove the decoder hook is harmless while saying nothing about
+    a conditioning hook that is the thing actually being used, so the payload
+    follows the architecture under test.
+    """
+    from pxf.couple.pxdesign_iface import ConditioningFeedback
+
+    early = [arm for arm in trained.values() if arm["arch"] != "late"]
+    if not early:
+        return torch.zeros(1, int(length), int(c_token), device=device), "decoder"
+    pair = any(arm["pair"] for arm in early)
+    return (
+        ConditioningFeedback(
+            delta_single=torch.zeros(1, int(length), int(c_s), device=device),
+            delta_pair=(
+                torch.zeros(int(length), int(length), int(c_z), device=device)
+                if pair
+                else None
+            ),
+        ),
+        "conditioning",
     )
 
 
@@ -523,14 +600,18 @@ def main(argv=None):
             path,
             c_h_V=c_h_V,
             c_token=px_driver.c_token,
+            c_s=px_driver.c_s,
+            c_z=px_driver.c_z,
             sb_cfg=sb_cfg,
             use_ema=args.ema,
             device=device,
         )
         logger.info(
-            "arm %s: variant=%s step=%d ema=%s bs_policy=%s",
+            "arm %s: arch=%s variant=%s pair=%s step=%d ema=%s bs_policy=%s",
             label,
+            trained[label]["arch"],
             trained[label]["variant"],
+            trained[label]["pair"],
             trained[label]["step"],
             trained[label]["is_ema"],
             trained[label]["bs_policy"],
@@ -625,8 +706,13 @@ def main(argv=None):
                 # zero. Must reproduce bb0 exactly, or everything below is
                 # measuring the second call rather than the correction.
                 clock = time.perf_counter()
-                zeros = torch.zeros(
-                    1, int(aatype.shape[0]), px_driver.c_token, device=device
+                zeros, zero_site = zero_payload(
+                    trained,
+                    length=int(aatype.shape[0]),
+                    c_token=px_driver.c_token,
+                    c_s=px_driver.c_s,
+                    c_z=px_driver.c_z,
+                    device=device,
                 )
                 repeat, _a = controller.backbone(x_noisy, sigma, feedback=zeros)
                 produced["zero"] = (
@@ -634,7 +720,10 @@ def main(argv=None):
                     denoise_seconds + (time.perf_counter() - clock),
                     2,
                     dict(
-                        deviation_from_bb0=float((repeat - upstream.bb0_flat).abs().max())
+                        deviation_from_bb0=float(
+                            (repeat - upstream.bb0_flat).abs().max()
+                        ),
+                        zero_site=zero_site,
                     ),
                 )
 
@@ -655,8 +744,11 @@ def main(argv=None):
                         2,
                         dict(
                             variant=arm["variant"],
+                            arch=arm["arch"],
                             needs_packing=needs,
                             delta_a_norm=stats.get("delta_a_norm"),
+                            delta_s_norm=stats.get("delta_s_norm"),
+                            delta_z_norm=stats.get("delta_z_norm"),
                             relative_residual=stats.get("relative_residual"),
                         ),
                     )
@@ -814,6 +906,11 @@ def main(argv=None):
         entry["variant"] = next(
             (r.get("variant") for r in arm_rows if r.get("variant")), None
         )
+        entry["arch"] = next((r.get("arch") for r in arm_rows if r.get("arch")), None)
+        if name == "zero":
+            entry["zero_site"] = next(
+                (r.get("zero_site") for r in arm_rows if r.get("zero_site")), None
+            )
         entry["denoiser_calls"] = arm_rows[0]["denoiser_calls"]
         # Read off the rows rather than recomputed from the arm name: the flag
         # and the seconds it explains have to come from one decision, or the
@@ -847,7 +944,12 @@ def main(argv=None):
                 continue
             summary = {key: _mean(rows_at, key) for key in bb_metrics.HEADLINE}
             summary["n"] = len(rows_at)
-            for key in ("delta_a_norm", "relative_residual"):
+            for key in (
+                "delta_a_norm",
+                "delta_s_norm",
+                "delta_z_norm",
+                "relative_residual",
+            ):
                 if any(key in r for r in rows_at):
                     summary[key] = _mean(rows_at, key)
             entry["arms"][name] = summary
@@ -906,7 +1008,10 @@ def main(argv=None):
             gpu_nondeterminism_angstrom=GPU_NONDETERMINISM,
         ),
         checkpoints={
-            k: {x: v[x] for x in ("path", "variant", "step", "is_ema")}
+            k: {
+                **{x: v[x] for x in ("path", "variant", "arch", "pair", "step", "is_ema")},
+                "identity": v["module"].identity(),
+            }
             for k, v in trained.items()
         },
         manifest=dict(

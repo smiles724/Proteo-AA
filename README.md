@@ -91,14 +91,19 @@ the backbone's denoising loop, so predicted side chains feed back into the
 backbone estimate. [`docs/sb_pilot.md`](docs/sb_pilot.md) covers the SC → BB
 pilot: what it tests, the trained controls that make its result readable, the
 measured sensitivity of the feedback path, and the two correctness fixes the
-coupling needed first.
+coupling needed first. Its result was that the correction is real but not
+side-chain-specific *at the decoder-input injection site*
+([`docs/sb_pilot_results.md`](docs/sb_pilot_results.md)), so
+[`docs/early_conditioning.md`](docs/early_conditioning.md) covers the follow-up:
+the same correction injected into `s_single` and `z_pair`, upstream of the atom
+encoder and the transformer, with the same pool and the same controls.
 
 ```bash
 export PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn"
 export PROTENIX_ROOT_DIR=/hai/scratch/yfsun/protenix_data
 export PROTENIX_DATA_ROOT_DIR=/hai/scratch/yfsun/protenix_data/common
 export LAYERNORM_TYPE=torch
-python -m pytest tests/ -q          # 491 passed, 4 skipped
+python -m pytest tests/ -q          # 573 passed, 6 skipped
 ```
 
 All four are needed. Without the `PROTENIX_*` pair the featurizer cannot find

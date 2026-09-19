@@ -1209,6 +1209,14 @@ def main(argv=None):
                 continue
             summary = {key: _mean(rows_at, key) for key in bb_metrics.HEADLINE}
             summary["n"] = len(rows_at)
+            # The fields comparison_plan identifies candidates and controls by.
+            # Without them every per-sigma entry looks like an unlabelled arm,
+            # comparison_plan finds no candidate, and the table collapses to
+            # "vs bb0" -- which is exactly what it did: the per-sigma view lost
+            # the full-versus-control comparison, the one the whole experiment
+            # turns on, while the pooled table still had it.
+            for field in ("variant", "arch", "pair", "source_arm"):
+                summary[field] = arms.get(name, {}).get(field)
             for key in (
                 "delta_a_norm",
                 "delta_s_norm",

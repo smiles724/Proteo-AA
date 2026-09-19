@@ -1,5 +1,13 @@
 # E1 and E2: moving the SC → BB correction into the conditioning
 
+> **Both experiments have run. See
+> [`early_conditioning_results.md`](early_conditioning_results.md) for the
+> result and the exit decision: the injection site was a real limitation
+> (+0.0224 Å against the late site's +0.0007), but the correction is
+> reproduced by a BB-only conditioner at 2.6× less cost and the
+> side-chain-specific component is indistinguishable from zero. This
+> document remains the design and method reference.**
+
 The late pilot's answer was specific, and it is worth restating precisely
 because these two experiments are built on it. From
 [`sb_pilot_results.md`](sb_pilot_results.md): a 60° rotamer flip moves the

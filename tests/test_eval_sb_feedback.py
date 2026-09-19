@@ -479,6 +479,31 @@ def test_the_perturbed_arm_is_paired_against_the_arm_it_perturbed(mod):
     assert "perturbed" in mod.comparison_plan(arms)[1]["full"]
 
 
+def test_per_sigma_entries_carry_what_the_plan_identifies_arms_by(mod):
+    """A per-sigma summary is an arm too, and the plan reads labels off it.
+
+    The per-sigma tables are built from trimmed copies of the arm entries. When
+    those copies dropped variant/arch/pair, comparison_plan saw no candidates
+    and every per-sigma row collapsed to "vs bb0" -- losing the
+    full-versus-control comparison at each noise level, which is where the late
+    pilot's sharpest findings came from, while the pooled table still had it.
+    """
+    full_entry = dict(
+        backbone_rmsd=0.80, variant="full", arch="early_s", pair=False, n=64
+    )
+    trimmed = {k: v for k, v in full_entry.items() if k in ("backbone_rmsd", "n")}
+    arms_labelled = {"bb0": dict(backbone_rmsd=0.9), "full": full_entry,
+                     "bb_only": dict(backbone_rmsd=0.85, variant="bb_only",
+                                     arch="early_s", pair=False)}
+    arms_trimmed = {"bb0": dict(backbone_rmsd=0.9), "full": trimmed,
+                    "bb_only": dict(backbone_rmsd=0.85)}
+    assert "bb_only" in mod.pairings(arms_labelled)["full"]
+    assert "bb_only" not in mod.pairings(arms_trimmed)["full"], (
+        "unlabelled arms should not resolve controls -- this is the state the "
+        "per-sigma loop must never be in"
+    )
+
+
 def test_every_arm_is_still_paired_against_bb0(mod):
     arms = two_full_arms()["arms"]
     plan = mod.pairings(arms)

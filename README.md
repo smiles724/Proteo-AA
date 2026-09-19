@@ -96,7 +96,11 @@ side-chain-specific *at the decoder-input injection site*
 ([`docs/sb_pilot_results.md`](docs/sb_pilot_results.md)), so
 [`docs/early_conditioning.md`](docs/early_conditioning.md) covers the follow-up:
 the same correction injected into `s_single` and `z_pair`, upstream of the atom
-encoder and the transformer, with the same pool and the same controls.
+encoder and the transformer, with the same pool and the same controls. Its
+result is in
+[`docs/early_conditioning_results.md`](docs/early_conditioning_results.md) — the
+site mattered a great deal and side-chain specificity failed again, leaving a
+BB-only early conditioner as the candidate worth keeping.
 
 ```bash
 export PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn"

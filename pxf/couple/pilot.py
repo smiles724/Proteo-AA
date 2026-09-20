@@ -81,6 +81,9 @@ class UpstreamState:
             seq_mask=move(packed.seq_mask),
             psce=move(packed.psce),
             h_base=move(packed.h_base),
+            h_masked=move(packed.h_masked),
+            h_predicted=move(packed.h_predicted),
+            aatype_predicted=move(packed.aatype_predicted),
         )
         from pxf.couple.visibility import Visibility
 

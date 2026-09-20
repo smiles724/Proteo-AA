@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -76,25 +77,85 @@ logger = logging.getLogger("official_single_event")
 
 ARMS = ("baseline", "bb_only", "full")
 CLASH_RADIUS = 2.6
+BACKBONE_NAMES = ("N", "CA", "C", "O")
+# Ideal trans-peptide Ca-Ca separation; a real chain sits within ~0.1 A of it.
+CA_CA_IDEAL = 3.80
+
+
+def binder_backbone(coords, design_mask, topology):
+    """Per-residue N/CA/C/O for the generated chain, in token order.
+
+    Returns ``(bb, present)`` with ``bb`` shaped ``[L, 4, 3]``. Missing atoms
+    are zero and flagged in ``present`` rather than silently dropped, so a
+    downstream mean cannot quietly average over absent coordinates.
+    """
+    a2t = topology.atom_to_token_idx.reshape(-1).tolist()
+    names = list(topology.atom_names)
+    tokens = torch.nonzero(design_mask.reshape(-1)).reshape(-1).tolist()
+    slot = {name: i for i, name in enumerate(BACKBONE_NAMES)}
+    order = {tok: i for i, tok in enumerate(tokens)}
+
+    bb = torch.zeros(len(tokens), 4, 3, dtype=coords.dtype, device=coords.device)
+    present = torch.zeros(len(tokens), 4, dtype=torch.bool, device=coords.device)
+    for atom_index, tok in enumerate(a2t):
+        row = order.get(int(tok))
+        if row is None:
+            continue
+        col = slot.get(str(names[atom_index]))
+        if col is None:
+            continue
+        bb[row, col] = coords[atom_index]
+        present[row, col] = True
+    return bb, present
 
 
 def chain_geometry(coords, design_mask, topology):
-    """Min distance / clash count between generated and target backbone."""
+    """Generated-vs-target backbone contact geometry.
+
+    Reports overlap as a *continuous* severity as well as a thresholded count.
+    A count alone exaggerates small shifts: a pair moving 2.622 -> 2.581 A
+    crosses the 2.6 A cutoff and turns 0 clashes into 1, which reads as a
+    categorical change when the underlying move is 0.04 A.
+    """
     a2t = topology.atom_to_token_idx.reshape(-1)
     names = topology.atom_names
-    backbone = torch.tensor(
-        [n in ("N", "CA", "C", "O") for n in names], device=coords.device
+    is_bb = torch.tensor(
+        [str(n) in BACKBONE_NAMES for n in names], device=coords.device
     )
     token_is_design = design_mask.to(coords.device)[a2t]
-    gen = coords[backbone & token_is_design]
-    tgt = coords[backbone & ~token_is_design]
+    gen = coords[is_bb & token_is_design]
+    tgt = coords[is_bb & ~token_is_design]
     if gen.numel() == 0 or tgt.numel() == 0:
         return dict(min_dist=None, clashes=None, contacts=None)
     d = torch.cdist(gen.float(), tgt.float())
+    depth = (CLASH_RADIUS - d).clamp_min(0.0)
     return dict(
-        min_dist=round(float(d.min()), 3),
+        min_dist=round(float(d.min()), 4),
         clashes=int((d < CLASH_RADIUS).sum()),
         contacts=int((d < 5.0).sum()),
+        # continuous severity: how far inside the cutoff, summed and worst-case
+        overlap_depth_sum=round(float(depth.sum()), 4),
+        overlap_depth_max=round(float(depth.max()), 4),
+    )
+
+
+def backbone_chemistry(bb, present):
+    """Guardrail: is the generated chain a chemically sane backbone?
+
+    Consecutive Ca-Ca separation is the cheapest sufficient statistic -- a
+    broken or collapsed chain shows up immediately, and it needs no side-chain
+    information, which the baseline arm does not have.
+    """
+    ca, ok = bb[:, 1], present[:, 1]
+    pair = ok[:-1] & ok[1:]
+    if int(pair.sum()) == 0:
+        return dict(ca_ca_mean=None, ca_ca_breaks=None, ca_ca_compressions=None)
+    step = (ca[1:] - ca[:-1]).norm(dim=-1)[pair]
+    return dict(
+        ca_ca_mean=round(float(step.mean()), 4),
+        ca_ca_max_dev=round(float((step - CA_CA_IDEAL).abs().max()), 4),
+        ca_ca_breaks=int((step > 4.5).sum()),
+        ca_ca_compressions=int((step < 3.0).sum()),
     )
 
 
@@ -161,12 +222,24 @@ def main():
     # rather than trusted, since a mismatch would only surface as a shape
     # error deep inside the injection.
     c_token = int(den.model.diffusion_module.layernorm_a.weight.shape[-1])
+    # `load_arm` on this branch rebuilds whichever architecture the checkpoint
+    # records. The late arms (E1's full / bb_only) use only c_h_V and c_token;
+    # c_s and c_z size the early/atom conditioners, which inject into s_single
+    # and z_pair instead. Both are read off the loaded model rather than
+    # configured -- they are 384 and 128 here against a c_token of 768, so a
+    # conditioner built from c_token would be a shape error at the hook.
+    from pxf.couple.pxdesign_iface import conditioning_widths
+
+    c_s, c_z = conditioning_widths(den.model)
+    logger.info("widths: c_token=%d c_s=%d c_z=%d c_h_V=%d",
+                c_token, c_s, c_z, c_h_V)
 
     trained = {}
     for spec in args.checkpoint:
         label, path = spec.split("=", 1)
         trained[label] = load_arm(path, c_h_V=c_h_V, c_token=c_token,
-                                  sb_cfg=sb_cfg, use_ema=args.ema, device=device)
+                                  c_s=c_s, c_z=c_z, sb_cfg=sb_cfg,
+                                  use_ema=args.ema, device=device)
         logger.info("arm %s: variant=%s step=%d", label,
                     trained[label]["variant"], trained[label]["step"])
 
@@ -187,8 +260,14 @@ def main():
         event_step = int(args.event_step)
     event_sigma = float(t_hat_by_step[event_step])
     in_window = 0.1 <= event_sigma <= 2.0
-    logger.info("event step %d -> t_hat %.4f (gate window [0.1, 2.0]: %s)",
-                event_step, event_sigma, "open" if in_window else "CLOSED")
+    # The solver has one denoiser evaluation per schedule step, so substage
+    # is 0; it is recorded rather than implied so a future multi-stage
+    # solver cannot silently reuse an event key that no longer means this.
+    event_substage = 0
+    logger.info("event step %d substage %d -> t_hat %.4f "
+                "(gate window [0.1, 2.0]: %s)",
+                event_step, event_substage, event_sigma,
+                "open" if in_window else "CLOSED")
     if not in_window:
         logger.warning(
             "the event is outside the trained gate; the residual will be zero "
@@ -229,7 +308,7 @@ def main():
         )
         logger.info("shared sequence (%d aa): %s...", len(sequence), sequence[:40])
 
-        rows = {}
+        rows, coords_by_arm, present_by_arm = {}, {}, {}
         for arm in ARMS:
             feedback, module = arm_feedback(
                 arm, trained=trained, adapters=adapters, controller=controller,
@@ -256,18 +335,26 @@ def main():
                     return delta
 
             tap.reset()
+            clock = time.perf_counter()
             x0, _, stats = run_trajectory(
                 denoise=plain, stream=RngStream("bb", args.seed, device=device),
-                resume=state, event=(event_step, 0), feedback=feedback,
+                resume=state, event=(event_step, event_substage), feedback=feedback,
                 **common,
             )
+            elapsed = time.perf_counter() - clock
+            flat = x0.reshape(-1, 3)
+            bb, present = binder_backbone(flat, structure.design_mask,
+                                          structure.topology)
+            coords_by_arm[arm] = bb.detach().cpu().numpy()
+            present_by_arm[arm] = present.detach().cpu().numpy()
             rows[arm] = dict(
                 injections=stats["injections"],
                 tap_injections=tap.injections,
                 calls=stats["calls"],
+                seconds=round(elapsed, 2),
                 **magnitude,
-                **chain_geometry(x0.reshape(-1, 3), structure.design_mask,
-                                 structure.topology),
+                **chain_geometry(flat, structure.design_mask, structure.topology),
+                **backbone_chemistry(bb, present),
             )
             logger.info("%s: %s", arm, json.dumps(rows[arm]))
 
@@ -280,7 +367,32 @@ def main():
         mapping=token_map.identity(), arms=rows,
     ), indent=2))
 
-    (out / "single_event.json").write_text(json.dumps(rows, indent=2))
+    import numpy as np
+
+    meta = dict(
+        target=str(data["sample_name"]), seed=int(args.seed),
+        n_token=n_tokens, n_atom=den.n_atom,
+        event_step=event_step, event_substage=event_substage,
+        event_t_hat=round(event_sigma, 6), gate_window_open=in_window,
+        n_step=args.n_step, eta=2.5, sequence=sequence,
+        sequence_length=len(sequence), mapping=token_map.identity(),
+        provenance=_PROVENANCE,
+    )
+    (out / "single_event.json").write_text(
+        json.dumps(dict(meta=meta, arms=rows), indent=2)
+    )
+    # One sequence per triplet, written once: the arms share it by construction,
+    # so ESMFold runs once per (target, seed) and the same refold is compared
+    # against each arm's own backbone.
+    (out / "sequence.fasta").write_text(
+        f">{meta['target']}_s{args.seed}\n{sequence}\n"
+    )
+    np.savez(
+        out / "arms.npz",
+        sequence=np.array(sequence),
+        **{f"bb_{a}": v for a, v in coords_by_arm.items()},
+        **{f"present_{a}": v for a, v in present_by_arm.items()},
+    )
     print("\n=== CHECKS ===")
     ok = True
     if rows.get("baseline", {}).get("injections") != 0:

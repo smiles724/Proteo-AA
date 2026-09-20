@@ -232,6 +232,14 @@ class PackedStructure:
     visibility: Visibility
     psce: torch.Tensor | None = None  # [B, L, 33] predicted per-atom SC error, A
     h_base: torch.Tensor | None = None  # [B, L, c_h_V] side-chain-masked encoding
+    # The sequence-attribution controls. h_base is encoded FROM the native
+    # aatype, so an arm reading it is reading the sequence as well as the
+    # backbone; these separate the two. Filled on demand by
+    # CoupledDenoiser.encode_sequence_controls, not by the cycle, because only
+    # some arms need them and each costs an extra encoder pass.
+    h_masked: torch.Tensor | None = None  # encoded with every residue set to X
+    h_predicted: torch.Tensor | None = None  # encoded under the predicted sequence
+    aatype_predicted: torch.Tensor | None = None  # [B, L] FaMPNN's own inverse fold
 
     @property
     def available(self):
@@ -264,4 +272,7 @@ class PackedStructure:
             coords37=cut(self.coords37),
             psce=cut(self.psce),
             h_base=cut(self.h_base),
+            h_masked=cut(self.h_masked),
+            h_predicted=cut(self.h_predicted),
+            aatype_predicted=cut(self.aatype_predicted),
         )

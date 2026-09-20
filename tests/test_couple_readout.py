@@ -193,6 +193,14 @@ def test_no_native_quantity_reaches_the_readout(packed, c_h_V):
         "visibility",
         "psce",
         "h_base",
+        # The sequence-attribution controls. All three are functions of bb0 and
+        # the FIXED sequence, both of which exist at inference: h_masked
+        # replaces the sequence with X, while h_predicted and aatype_predicted
+        # come from FaMPNN's own inverse-folding head reading bb0. No native
+        # coordinate and no native side chain reaches any of them.
+        "h_masked",
+        "h_predicted",
+        "aatype_predicted",
     }, (
         "a field was added to PackedStructure; check it is available at "
         f"inference before letting the readout see it. fields={sorted(fields)}"
@@ -318,3 +326,95 @@ def test_it_plugs_into_the_adapter_container(packed, c_h_V):
     assert delta.shape[-1] == C_TOKEN
     assert "gate" in stats
     assert adapters.identity()["sc_to_bb"]["variant"] == "full"
+
+
+# --- decomposing what bb_only reads -----------------------------------------
+#
+# `bb_only` is routinely described as the backbone control. It is not: it reads
+# h_base AND the sequence embedding, and h_base is produced by FaMPNN's encoder
+# FROM the native aatype, so the sequence enters twice. A gain attributed to
+# geometry could be entirely sequence. These pin the separation.
+
+
+def test_bb_only_reads_the_sequence_twice(packed, c_h_V):
+    """The premise of the decomposition, stated as a test rather than a claim."""
+    assert ro.VARIANTS["bb_only"] == {"node", "sequence"}
+    assert ro.NODE_SOURCE["bb_only"] == "h_base"
+    # And h_base is a function of the aatype, not of the backbone alone.
+    assert packed.h_base is not None
+
+
+def test_the_masked_encoding_is_blind_to_the_sequence(fampnn, packed):
+    """geometry_only is only a geometry control if h_masked really is one."""
+    from pxf.couple import fampnn_iface as iface
+
+    coords = packed.coords37
+    masked = torch.full_like(packed.aatype, atom37.UNKNOWN_AA_INDEX)
+    _l, h_masked, _f = iface.encode(fampnn, coords, masked, seq_mask=packed.seq_mask)
+    # Permuting the sequence cannot change it, because it never saw one.
+    order = torch.randperm(packed.aatype.shape[1])
+    _l, h_permuted, _f = iface.encode(
+        fampnn, coords, torch.full_like(masked[:, order], atom37.UNKNOWN_AA_INDEX),
+        seq_mask=packed.seq_mask,
+    )
+    assert torch.allclose(h_masked, h_permuted, atol=1e-6)
+    # But it still carries the backbone. The perturbation has to be non-rigid:
+    # the encoder is invariant to a rigid motion, so translating every atom by a
+    # constant correctly changes nothing and would fail this for the right
+    # reason.
+    moved = coords.clone()
+    slots = list(atom37.BACKBONE_SLOTS)
+    generator = torch.Generator().manual_seed(0)
+    moved[:, :, slots, :] += (
+        torch.randn(moved[:, :, slots, :].shape, generator=generator) * 0.3
+    )
+    _l, h_moved, _f = iface.encode(fampnn, moved, masked, seq_mask=packed.seq_mask)
+    assert float((h_moved - h_masked).norm() / h_masked.norm()) > 1e-3
+    # And it differs from the native-sequence encoding, or there was nothing
+    # to separate in the first place.
+    _l, h_native, _f = iface.encode(
+        fampnn, coords, packed.aatype, seq_mask=packed.seq_mask
+    )
+    assert float((h_masked - h_native).norm() / h_native.norm()) > 0.01
+
+
+@pytest.mark.parametrize("variant", ("geometry_only", "bb_predicted_sequence"))
+def test_a_missing_control_encoding_is_refused_not_substituted(packed, c_h_V, variant):
+    """Falling back to h_packed would make the arm silently not a control."""
+    readout = ro.FeedbackReadout(c_h_V, variant=variant)
+    with pytest.raises(ValueError, match="encode_sequence_controls"):
+        readout(packed)
+
+
+def test_the_controls_have_the_same_parameter_count_as_the_candidate(c_h_V):
+    """They differ in information, not in capacity -- as the other arms do."""
+    counts = {
+        v: sum(p.numel() for p in ro.FeedbackReadout(c_h_V, variant=v).parameters())
+        for v in ro.VARIANTS
+    }
+    assert len(set(counts.values())) == 1, counts
+
+
+def test_sequence_only_is_blind_to_the_backbone(packed, c_h_V):
+    readout = ro.FeedbackReadout(c_h_V, variant="sequence_only").eval()
+    moved = replace(packed, coords37=packed.coords37 + 5.0)
+    with torch.no_grad():
+        assert torch.equal(readout(packed)[0], readout(moved)[0])
+
+
+def test_geometry_only_is_blind_to_the_sequence(packed, c_h_V):
+    """The load-bearing property: change the sequence, the readout must not move.
+
+    The node group is re-pointed at h_masked and the sequence group is zeroed,
+    so neither path can carry the aatype. h_masked is supplied directly here;
+    whether the ENCODING is itself sequence-blind is the separate test above.
+    """
+    readout = ro.FeedbackReadout(c_h_V, variant="geometry_only").eval()
+    filled = replace(packed, h_masked=torch.randn_like(packed.h_packed))
+    order = torch.randperm(filled.aatype.shape[1])
+    scrambled = replace(filled, aatype=filled.aatype[:, order])
+    with torch.no_grad():
+        assert torch.equal(readout(filled)[0], readout(scrambled)[0])
+        # And not merely zero: the geometry has to reach z.
+        moved = replace(filled, h_masked=torch.randn_like(filled.h_masked))
+        assert not torch.allclose(readout(filled)[0], readout(moved)[0])

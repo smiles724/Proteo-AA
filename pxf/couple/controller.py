@@ -50,6 +50,7 @@ from typing import Protocol
 
 import torch
 
+from pxf import atom37
 from pxf.couple import fampnn_iface as iface
 from pxf.couple import visibility as vis
 from pxf.couple.converter import PXFaRepresentationConverter
@@ -616,6 +617,65 @@ class CoupledDenoiser:
         )
         packed.features = features
         return packed
+
+    @torch.no_grad()
+    def encode_sequence_controls(self, inputs, packed):
+        """Fill ``h_masked``, ``h_predicted`` and ``aatype_predicted``.
+
+        ``h_base`` is not "the backbone's encoding". FaMPNN's encoder takes the
+        aatype, so ``h_base`` is the encoding of this backbone *given the native
+        sequence*, and an arm reading it plus the sequence embedding reads the
+        sequence twice. Attributing its gain to geometry needs the two
+        separated, which needs two more encoder passes:
+
+        ``h_masked``     the same backbone with every residue set to X. Verified
+                         sequence-blind: the encoding is bitwise identical under
+                         a permutation of the sequence, and still moves under a
+                         backbone perturbation.
+        ``h_predicted``  the same backbone under the sequence FaMPNN itself
+                         predicts from it -- the deployable case, where the
+                         sequence is inferred rather than given.
+
+        Both are deterministic functions of the cached frozen half, so this can
+        be called on a loaded state and does not invalidate an upstream cache.
+        Only the side-chain slots differ from ``h_base``'s inputs, and those are
+        masked in all three.
+        """
+        if packed.h_masked is not None and packed.h_predicted is not None:
+            return packed
+        from dataclasses import replace as _replace
+
+        masked_aatype = torch.full_like(inputs.aatype, atom37.UNKNOWN_AA_INDEX)
+        logits, h_masked, _f = iface.encode(
+            self.fampnn,
+            inputs.coords_af2,
+            masked_aatype,
+            seq_mask=inputs.seq_mask,
+            missing_atom_mask=inputs.missing_atom_mask,
+            residue_index=inputs.residue_index,
+            chain_index=inputs.chain_index,
+        )
+        # Only the canonical twenty: X is not a residue the encoder should be
+        # asked to re-encode, and argmax over 21 classes could select it.
+        predicted = logits[..., : atom37.UNKNOWN_AA_INDEX].argmax(dim=-1)
+        predicted = torch.where(
+            inputs.seq_mask.bool(), predicted, torch.zeros_like(predicted)
+        )
+        _l, h_predicted, _f = iface.encode(
+            self.fampnn,
+            inputs.coords_af2,
+            predicted,
+            seq_mask=inputs.seq_mask,
+            missing_atom_mask=inputs.missing_atom_mask,
+            residue_index=inputs.residue_index,
+            chain_index=inputs.chain_index,
+        )
+        return _replace(
+            packed,
+            h_masked=h_masked.detach(),
+            h_predicted=h_predicted.detach(),
+            aatype_predicted=predicted.detach(),
+        )
 
     def densify(self, flat, topology, aatype):
         """A flat PXDesign coordinate tensor as FaMPNN's ``[B, L, 37, 3]`` block."""

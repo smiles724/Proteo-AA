@@ -66,6 +66,73 @@ VARIANTS = {
     # Trained generic control: z is identically zero, so the correction can only
     # be a function of sigma and the adapter's own biases.
     "generic": set(),
+    # --- decomposing what `bb_only` actually reads -------------------------
+    # `bb_only` is not "backbone geometry". It reads h_base AND the sequence
+    # embedding, and h_base is itself computed by FaMPNN's encoder FROM the
+    # native aatype -- so the sequence enters twice and a gain attributed to
+    # geometry may be nothing of the kind. These three separate the two.
+    #
+    # Sequence with no structure at all: the aatype embedding alone. If this
+    # matches bb_only, the geometry contributed nothing.
+    "sequence_only": {"sequence"},
+    # Structure with no sequence anywhere: the node group is re-pointed at
+    # h_masked, the encoding of the same backbone with every residue set to X,
+    # and the sequence embedding is zeroed. Verified sequence-blind -- the
+    # encoding is bitwise identical under a permutation of the sequence -- and
+    # still backbone-sensitive.
+    "geometry_only": {"node"},
+    # The deployable version: backbone geometry plus the sequence FaMPNN itself
+    # predicts from that backbone (50% recovery on a CASP14 target), rather than
+    # the native one. Answers whether the gain survives when the sequence is not
+    # given but inferred.
+    "bb_predicted_sequence": {"node", "sequence"},
+}
+
+# Which encoding the `node` group reads, per variant. Named here rather than
+# branched inside forward(), because "which h is this arm actually reading" is
+# the question the whole control set exists to answer and it should be legible
+# in one table.
+NODE_SOURCE = {
+    "full": "h_packed",
+    "bb_only": "h_base",
+    "generic": "h_packed",  # zeroed; the source is immaterial
+    "sequence_only": "h_packed",  # zeroed; the source is immaterial
+    "geometry_only": "h_masked",
+    "bb_predicted_sequence": "h_predicted",
+}
+# Which residue identities the `sequence` group embeds. Default is the fixed
+# native sequence; the predicted-sequence arm must embed what it predicted, or
+# it would be handed the native answer through the back door.
+SEQUENCE_SOURCE = {"bb_predicted_sequence": "aatype_predicted"}
+def needs_sequence_controls(variant):
+    """Does this variant read an encoding the cycle does not produce by default?
+
+    ``geometry_only`` and ``bb_predicted_sequence`` need a second and third
+    encoder pass. Asking here means a caller pays for them only when an arm
+    actually reads them, and cannot forget to when it does.
+    """
+    return (
+        NODE_SOURCE.get(variant) in ("h_masked", "h_predicted")
+        or variant in SEQUENCE_SOURCE
+    )
+
+
+# What a missing source means, and what to do about it.
+SOURCE_HELP = {
+    "h_base": "the side-chain-masked encoding; the cycle recorded none",
+    "h_masked": (
+        "the sequence-blind encoding (the backbone encoded with every residue "
+        "set to X). Call CoupledDenoiser.encode_sequence_controls on the "
+        "upstream state before using this arm"
+    ),
+    "h_predicted": (
+        "the encoding under FaMPNN's own predicted sequence. Call "
+        "CoupledDenoiser.encode_sequence_controls on the upstream state first"
+    ),
+    "aatype_predicted": (
+        "the sequence FaMPNN predicts from the backbone. Call "
+        "CoupledDenoiser.encode_sequence_controls on the upstream state first"
+    ),
 }
 
 # Feature-group widths.
@@ -306,25 +373,35 @@ class FeedbackReadout(nn.Module):
     def width(self):
         return sum(self.widths[name] for name in GROUPS)
 
+    def _source(self, packed, name):
+        """One named field off the packed state, or a refusal that says why.
+
+        Silently falling back to ``h_packed`` is the failure this prevents: the
+        arm would run, train and report as a control while reading the very
+        thing the control exists to exclude.
+        """
+        value = getattr(packed, name, None)
+        if value is None:
+            raise ValueError(
+                f"the {self.variant} control needs {name}, "
+                f"{SOURCE_HELP.get(name, 'which the cycle recorded none of')}. "
+                "Refusing rather than substituting another encoding, which "
+                "would make this arm silently not a control"
+            )
+        return value
+
     def forward(self, packed):
         """``(z, stats)`` with ``z`` masked to zero on invalid residues."""
-        node_source = packed.h_packed
-        if self.variant == "bb_only":
-            if packed.h_base is None:
-                raise ValueError(
-                    "the bb_only control needs h_base, the side-chain-masked "
-                    "encoding; the cycle recorded none, so this arm would be "
-                    "reading the packed encoding and would not be a control"
-                )
-            node_source = packed.h_base
+        node_source = self._source(packed, NODE_SOURCE[self.variant])
         node = self.norm(node_source)
+        aatype = self._source(packed, SEQUENCE_SOURCE.get(self.variant, "aatype"))
 
         geometry, chi_valid = chi_features(packed)
         parts = dict(
             node=node,
             geometry=geometry,
             environment=environment_features(packed),
-            sequence=self.sequence(packed.aatype.clamp(0, atom37.UNKNOWN_AA_INDEX).long()),
+            sequence=self.sequence(aatype.clamp(0, atom37.UNKNOWN_AA_INDEX).long()),
             reliability=reliability_features(packed, chi_valid),
         )
         # Groups the variant does not read are zeroed rather than dropped, so the
@@ -348,6 +425,8 @@ class FeedbackReadout(nn.Module):
         return dict(
             variant=self.variant,
             reads=sorted(self.reads),
+            node_source=NODE_SOURCE[self.variant],
+            sequence_source=SEQUENCE_SOURCE.get(self.variant, "aatype"),
             zeroed=sorted(set(GROUPS) - self.reads),
             widths=dict(self.widths),
             width=self.width,

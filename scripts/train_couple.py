@@ -666,6 +666,20 @@ def main(argv=None):
     )
 
     slots = list(atom37.BACKBONE_SLOTS)
+    # Whether the selected SC->BB arm reads the sequence-blind or
+    # predicted-sequence encodings, which the cycle does not build by default.
+    from pxf.couple.readout import needs_sequence_controls
+
+    needs_controls = bool(
+        sb_module is not None
+        and needs_sequence_controls(getattr(sb_module, "variant", None))
+    )
+    if needs_controls:
+        logger.info(
+            "arm %s reads a sequence-control encoding; each frozen half gets two "
+            "extra encoder passes (cache identity unchanged)",
+            sb_cfg.get("arm") or sb_cfg.get("variant"),
+        )
 
     def pxdesign_batches():
         """Real PXDesign proposals, with atom37 side-chain targets from the same file.
@@ -886,7 +900,17 @@ def main(argv=None):
                 bs_delta_h=trainer.bs_delta_h,
             )
             cache.put(entry["name"], entry["sigma"], entry["seed"], state.to("cpu"))
-        return structure, target, mask, x_noisy, sigma, state.to(device)
+        state = state.to(device)
+        if needs_controls:
+            # Two extra encoder passes, and only for the arms that read them.
+            # Deterministic from the cached frozen half, so this does NOT
+            # invalidate the upstream cache -- which is what keeps these arms
+            # comparable to every arm already trained on it.
+            state = replace(
+                state,
+                packed=controller.encode_sequence_controls(state.inputs, state.packed),
+            )
+        return structure, target, mask, x_noisy, sigma, state
 
     def pilot_batches():
         examples, featurized_by_name = build_pool(

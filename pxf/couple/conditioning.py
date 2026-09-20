@@ -121,6 +121,14 @@ ARMS = {
     "early_s_full": dict(arch="early_s", variant="full", pair=False),
     "early_s_bb_only": dict(arch="early_s", variant="bb_only", pair=False),
     "early_s_generic": dict(arch="early_s", variant="generic", pair=False),
+    # Decomposing what early_s_bb_only reads. It is backbone geometry AND the
+    # native sequence -- twice over, since h_base is encoded from the aatype --
+    # so its gain cannot be attributed to geometry without these.
+    "early_s_sequence_only": dict(arch="early_s", variant="sequence_only", pair=False),
+    "early_s_geometry_only": dict(arch="early_s", variant="geometry_only", pair=False),
+    "early_s_bb_predicted_sequence": dict(
+        arch="early_s", variant="bb_predicted_sequence", pair=False
+    ),
     # E2: predicted atoms -> residue and pair conditioning.
     "atom_sz_full": dict(arch="atom", variant="full", pair=True),
     "atom_sz_bb_only": dict(arch="atom", variant="bb_only", pair=True),

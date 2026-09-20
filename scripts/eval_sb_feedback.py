@@ -54,6 +54,7 @@ import logging
 import math
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
@@ -840,6 +841,11 @@ def main(argv=None):
             trained[label]["bs_policy"],
         )
     check_arms_comparable(trained)
+    from pxf.couple.readout import needs_sequence_controls
+
+    needs_controls = any(
+        needs_sequence_controls(arm["variant"]) for arm in trained.values()
+    )
     policies = {a["bs_policy"] for a in trained.values() if a["bs_policy"]}
     if len(policies) > 1:
         raise SystemExit(
@@ -932,6 +938,13 @@ def main(argv=None):
                     structure.topology, x_noisy, sigma, aatype, bs_delta_h=bs_delta_h
                 )
             frozen_seconds = time.perf_counter() - clock
+            if needs_controls:
+                upstream = replace(
+                    upstream,
+                    packed=controller.encode_sequence_controls(
+                        upstream.inputs, upstream.packed
+                    ),
+                )
             stages = upstream.timings
             # bb0 costs one denoise. The feedback arms additionally need the
             # packing rollout and the re-encode; the BB-only alternatives do not.

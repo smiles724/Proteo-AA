@@ -241,9 +241,13 @@ def packed(fampnn):
         chain_index=proposal.inputs.chain_index,
         num_steps=3,
     )
-    return controller.encode_predicted_packing(
+    packed = controller.encode_predicted_packing(
         proposal.inputs, sidechains, h_base=proposal.h_base, psce=aux.get("psce")
-    ).detach()
+    )
+    # Fill the sequence-attribution encodings through the real helper, so the
+    # arms that read them are exercised against what the pipeline actually
+    # produces rather than against a stand-in.
+    return controller.encode_sequence_controls(proposal.inputs, packed).detach()
 
 
 @pytest.fixture(scope="module")

@@ -42,6 +42,34 @@ SIGMA_BANDS = ((0.1, 0.3), (0.3, 0.7), (0.7, 1.3), (1.3, 2.0))
 TRAINABLE_BLOCKS = 4
 
 
+def band_windows(schedule, bands=SIGMA_BANDS):
+    """The schedule's own sigma values falling inside each band.
+
+    Sampling has to happen INSIDE the band. Drawing from the whole window and
+    clamping into the band -- which is what this did -- lands in the band only
+    17-32% of the time and pins the rest to an edge, so two adjacent bands
+    collapse onto their shared boundary and stop being separate measurements.
+    Restricting the draw to the band's own values cannot produce an edge pileup.
+
+    A band the trajectory does not populate is an error: it would otherwise
+    report a coefficient calibrated at a sigma the sampler never visits.
+    """
+    sigmas = schedule.trajectory()
+    inside = sigmas[(sigmas >= schedule.sigma_min) & (sigmas <= schedule.sigma_max)]
+    windows = []
+    for low, high in bands:
+        values = inside[(inside >= low) & (inside <= high)]
+        if values.numel() == 0:
+            raise SystemExit(
+                f"no trajectory step falls in sigma band [{low}, {high}] of the "
+                f"window [{schedule.sigma_min}, {schedule.sigma_max}]; the band "
+                "cannot be measured, so widen it or drop it rather than reporting "
+                "a coefficient from a sigma the sampler never reaches"
+            )
+        windows.append(values.to(torch.float32))
+    return windows
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", required=True)
@@ -109,6 +137,7 @@ def main(argv=None):
     schedule = CouplingNoiseSchedule(
         mode="trajectory", sigma_min=0.1, sigma_max=2.0, sigma_data=driver.sigma_data
     )
+    windows = band_windows(schedule)
     sidechain_slots = None
 
     records, skipped = [], []
@@ -137,11 +166,18 @@ def main(argv=None):
             torch.cuda.reset_peak_memory_stats(device)
         bands = []
         for index, (low, high) in enumerate(SIGMA_BANDS):
-            sigma = float(
-                schedule.sample(
-                    1, generator=torch.Generator().manual_seed(args.seed + index)
-                ).clamp(low, high)
+            # Seeded on sample_id, like every other draw here: seeding on the
+            # band index alone handed all four structures the same four sigmas,
+            # so the run held 4 draws rather than one per (structure, band).
+            values = windows[index]
+            pick = torch.randint(
+                values.numel(),
+                (1,),
+                generator=joint_random.generator_for(
+                    args.seed, sample_id, "backbone_sigma", occurrence=index
+                ),
             )
+            sigma = float(values[pick])
             backbone_noise = joint_random.draw_backbone_noise(
                 batch.backbone_target.shape,
                 joint_random.generator_for(args.seed, sample_id, "backbone_noise", occurrence=index),

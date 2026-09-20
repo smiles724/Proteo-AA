@@ -40,6 +40,10 @@ import torch
 SUPPORTED_SCHEDULES = ("lognormal", "uniform_t", "constant_t")
 
 STREAMS = (
+    # "backbone_sigma" picks the noise LEVEL; "backbone_noise" draws the
+    # perturbation at that level. They are separate streams on purpose: sharing
+    # one would tie which sigma an example gets to the noise drawn at it.
+    "backbone_sigma",
     "backbone_noise",
     "sidechain_time",
     "sidechain_noise",

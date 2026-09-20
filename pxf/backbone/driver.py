@@ -211,6 +211,35 @@ class PXDesignBackboneDriver:
             feature_dict = self.prepare_features(feature_dict)
         return Conditioning.build(self.model, feature_dict, chunk_size=self.chunk_size)
 
+    def denoise_direct(self, conditioning, x_noisy, sigma):
+        """One diffusion-module call, no hooks, coordinates only.
+
+        :meth:`bind` exists to capture ``a_token`` and to inject feedback, and it
+        does both with temporary forward hooks. A training path that wants
+        gradients through the backbone needs neither, and the hooks are actively
+        in the way there: they are what makes activation-checkpointing
+        recomputation diverge (``CheckpointError: A different number of tensors
+        was saved``), so a hook-free forward is the prerequisite for ever turning
+        checkpointing back on.
+
+        Gradients flow to whichever backbone parameters require them; nothing
+        here detaches.
+        """
+        sigma = torch.as_tensor(
+            sigma, device=x_noisy.device, dtype=x_noisy.dtype
+        ).reshape(-1)
+        return self.model.diffusion_module(
+            x_noisy=x_noisy,
+            t_hat_noise_level=sigma,
+            input_feature_dict=conditioning.input_feature_dict,
+            s_inputs=conditioning.s_inputs,
+            s_trunk=conditioning.s_trunk,
+            z_trunk=conditioning.z_trunk,
+            chunk_size=self.chunk_size,
+            inplace_safe=self.inplace_safe,
+            **self._cache_args,
+        )
+
     def bind(self, conditioning, *, tap=None):
         """A ``BackboneDenoiser`` closed over one target's conditioning."""
         owned_tap = tap or BackboneTap(self.model.diffusion_module)

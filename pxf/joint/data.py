@@ -381,6 +381,15 @@ class JointRefinementBatch:
     def length(self):
         return int(self.native_batch["aatype"].shape[-1])
 
+    @property
+    def device(self):
+        return self.backbone_target.device
+
+    @property
+    def backbone_mask_column(self):
+        """``[N_atom, 1]``, for multiplying a coordinate tensor."""
+        return self.backbone_mask.reshape(-1, 1).to(self.backbone_target.dtype)
+
     def to(self, device):
         moved = {
             name: value.to(device)

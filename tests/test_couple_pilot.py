@@ -171,3 +171,98 @@ def test_the_crop_size_is_part_of_the_identity():
     states without complaint.
     """
     assert identity(crop_size=256) != identity(crop_size=512)
+
+
+# --- .to(device) must move everything, not almost everything ----------------
+
+
+def _tensor_devices(obj, prefix=""):
+    """Every tensor reachable from a dataclass, as ``{path: device}``."""
+    import dataclasses
+
+    found = {}
+    for field in dataclasses.fields(obj):
+        value = getattr(obj, field.name)
+        path = f"{prefix}{field.name}"
+        if torch.is_tensor(value):
+            found[path] = value.device.type
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            found.update(_tensor_devices(value, prefix=f"{path}."))
+    return found
+
+
+def test_upstream_state_to_moves_every_tensor_it_carries(monkeypatch):
+    """A partial .to() is invisible until something uses the missed tensor.
+
+    ``inputs`` was not moved. Nothing used those tensors with a model after the
+    state came back from its CPU cache, so they sat on the wrong device
+    indefinitely; the first arm that re-encoded from a cached state on a GPU
+    failed inside FaMPNN's positional embedding, two hundred lines from the
+    cause. This walks the whole object rather than naming fields, so the next
+    field added is covered without anyone remembering to add it here.
+    """
+    state = _synthetic_upstream()
+    before = _tensor_devices(state)
+    assert "inputs.coords_af2" in before, "the walk is not reaching inputs"
+    assert "packed.h_packed" in before, "the walk is not reaching packed"
+    moved = state.to("cpu")  # no GPU needed: the point is that nothing is MISSED
+    after = _tensor_devices(moved)
+    assert set(after) == set(before), "a tensor disappeared from the state"
+    assert all(d == "cpu" for d in after.values())
+    # And the same walk on a real cached state would have caught the bug: every
+    # path present before must be present after, including nested ones.
+    assert len([k for k in after if k.startswith("inputs.")]) >= 5
+
+
+def _synthetic_upstream():
+    """The smallest UpstreamState with a populated `inputs` and `packed`."""
+    from pxf.couple.converter import CoupledInputs
+    from pxf.couple.pilot import UpstreamState
+    from pxf.couple.visibility import PackedStructure, Visibility
+
+    length = 4
+    zeros37 = torch.zeros(1, length, 37)
+    inputs = CoupledInputs(
+        coords_af2=torch.zeros(1, length, 37, 3),
+        atom_mask=zeros37.clone(),
+        aatype=torch.zeros(1, length, dtype=torch.long),
+        seq_mask=torch.ones(1, length),
+        missing_atom_mask=zeros37.clone(),
+        residue_index=torch.arange(length)[None],
+        chain_index=torch.zeros(1, length, dtype=torch.long),
+        design_mask=torch.ones(1, length, dtype=torch.bool),
+        sequence_known=torch.ones(1, length, dtype=torch.bool),
+        num_tokens=length,
+    )
+    visibility = Visibility(
+        available=zeros37.clone(),
+        missing_atom_mask=zeros37.clone(),
+        frame_valid=torch.ones(1, length, dtype=torch.bool),
+        sidechain_visible=torch.ones(1, length),
+        exists=zeros37.clone(),
+        stats={},
+    )
+    packed = PackedStructure(
+        h_packed=torch.zeros(1, length, 8),
+        coords37=torch.zeros(1, length, 37, 3),
+        aatype=torch.zeros(1, length, dtype=torch.long),
+        seq_mask=torch.ones(1, length),
+        visibility=visibility,
+        h_base=torch.zeros(1, length, 8),
+    )
+    return UpstreamState(
+        packed=packed,
+        bb0_flat=torch.zeros(1, length * 4, 3),
+        a_token=torch.zeros(1, length, 16),
+        delta_h=None,
+        sidechains=torch.zeros(1, length, 33, 3),
+        inputs=inputs,
+        sigma=torch.tensor([0.5]),
+    )
+
+
+def test_coupled_inputs_to_moves_every_tensor():
+    state = _synthetic_upstream()
+    devices = _tensor_devices(state.inputs.to("cpu"))
+    assert len(devices) == 9, f"expected every tensor field, got {sorted(devices)}"
+    assert all(d == "cpu" for d in devices.values())

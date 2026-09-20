@@ -98,6 +98,13 @@ class UpstreamState:
         return replace(
             self,
             packed=packed,
+            # `inputs` was omitted here until an arm re-encoded from a cached
+            # state on a GPU. Everything else in the frozen half was already on
+            # the right device by the time it was used, so a CPU-resident
+            # `inputs` was invisible -- and then handed CPU tensors to a CUDA
+            # model two hundred lines away, as a device mismatch inside FaMPNN's
+            # positional embedding.
+            inputs=self.inputs.to(device) if self.inputs is not None else None,
             bb0_flat=move(self.bb0_flat),
             a_token=move(self.a_token),
             delta_h=move(self.delta_h),

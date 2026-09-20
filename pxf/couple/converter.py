@@ -47,6 +47,23 @@ class CoupledInputs:
     num_tokens: int = 0
     dropped_atoms: list = field(default_factory=list)
 
+    def to(self, device):
+        """The same inputs with every tensor on ``device``.
+
+        Absent until a cached upstream state was re-encoded on a GPU: nothing
+        previously used these tensors with the model AFTER the state came back
+        from a CPU cache, so they could sit on the wrong device indefinitely
+        without anyone noticing.
+        """
+        from dataclasses import replace
+
+        moved = {
+            name: getattr(self, name).to(device)
+            for name, value in vars(self).items()
+            if torch.is_tensor(value)
+        }
+        return replace(self, **moved)
+
     @property
     def batch(self):
         return int(self.coords_af2.shape[0])

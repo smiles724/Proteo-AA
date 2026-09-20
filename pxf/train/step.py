@@ -249,7 +249,53 @@ def _clone(tensor, times):
 # ---- the diffusion term ----------------------------------------------------
 
 
-def diffusion_loss(
+@dataclass
+class SidechainTrainingPrediction:
+    """One training denoising step, before any loss is taken of it.
+
+    Split out of :func:`diffusion_loss` so a caller can score the *same*
+    prediction more than once -- the joint-refinement experiment needs both the
+    local diffusion loss and a global placement loss, and rerunning the denoiser
+    for the second one would score a different random state.
+
+    Every tensor whose leading axis is the clone axis is ``[(m b), ...]`` in
+    :func:`_clone`'s block order: clone-major, so ``index // b`` is the clone and
+    ``index % b`` the example.
+    """
+
+    q_pred: torch.Tensor  # [(m b), L, 33, 3] local-frame prediction
+    q_target: torch.Tensor  # [(m b), L, 33, 3] clean local-frame target
+    q_noised: torch.Tensor  # [(m b), L, 33, 3] what the denoiser was given
+    t: torch.Tensor  # [(m b)] diffusion time
+    sigma: torch.Tensor  # [(m b)] the noise level t corresponds to
+    weight: torch.Tensor  # [(m b)] EDM 1/c_out^2
+    loss_mask: torch.Tensor  # [(m b), L, 33] cloned diffusion target mask
+    aatype: torch.Tensor  # [(m b), L]
+    seq_mask: torch.Tensor  # [(m b), L]
+    multiplier: int = 1
+    batch_size: int = 1
+    self_conditioned: bool = False
+
+    @property
+    def clone_index(self):
+        """Which clone each row came from, ``[(m b)]``."""
+        return torch.arange(
+            self.q_pred.shape[0], device=self.q_pred.device
+        ) // max(1, self.batch_size)
+
+    @property
+    def example_index(self):
+        """Which batch element each row came from, ``[(m b)]``."""
+        return torch.arange(
+            self.q_pred.shape[0], device=self.q_pred.device
+        ) % max(1, self.batch_size)
+
+    def clone(self, tensor):
+        """Tile a ``[b, ...]`` tensor onto this prediction's clone axis."""
+        return _clone(tensor, self.multiplier)
+
+
+def sidechain_training_pass(
     model,
     batch,
     mpnn_feature_dict,
@@ -259,7 +305,7 @@ def diffusion_loss(
     generator=None,
     scn_mlm_mask=None,
     t_scd=None,
-    reduction=loss_fns.DEFAULT_SIDECHAIN_REDUCTION,
+    noise=None,
 ):
     """One denoising step per (example, noise level), teacher-forced on GT sequence.
 
@@ -268,7 +314,10 @@ def diffusion_loss(
     to the encoder, so the encoder's output is reused across all of them.
 
     ``t_scd`` pins the diffusion time instead of sampling it, which is how the
-    original evaluates a validation curve at fixed noise levels.
+    original evaluates a validation curve at fixed noise levels. ``noise`` takes
+    a :class:`pxf.joint.randomness.SidechainNoise` and supplies both the time and
+    the Gaussian explicitly, which is what makes a run replayable -- the
+    interpolant's own draws come from the global RNG.
 
     ``scn_mlm_mask`` is the ablation described in :func:`frame_targets`; leave it
     ``None`` for the original objective.
@@ -291,6 +340,7 @@ def diffusion_loss(
     h_V = mpnn_feature_dict["h_V"]
     seq_mask = batch["seq_mask"]
     aatype = batch["aatype"].long()
+    batch_size = int(seq_mask.shape[0])
 
     x1_rep = _clone(targets["local"], multiplier)
     mask_rep = _clone(targets["loss_mask"], multiplier)
@@ -298,16 +348,24 @@ def diffusion_loss(
     seq_mask_rep = _clone(seq_mask, multiplier)
     aatype_rep = _clone(aatype, multiplier)
 
-    t = None
-    if t_scd is not None:
-        t = torch.full((x1_rep.shape[0],), float(t_scd), device=x1_rep.device)
-    # The interpolant's own forward, so the noise draw, the x1 target and the
-    # loss weight all come from one place and stay consistent with sampling.
-    interpolated = interpolant({"x": x1_rep, "aatype": aatype_rep}, t=t)
-    xt = interpolated["x_noised"]
-    x_target = interpolated["x_target"]
-    t = interpolated["t"]
-    weight = interpolated["loss_weight_t"]
+    if noise is not None:
+        if t_scd is not None:
+            raise ValueError(
+                "t_scd and an explicit noise bundle both pin the diffusion time; "
+                "pass one of them"
+            )
+        xt, x_target, t, weight = noise.apply(interpolant, x1_rep)
+    else:
+        t = None
+        if t_scd is not None:
+            t = torch.full((x1_rep.shape[0],), float(t_scd), device=x1_rep.device)
+        # The interpolant's own forward, so the noise draw, the x1 target and the
+        # loss weight all come from one place and stay consistent with sampling.
+        interpolated = interpolant({"x": x1_rep, "aatype": aatype_rep}, t=t)
+        xt = interpolated["x_noised"]
+        x_target = interpolated["x_target"]
+        t = interpolated["t"]
+        weight = interpolated["loss_weight_t"]
 
     denoiser_fn = denoiser
     self_conditioned = False
@@ -324,14 +382,65 @@ def diffusion_loss(
             self_conditioned = True
 
     x1_pred, _ = denoiser_fn(xt, aatype_rep, t, h_V_rep, seq_mask=seq_mask_rep)
-    loss, stats = loss_fns.sidechain_diffusion_loss(
-        x1_pred, x_target, weight, mask_rep, reduction=reduction
+    return SidechainTrainingPrediction(
+        q_pred=x1_pred,
+        q_target=x_target,
+        q_noised=xt,
+        t=t,
+        sigma=interpolant.sigma(t),
+        weight=weight,
+        loss_mask=mask_rep,
+        aatype=aatype_rep,
+        seq_mask=seq_mask_rep,
+        multiplier=multiplier,
+        batch_size=batch_size,
+        self_conditioned=self_conditioned,
     )
-    stats["noise_clones"] = torch.tensor(float(multiplier))
-    stats["self_conditioned"] = torch.tensor(float(self_conditioned))
-    stats["sigma_scn_mean"] = interpolant.sigma(t).mean().detach()
+
+
+def diffusion_loss(
+    model,
+    batch,
+    mpnn_feature_dict,
+    *,
+    multiplier=None,
+    self_cond_p=None,
+    generator=None,
+    scn_mlm_mask=None,
+    t_scd=None,
+    noise=None,
+    reduction=loss_fns.DEFAULT_SIDECHAIN_REDUCTION,
+):
+    """``L_scn`` for one training step: :func:`sidechain_training_pass`, scored.
+
+    Kept as the public entry point with its original contract -- it returns
+    ``(loss, stats)`` and consumes randomness in the same order -- so the
+    coupling trainer and the general FaMPNN loop are unaffected by the split.
+    """
+    prediction = sidechain_training_pass(
+        model,
+        batch,
+        mpnn_feature_dict,
+        multiplier=multiplier,
+        self_cond_p=self_cond_p,
+        generator=generator,
+        scn_mlm_mask=scn_mlm_mask,
+        t_scd=t_scd,
+        noise=noise,
+    )
+    loss, stats = loss_fns.sidechain_diffusion_loss(
+        prediction.q_pred,
+        prediction.q_target,
+        prediction.weight,
+        prediction.loss_mask,
+        reduction=reduction,
+    )
+    stats["noise_clones"] = torch.tensor(float(prediction.multiplier))
+    stats["self_conditioned"] = torch.tensor(float(prediction.self_conditioned))
+    stats["sigma_scn_mean"] = prediction.sigma.mean().detach()
     if scn_mlm_mask is not None:
         with torch.no_grad():
+            seq_mask = batch["seq_mask"]
             visible = (scn_mlm_mask * seq_mask).sum()
             stats["hidden_sidechain_fraction"] = 1.0 - visible / seq_mask.sum().clamp_min(1)
     return loss, stats

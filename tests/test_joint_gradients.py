@@ -35,6 +35,20 @@ needs_donor = pytest.mark.skipif(
 
 TRAINABLE_BLOCKS = 4
 
+def _rig_device():
+    """Where the rigs run. ``auto`` uses CUDA when there is one.
+
+    Default-on rather than opt-in: the GPU job exists to catch device bugs, and
+    a rig that quietly stays on the CPU on a GPU node cannot. That is exactly
+    how the preflight's cpu/cuda mismatch (job 120170, 493423) survived a green
+    suite -- the tests passed on the same node the script failed on.
+    """
+    requested = os.environ.get("PXF_TEST_DEVICE", "auto")
+    if requested != "auto":
+        return torch.device(requested)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 
 def _sidechain_slots():
     from fampnn.data import residue_constants as rc
@@ -56,16 +70,20 @@ def rig():
     )
     from pxf.provenance import fampnn_checkpoint
 
-    backbone, _bundle, _record = load_backbone_model(DONOR)
+    device = _rig_device()
+    backbone, _bundle, _record = load_backbone_model(DONOR, device=device)
     driver = PXDesignBackboneDriver(backbone)
     sample_id, source = featurize_structures([CIF], crop_size=256)[0]
-    structure = to_featurized(sample_id, source[0])
+    structure = to_featurized(sample_id, source[0]).to(device)
+    # Deliberately NOT moved: FaMPNN's loader leaves its parse on the CPU, and
+    # that asymmetry between the two parses is the real deployment condition.
+    # Moving it here would hide the class of bug this rig is meant to expose.
     native = process_single_pdb(load_feats_from_pdb(CIF))
 
     weights = torch.load(fampnn_checkpoint("0.0"), map_location="cpu", weights_only=False)
     fampnn = SeqDenoiser(weights["model_cfg"])
     fampnn.load_state_dict(weights["state_dict"], strict=True)
-    fampnn.eval()
+    fampnn.to(device).eval()
     # Frozen parameters, live input derivatives. A no_grad context here would
     # also cut the inputs, which are the entire mechanism under test.
     fampnn.requires_grad_(False)
@@ -99,6 +117,7 @@ def rig():
         conditioning=conditioning,
         trainable=trainable,
         sample_id=sample_id,
+        device=device,
     )
 
 
@@ -108,6 +127,7 @@ def _noise(rig, multiplier=2, occurrence=0):
     backbone_noise = R.draw_backbone_noise(
         batch.backbone_target.shape,
         R.generator_for(0, rig["sample_id"], "backbone_noise", occurrence=occurrence),
+        device=rig["device"],
     )
     sidechain_noise = R.sidechain_noise_for(
         interpolant,
@@ -115,6 +135,7 @@ def _noise(rig, multiplier=2, occurrence=0):
         base=0,
         sample_id=rig["sample_id"],
         occurrence=occurrence,
+        device=rig["device"],
     )
     return backbone_noise, sidechain_noise
 
@@ -364,7 +385,7 @@ def test_finite_differences_agree_with_autograd_through_fampnn(rig):
         )
         return loss
 
-    base = batch.backbone_target.detach().clone().double().float()
+    base = batch.backbone_target.detach().clone().double().float().to(rig["device"])
     leaf = base.clone().requires_grad_(True)
     loss = sidechain_loss_of(leaf)
     (gradient,) = torch.autograd.grad(loss, leaf)

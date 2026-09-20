@@ -29,6 +29,15 @@ needs_donor = pytest.mark.skipif(
 )
 
 
+def _rig_device():
+    """Where the rig runs; ``auto`` uses CUDA when there is one. See
+    tests/test_joint_gradients.py for why this is default-on."""
+    requested = os.environ.get("PXF_TEST_DEVICE", "auto")
+    if requested != "auto":
+        return torch.device(requested)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 # ---- the arm table ----------------------------------------------------------
 
 
@@ -82,11 +91,13 @@ def rig():
     from pxf.backbone.driver import PXDesignBackboneDriver, load_backbone_model
     from pxf.provenance import fampnn_checkpoint
 
-    backbone, _bundle, record = load_backbone_model(DONOR)
+    device = _rig_device()
+    backbone, _bundle, record = load_backbone_model(DONOR, device=device)
     driver = PXDesignBackboneDriver(backbone)
     weights = torch.load(fampnn_checkpoint("0.0"), map_location="cpu", weights_only=False)
     fampnn = SeqDenoiser(weights["model_cfg"])
     fampnn.load_state_dict(weights["state_dict"], strict=True)
+    fampnn.to(device)
     return driver, fampnn, record
 
 

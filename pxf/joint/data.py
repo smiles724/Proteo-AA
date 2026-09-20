@@ -93,6 +93,12 @@ def rigid_transform(source, target):
     rmsd)`` with ``target ~ source @ rotation + translation``. Computed in
     float64: the residual is the accept/reject signal, so it must not be
     dominated by the arithmetic that produced it.
+
+    The two point sets come from two independent parses of the same file, so
+    they need not already agree on a device; ``target`` is brought onto
+    ``source``'s. Doing it here rather than at the call site keeps a CPU/CUDA
+    mismatch from reaching the ``mm`` in the covariance, where it surfaces as a
+    bare device error with no hint of which parse was on the wrong side.
     """
     if source.shape != target.shape or source.dim() != 2 or source.shape[-1] != 3:
         raise ValueError(
@@ -100,7 +106,7 @@ def rigid_transform(source, target):
             f"{tuple(target.shape)}"
         )
     x = source.detach().to(torch.float64)
-    y = target.detach().to(torch.float64)
+    y = target.detach().to(torch.float64).to(x.device)
     cx, cy = x.mean(0), y.mean(0)
     cov = (x - cx).T @ (y - cy)
     u, _s, vh = torch.linalg.svd(cov)
@@ -147,19 +153,24 @@ def matched_backbone_atoms(structure, native):
             "so there is nothing to align the native structure onto"
         )
     coordinates = coordinates.reshape(-1, 3)
+    # The featurized structure has usually been moved to the accelerator while
+    # the native parse is still on the CPU where FaMPNN's loader left it. The
+    # two halves of the returned pair are stacked from these, so unify on the
+    # featurized side or the caller's superposition gets one operand per device.
+    device = coordinates.device
     resolved = structure.label_dict.get("coordinate_mask")
     resolved = (
-        torch.ones(coordinates.shape[0], device=coordinates.device)
+        torch.ones(coordinates.shape[0], device=device)
         if resolved is None
-        else torch.as_tensor(resolved).reshape(-1).float()
+        else torch.as_tensor(resolved).reshape(-1).float().to(device)
     )
 
     slots = {name: index for index, name in enumerate(atom37.ATOM37)}
-    native_x = native["x"].reshape(-1, atom37.NUM_ATOM37, 3)
+    native_x = native["x"].reshape(-1, atom37.NUM_ATOM37, 3).to(device)
     native_present = 1.0 - native["missing_atom_mask"].reshape(
         -1, atom37.NUM_ATOM37
-    )
-    exists = _existence(native["aatype"].reshape(-1))
+    ).to(device)
+    exists = _existence(native["aatype"].reshape(-1)).to(device)
     native_present = native_present * exists
 
     left, right = [], []

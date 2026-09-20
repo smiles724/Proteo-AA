@@ -1,0 +1,9 @@
+# B2 -- the candidate. L_BB + lambda_local L_local + lambda_place L_place.
+# Adds the direct path: placement error reaches the backbone through the
+# residue frames as well as through the encoder, and it is the only term that
+# can see a backbone error that leaves every local conformation intact.
+defaults: base.yaml
+train:
+  arm: B2
+  lambda_local: 0.0   # <- preflight coefficients.L_local.coefficient
+  lambda_place: 0.0   # <- preflight coefficients.L_place.coefficient

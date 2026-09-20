@@ -1,0 +1,6 @@
+# B0 -- the matched baseline. Backbone supervision alone, same trainable scope,
+# same examples, same noise draws as every other arm. The comparison every
+# side-chain arm has to beat.
+defaults: base.yaml
+train:
+  arm: B0

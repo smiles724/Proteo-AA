@@ -111,7 +111,7 @@ export PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn"
 export PROTENIX_ROOT_DIR=/hai/scratch/yfsun/protenix_data
 export PROTENIX_DATA_ROOT_DIR=/hai/scratch/yfsun/protenix_data/common
 export LAYERNORM_TYPE=torch
-python -m pytest tests/ -q          # 695 passed, 6 skipped
+python -m pytest tests/ -q          # 712 passed, 6 skipped
 ```
 
 All four are needed. Without the `PROTENIX_*` pair the featurizer cannot find

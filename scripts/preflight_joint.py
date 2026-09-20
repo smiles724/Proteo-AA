@@ -58,37 +58,6 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def select_trainable(backbone, *, n_blocks=TRAINABLE_BLOCKS):
-    """The plan's initial scope, resolved to real parameter names.
-
-    Fails rather than silently training a different set: "the last four blocks"
-    is only meaningful if there are four.
-    """
-    backbone.requires_grad_(False)
-    blocks = backbone.diffusion_module.diffusion_transformer.blocks
-    if len(blocks) < n_blocks:
-        raise SystemExit(
-            f"the donor has {len(blocks)} diffusion blocks, fewer than the "
-            f"{n_blocks} the trainable scope names"
-        )
-    tail = {
-        f"diffusion_transformer.blocks.{i}."
-        for i in range(len(blocks) - n_blocks, len(blocks))
-    }
-    trainable = {}
-    for name, parameter in backbone.named_parameters():
-        if (
-            any(key in name for key in tail)
-            or "diffusion_module.layernorm_a" in name
-            or "atom_attention_decoder" in name
-        ):
-            parameter.requires_grad_(True)
-            trainable[name] = parameter
-    if not trainable:
-        raise SystemExit("none of the named backbone modules exist in this donor")
-    return trainable
-
-
 def main(argv=None):
     args = parse_args(argv)
     from fampnn.data.data import load_feats_from_pdb, process_single_pdb
@@ -107,6 +76,7 @@ def main(argv=None):
     from pxf.joint import losses as joint_losses
     from pxf.joint import model as joint_model
     from pxf.joint import randomness as joint_random
+    from pxf.joint.trainer import select_trainable
     from pxf.provenance import fampnn_checkpoint
     from pxf.train import losses as loss_fns
 
@@ -117,7 +87,9 @@ def main(argv=None):
 
     backbone, _bundle, donor_record = load_backbone_model(args.donor, device=device)
     driver = PXDesignBackboneDriver(backbone)
-    trainable = select_trainable(backbone)
+    # The same allowlist the trainer resolves, so the coefficients are
+    # calibrated against the parameter set that will actually be trained.
+    trainable = select_trainable(backbone, n_blocks=TRAINABLE_BLOCKS)
     n_trainable = sum(p.numel() for p in trainable.values())
 
     weights = torch.load(

@@ -56,7 +56,11 @@ class JointForward:
 
     @property
     def multiplier(self):
-        return int(self.prediction.multiplier)
+        return 0 if self.prediction is None else int(self.prediction.multiplier)
+
+    @property
+    def ran_sidechain(self):
+        return self.prediction is not None
 
 
 def densify_prediction(bb_pred, topology, *, num_tokens=None):
@@ -112,12 +116,21 @@ def joint_forward(
     self_cond_p=None,
     generator=None,
     detach_backbone=False,
+    run_sidechain=True,
 ):
     """One backbone denoising call, one encoding, and ``m`` side-chain clones.
 
     ``batch`` is a :class:`pxf.joint.data.JointRefinementBatch`. ``sigma_b`` and
     ``backbone_noise`` come from the run's named streams, so two arms can be
     handed the identical noisy backbone.
+
+    ``run_sidechain=False`` stops after the backbone. That is what the
+    backbone-only arms want: the branch costs an encoder pass and ``m``
+    denoiser passes they do not score, and -- more importantly -- running it
+    with an implicit noise draw would consume the global RNG, so a
+    backbone-only arm and a side-chain arm would no longer see the same
+    subsequent stream. BS is the arm that runs the branch and discards the
+    gradient; B0 is the arm that does not run it.
     """
     from pxf.couple import fampnn_iface as iface
     from pxf.train import step as train_step
@@ -138,6 +151,21 @@ def joint_forward(
 
     bb_pred = driver.denoise_direct(conditioning, bb_noisy.unsqueeze(0), sigma)
     bb_pred = bb_pred.reshape(target.shape)
+
+    if not run_sidechain:
+        return JointForward(
+            sigma_b=sigma,
+            bb_noisy=bb_noisy,
+            bb_pred=bb_pred,
+            bb_target=target,
+            bb_mask=batch.backbone_mask,
+            coords37=None,
+            encoder_mask=None,
+            features=None,
+            prediction=None,
+            placed=None,
+            detached_backbone=bool(detach_backbone),
+        )
 
     # The control detaches at BOTH entrances. Detaching only the encoder's input
     # would leave the frame path live and the "blocked" arm would still train.

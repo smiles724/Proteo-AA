@@ -1,0 +1,13 @@
+# BS -- the negative control. Runs the whole side-chain branch and throws its
+# gradient away: the backbone is detached at BOTH entrances, the encoder input
+# and the frame construction. Detaching only h_V would leave the frame path
+# live and this would quietly become a training arm.
+#
+# It must take bit-identical optimizer steps to B0 under a replayed draw. That
+# is a test (test_b0_and_bs_take_the_same_step), and a short run of it is the
+# cheapest way to catch a seeding or arm-switching bug before spending a full
+# budget on the matrix.
+defaults: base.yaml
+train:
+  arm: BS
+  lambda_local: 0.0   # scored and discarded; the gradient cannot reach anything

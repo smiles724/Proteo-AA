@@ -1,0 +1,33 @@
+# Shared by every arm. An arm config overrides only what makes it that arm --
+# anything else differing between two arms makes their comparison unreadable.
+#
+# lambda_local and lambda_place are deliberately 0.0 here. They come from
+# scripts/preflight_joint.py, which sets each so the term's gradient AT THE
+# BACKBONE is `ratio` times the anchor's; the two losses are normalized
+# differently and their values say nothing about their relative pull. An
+# unconfigured run is therefore a loud baseline, never a quiet candidate.
+data:
+  structures: /hai/scratch/yfsun/afdb_laproteina/cif_phase1
+  min_length: 64
+  max_length: 256
+  crop_size: 1024          # >= max_length: a crop breaks target correspondence
+train:
+  max_steps: 2000
+  grad_accum_steps: 8      # microbatch 1; effective batch 8
+  multiplier: 8            # side-chain noise clones per example
+  self_cond_p: 0.0
+  sigma_min: 0.1           # the refinement window, Angstroms
+  sigma_max: 2.0
+  sigma_mode: trajectory
+  trainable_blocks: 4
+  lr: 1.0e-5
+  warmup_steps: 200
+  warmup_auxiliary_steps: 200
+  max_grad_norm: 1.0
+  ema_relative_length: 0.25
+  seed: 0
+  log_every: 25
+  checkpoint_every: 500
+  amp_dtype: null          # fp32 until a bf16 parity check has been run
+  lambda_local: 0.0
+  lambda_place: 0.0

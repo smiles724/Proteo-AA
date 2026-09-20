@@ -1,0 +1,12 @@
+# BF -- the mechanistic control. L_BB + lambda_place L_frame, where L_frame
+# places the NATIVE local conformations on the predicted frames under a stop
+# gradient. It supervises the frames with geometry that needs no FaMPNN
+# prediction at all.
+#
+# If BF matches B2, the gain was extra frame supervision rather than anything
+# the side-chain model knew, and the cheaper formulation is the one to keep.
+# Uses B2's lambda_place so the two are on the same scale.
+defaults: base.yaml
+train:
+  arm: BF
+  lambda_place: 0.0   # <- the SAME value as B2's lambda_place

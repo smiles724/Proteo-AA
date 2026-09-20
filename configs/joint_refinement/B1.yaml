@@ -1,0 +1,10 @@
+# B1 -- encoder-mediated side-chain supervision. L_BB + lambda_local L_local.
+# The gradient reaches the backbone only through FaMPNN's geometry, so this
+# arm asks whether a frozen side-chain model's view of a predicted backbone
+# carries usable information about that backbone.
+#
+# Set lambda_local from preflight.json before launching; 0.0 makes this B0.
+defaults: base.yaml
+train:
+  arm: B1
+  lambda_local: 0.0   # <- preflight coefficients.L_local.coefficient

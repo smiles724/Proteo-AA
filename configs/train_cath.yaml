@@ -1,28 +1,36 @@
 # CATH preset, Appendix B.2: one H100, batch 64, fixed size 256, 100k steps.
 data:
   crop_size: 256
-  noise: 0.0          # the two released models used 0.0 and 0.3 Angstrom (B.1)
-  noise_targets: true # B.1 reads as noising the whole example; see pxf/train/data.py
   spatial_crop_p: 0.5
   batch_size: 64
   num_workers: 4
 train:
   max_steps: 100000
   grad_accum_steps: 1
+  # Structural noise is the encoder's augment_eps, not a data transform: 0.0 and
+  # 0.3 are the two released models, and it must match the variant being
+  # continued. null keeps whatever the loaded checkpoint carries.
+  structural_noise: null
   ema_relative_length: 0.25   # B.2 chose 25% for the 0.0 A model (post-hoc)
   log_every: 50
   checkpoint_every: 5000
   snapshot_every: 5000
   seed: 0
-  amp_dtype: bf16
-  # The reduction for L_diff. FaMPNN released inference only, so the original
-  # is not recoverable from the code; per_residue weights every residue equally
-  # (Trp does not count 7x Ser), per_atom is a global atom-weighted average.
-  sidechain_reduction: per_residue
-# Not specified in the preprint -- chosen here, recorded in every checkpoint.
+  amp_dtype: bf16             # the original trains in bf16-mixed
+  loss:
+    # The original's loss block, value for value:
+    #   seq_loss.label_smoothing 0.1, per_token_avg false (normalize by the crop
+    #   length, not by the masked count); mse_loss.per_token_avg true; all three
+    #   loss weights 1.0.
+    label_smoothing: 0.1
+    seq_per_token_avg: false
+    sidechain_reduction: per_token
+    weight_seq: 1.0
+    weight_sidechain: 1.0
+    weight_confidence: 1.0
+# The original training code's optimizer: Adam + the Noam schedule, no clipping.
 optim:
-  lr: 1.0e-4
-  weight_decay: 0.0
-  warmup_steps: 1000
-  max_grad_norm: 1.0
-  schedule: constant
+  optimizer: noam
+  noam_factor: 2.0
+  noam_warmup_steps: 4000
+  max_grad_norm: 0.0

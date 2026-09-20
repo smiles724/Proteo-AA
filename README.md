@@ -73,18 +73,22 @@ SHA-256 of every weight and source tree that produced it.
 
 **Train, or continue training, the side-chain modules.** FaMPNN ships inference
 only ([upstream issue #9](https://github.com/richardshuai/fampnn/issues/9) is
-unanswered), so the objectives and loop are implemented here from the preprint:
+unanswered), so the objectives and loop are transcribed here from
+`allatom_design` (`51c9d53`), the research tree the released package was factored
+out of and the code its weights were trained by:
 
 ```bash
 python scripts/train.py --pdb-dir <dir> --out runs/ft \
     --init-weights 0.0 --config configs/train_cath.yaml
 ```
 
-`L_total = L_MLM + L_diff` unweighted (Appendix C.1), `t = sqrt(u)` masking, 8
-noise clones per example, teacher-forced sequence, and a confidence head on a
-stop-gradient rollout. See [`docs/training.md`](docs/training.md) for what the
-paper specifies, what it leaves unspecified (optimizer and learning rate — chosen
-here and recorded in every checkpoint), and the two upstream gaps it works around.
+`L_total = L_seq + L_scn + L_psce` at weight 1.0 each, `t = sqrt(u)` masking with
+side chains dropped separately, 8 noise clones per example, teacher-forced
+sequence, a confidence head on a stop-gradient rollout, and Adam + the Noam
+schedule. See [`docs/training.md`](docs/training.md) for the per-symbol
+correspondence, the details a paper-only reading gets wrong (which side chains
+are targets, how each term is normalized, where the structural noise lives), and
+the two upstream gaps it works around.
 
 **Coupling the two directions.** The side-chain module can also be run *inside*
 the backbone's denoising loop, so predicted side chains feed back into the
@@ -107,7 +111,7 @@ export PYTHONPATH="$PWD:$PWD/PXDesign:$PWD/Protenix:$PWD/fampnn"
 export PROTENIX_ROOT_DIR=/hai/scratch/yfsun/protenix_data
 export PROTENIX_DATA_ROOT_DIR=/hai/scratch/yfsun/protenix_data/common
 export LAYERNORM_TYPE=torch
-python -m pytest tests/ -q          # 573 passed, 6 skipped
+python -m pytest tests/ -q          # 636 passed, 6 skipped
 ```
 
 All four are needed. Without the `PROTENIX_*` pair the featurizer cannot find

@@ -194,7 +194,12 @@ def test_l_sc_carries_no_mlm_or_confidence_term(fampnn, sidechain_batch):
 
 
 def test_l_sc_supervises_every_atom_because_packing_hides_them_all(fampnn, sidechain_batch):
-    """No ``scn_mlm_mask``: the cycle packs from scratch, as inference does."""
+    """No ``scn_mlm_mask``, which is both FaMPNN's own objective and this one.
+
+    The cycle packs from scratch, as inference does, so every supervisable atom
+    is a target -- and the original training code supervises every one of them
+    too, whether or not its side chain was visible to the encoder.
+    """
     from pxf.train import step as train_step
 
     features = _features(fampnn, sidechain_batch)
@@ -206,9 +211,16 @@ def test_l_sc_supervises_every_atom_because_packing_hides_them_all(fampnn, sidec
 
 
 def test_l_sc_honours_the_reduction_setting(fampnn, sidechain_batch):
+    """Both reductions reach L_SC, and the active one is reported.
+
+    On this batch they also *coincide*, which is not a bug: the crop is fully
+    resolved and unpadded, so "divide by the supervised components" and "divide
+    by the constant example size" are the same division. The padded batch below
+    is where they come apart.
+    """
     features = _features(fampnn, sidechain_batch)
     losses = {}
-    for reduction in ("per_residue", "per_atom"):
+    for reduction in ("per_token", "fixed_size"):
         torch.manual_seed(0)
         out = L.sidechain_coupling_loss(
             fampnn, sidechain_batch, features, delta_h=None, reduction=reduction
@@ -216,4 +228,23 @@ def test_l_sc_honours_the_reduction_setting(fampnn, sidechain_batch):
         assert out.stats["reduction"] == reduction
         assert out.scalars()["reduction"] == reduction  # survives scalars()
         losses[reduction] = float(out.total)
-    assert losses["per_residue"] != losses["per_atom"]
+    assert losses["per_token"] == pytest.approx(losses["fixed_size"])
+
+
+def test_the_two_reductions_differ_once_anything_is_masked_out(fampnn):
+    """Padding is enough: fixed_size keeps it in the denominator, per_token does not."""
+    from pxf.provenance import repo_root
+    from pxf.train.data import StructureCropDataset, collate
+
+    path = str(repo_root() / "fampnn/data/casp14/pdbs/T1031.pdb")  # 95 residues
+    padded = collate([StructureCropDataset([path], crop_size=128, seed=0)[0]])
+    features = _features(fampnn, padded)
+    losses = {}
+    for reduction in ("per_token", "fixed_size"):
+        torch.manual_seed(0)
+        out = L.sidechain_coupling_loss(
+            fampnn, padded, features, delta_h=None, reduction=reduction
+        )
+        losses[reduction] = float(out.total)
+    # 95 of 128 positions are real, so fixed_size scores about 95/128 of per_token.
+    assert losses["fixed_size"] == pytest.approx(losses["per_token"] * 95 / 128, rel=0.01)

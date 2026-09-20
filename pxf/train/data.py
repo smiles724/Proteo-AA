@@ -7,9 +7,16 @@ FaMPNN ships no training dataset, so this implements the preprint's scheme:
 * Appendix B.3.2 / Algorithm 1 -- multichain examples use a two-chain contiguous
   crop; the paper also alternates with AlphaFold-Multimer spatial cropping at even
   odds (:func:`spatial_crop`).
-* Appendix B.1 -- structural noise is independent ``N(0, sigma^2)`` on every x, y, z
-  coordinate, with ``sigma = 0.3`` and ``0.0`` being the two released models.
 * Appendix B.3.2 -- one example is drawn per training cluster per epoch.
+
+Structural noise is deliberately **not** here. "The 0.3 A model" is the encoder's
+own ``ProteinFeatures.augment_eps``, which perturbs the atom14 coordinates on the
+way into the graph features in train mode and leaves the diffusion target clean
+(``fampnn/model/fampnn.py``; the released ``fampnn_0_3`` checkpoint carries
+``augment_eps: 0.3`` and ``fampnn_0_0`` carries ``0.0``). Noising ``x`` in the
+dataset would both corrupt the target and double up with that, so
+:class:`StructureCropDataset` refuses it and points at
+``TrainSettings.structural_noise``.
 
 The per-example featurization itself is upstream's (``load_feats_from_pdb`` ->
 ``process_single_pdb``), so features match what inference produces.
@@ -100,12 +107,25 @@ def spatial_crop(ca_coords, chain_index, size, *, generator=None):
     return order[:size].sort().values
 
 
-def add_structural_noise(x, sigma, *, generator=None):
-    """Independent ``N(0, sigma^2)`` on every coordinate (Appendix B.1)."""
-    if not sigma:
-        return x
-    noise = torch.randn(x.shape, generator=generator, dtype=x.dtype, device=x.device)
-    return x + noise * float(sigma)
+NOISE_MOVED = (
+    "structural noise is a model setting, not a data setting: it is the encoder's "
+    "ProteinFeatures.augment_eps, applied to its atom14 input in train mode and "
+    "never to the diffusion target. Set TrainSettings.structural_noise (or "
+    "--noise on scripts/train.py) instead of noising the dataset."
+)
+
+
+def reject_data_noise(noise, noise_targets):
+    """Refuse the old dataset-level noise arguments with an explanation.
+
+    ``noise=0.0`` is accepted so existing callers that pass the default keep
+    working; anything else, and any ``noise_targets``, is an error rather than a
+    silently different objective.
+    """
+    if noise:
+        raise ValueError(f"noise={noise}: {NOISE_MOVED}")
+    if noise_targets is not None:
+        raise ValueError(f"noise_targets={noise_targets}: {NOISE_MOVED}")
 
 
 def pad_or_crop(example, indices, size):
@@ -160,7 +180,7 @@ class StructureCropDataset(Dataset):
     """Fixed-size crops of PDB structures, ready for :func:`pxf.train.step`.
 
     ``crop_size`` is the paper's "fixed example size" (256 for CATH, 1024 for PDB).
-    ``noise`` is the structural noise sigma; the two released models used 0.0 and 0.3.
+    Structural noise belongs to the model; see :data:`NOISE_MOVED`.
     """
 
     def __init__(
@@ -168,23 +188,18 @@ class StructureCropDataset(Dataset):
         paths,
         *,
         crop_size=256,
-        noise=0.0,
         spatial_crop_p=0.5,
         seed=0,
-        noise_targets=True,
+        noise=0.0,
+        noise_targets=None,
     ):
+        reject_data_noise(noise, noise_targets)
         self.paths = [Path(p) for p in paths]
         if not self.paths:
             raise ValueError("StructureCropDataset needs at least one structure")
         self.crop_size = int(crop_size)
-        self.noise = float(noise)
         self.spatial_crop_p = float(spatial_crop_p)
         self.seed = int(seed)
-        # Appendix B.1 says noise is added to "protein structure examples", which
-        # reads as the whole example -- so the diffusion target is noised too.
-        # That is consistent with the 0.3 A model packing worse than the 0.0 A one.
-        # Set False to noise only the encoder's view and keep clean targets.
-        self.noise_targets = bool(noise_targets)
         self.epoch = 0
 
     def set_epoch(self, epoch):
@@ -228,10 +243,6 @@ class StructureCropDataset(Dataset):
 
         item = pad_or_crop(example, indices, self.crop_size)
         item = {key: value.squeeze(0) for key, value in item.items()}
-        if self.noise:
-            noised = add_structural_noise(item["x"], self.noise, generator=generator)
-            item["x"] = noised if self.noise_targets else item["x"]
-            item["x_input"] = noised
         item["name"] = path.stem
         return item
 
@@ -239,8 +250,6 @@ class StructureCropDataset(Dataset):
 def collate(items):
     """Stack fixed-size examples; non-tensor fields are gathered into lists."""
     batch = {key: torch.stack([item[key] for item in items]) for key in BATCH_KEYS}
-    if "x_input" in items[0]:
-        batch["x_input"] = torch.stack([item["x_input"] for item in items])
     batch["name"] = [item.get("name") for item in items]
     return batch
 
@@ -250,7 +259,6 @@ def build_loader(
     *,
     batch_size=1,
     crop_size=256,
-    noise=0.0,
     seed=0,
     num_workers=0,
     shuffle=True,
@@ -259,9 +267,7 @@ def build_loader(
     """A DataLoader over fixed-size crops."""
     from torch.utils.data import DataLoader
 
-    dataset = StructureCropDataset(
-        paths, crop_size=crop_size, noise=noise, seed=seed, **kwargs
-    )
+    dataset = StructureCropDataset(paths, crop_size=crop_size, seed=seed, **kwargs)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,

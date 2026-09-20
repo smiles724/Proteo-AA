@@ -10,8 +10,6 @@
 # is disjoint from the recentPDB eval split.
 data:
   crop_size: 384        # B.2 used 1024; 384 fits alongside the 8 noise clones
-  noise: 0.0            # the 0.0 A released model is the donor, so match it
-  noise_targets: true
   spatial_crop_p: 0.5
   batch_size: 1
   num_workers: 4
@@ -24,12 +22,17 @@ train:
   snapshot_every: 2000
   seed: 0
   amp_dtype: bf16
-  # per_residue: every residue contributes once, so Trp does not outweigh Ala.
-  sidechain_reduction: per_residue
-# Not specified in the preprint -- chosen here, recorded in every checkpoint.
-# lr is 10x below the from-scratch default because this is a fine-tune and the
-# failure mode being guarded against is degrading the donor's packing.
+  structural_noise: 0.0  # the 0.0 A released model is the donor, so match it
+  loss:
+    label_smoothing: 0.1
+    seq_per_token_avg: false
+    sidechain_reduction: per_token
+# Deliberately NOT the original optimizer. The Noam schedule is built for a
+# 300k-step run from scratch; this continues from released weights for 20k, and
+# the failure mode being guarded against is degrading the donor's packing, so a
+# low constant-ish rate is used instead. Recorded in every checkpoint as such.
 optim:
+  optimizer: adamw
   lr: 1.0e-5
   weight_decay: 0.0
   warmup_steps: 500

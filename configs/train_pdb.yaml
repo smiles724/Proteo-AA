@@ -4,27 +4,30 @@
 # grad_accum_steps: 16.
 data:
   crop_size: 1024
-  noise: 0.3
-  noise_targets: true
   spatial_crop_p: 0.5
   batch_size: 8
   num_workers: 8
 train:
   max_steps: 300000
   grad_accum_steps: 4
+  # 0.3 reproduces the fampnn_0_3 model. The noise goes to the encoder's atom14
+  # input only (ProteinFeatures.augment_eps); the diffusion target stays clean.
+  structural_noise: 0.3
   ema_relative_length: 0.01   # B.2 chose 1% for the 0.3 A model (post-hoc)
   log_every: 50
   checkpoint_every: 5000
   snapshot_every: 5000
   seed: 0
   amp_dtype: bf16
-  # The reduction for L_diff. FaMPNN released inference only, so the original
-  # is not recoverable from the code; per_residue weights every residue equally
-  # (Trp does not count 7x Ser), per_atom is a global atom-weighted average.
-  sidechain_reduction: per_residue
+  loss:
+    label_smoothing: 0.1
+    seq_per_token_avg: false
+    sidechain_reduction: per_token
+    weight_seq: 1.0
+    weight_sidechain: 1.0
+    weight_confidence: 1.0
 optim:
-  lr: 1.0e-4
-  weight_decay: 0.0
-  warmup_steps: 1000
-  max_grad_norm: 1.0
-  schedule: constant
+  optimizer: noam
+  noam_factor: 2.0
+  noam_warmup_steps: 4000
+  max_grad_norm: 0.0

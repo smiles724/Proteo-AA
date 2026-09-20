@@ -345,8 +345,10 @@ class ProtenixSideChainDataset(torch.utils.data.Dataset):
         masks: a :class:`SideChainMaskSet`, or None to train on FaMPNN's per-atom
             mask alone (the ablation).
         crop_size: fixed example size, padded when the entry is shorter.
-        noise: Angstroms of iid coordinate noise (Appendix B.1).
         spatial_crop_p: probability of an interface crop for two-chain entries.
+
+    Structural noise is not a dataset setting; see
+    :data:`pxf.train.data.NOISE_MOVED`.
     """
 
     def __init__(
@@ -356,12 +358,15 @@ class ProtenixSideChainDataset(torch.utils.data.Dataset):
         masks=None,
         mmcif_dir=None,
         crop_size=256,
-        noise=0.0,
-        noise_targets=True,
         spatial_crop_p=0.5,
         seed=0,
         apply_supervision=True,
+        noise=0.0,
+        noise_targets=None,
     ):
+        from pxf.train.data import reject_data_noise
+
+        reject_data_noise(noise, noise_targets)
         pdb_ids = [str(p) for p in pdb_ids]
         if not pdb_ids:
             raise ValueError("ProtenixSideChainDataset needs at least one pdb_id")
@@ -382,8 +387,6 @@ class ProtenixSideChainDataset(torch.utils.data.Dataset):
         self.masks = masks
         self.mmcif_dir = pathlib.Path(mmcif_dir or DEFAULT_MMCIF_DIR)
         self.crop_size = int(crop_size)
-        self.noise = float(noise)
-        self.noise_targets = bool(noise_targets)
         self.spatial_crop_p = float(spatial_crop_p)
         self.seed = int(seed)
         self.apply_supervision = bool(apply_supervision)
@@ -434,14 +437,6 @@ class ProtenixSideChainDataset(torch.utils.data.Dataset):
 
         item = train_data.pad_or_crop(example, indices, self.crop_size)
         item = {k: v[0] if torch.is_tensor(v) and v.dim() else v for k, v in item.items()}
-        if self.noise:
-            noised = train_data.add_structural_noise(
-                item["x"], self.noise, generator=generator
-            )
-            if self.noise_targets:
-                item["x"] = noised
-            else:
-                item["x_input"] = noised
         item["name"] = name
         return item
 

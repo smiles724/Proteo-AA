@@ -80,9 +80,10 @@ def sidechain_coupling_loss(
     objective the module already knows.
 
     No MLM and no confidence term; see the module docstring for why. No
-    ``scn_mlm_mask`` either: the coupling cycle packs with every side chain
-    hidden, exactly as ``sidechain_pack`` does at inference, so every supervisable
-    atom is a legitimate target.
+    ``scn_mlm_mask`` either -- which is both what FaMPNN's own training does and
+    what the deployment regime calls for: the coupling cycle packs with every
+    side chain hidden, exactly as ``sidechain_pack`` does at inference, so every
+    supervisable atom is a legitimate target.
     """
     conditioned = iface.with_residual(features, delta_h)
     loss, stats = train_step.diffusion_loss(

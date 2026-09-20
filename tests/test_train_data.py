@@ -1,4 +1,4 @@
-"""Cropping, padding and structural noise, per Appendix B.1 / B.3."""
+"""Cropping and padding, per Appendix B.3. Structural noise is not here."""
 
 import pytest
 import torch
@@ -57,18 +57,20 @@ def test_spatial_crop_seeds_at_the_interface():
     assert len(torch.unique(chains[indices])) == 2, "interface crop should span both chains"
 
 
-def test_noise_is_independent_gaussian_of_the_requested_scale():
-    generator = torch.Generator().manual_seed(0)
-    x = torch.zeros(2000, 37, 3)
-    noised = D.add_structural_noise(x, 0.3, generator=generator)
-    assert noised.std() == pytest.approx(0.3, abs=0.01)
-    assert noised.mean() == pytest.approx(0.0, abs=0.01)
+def test_dataset_level_noise_is_refused_and_says_where_it_went():
+    """Noising ``x`` here would corrupt the diffusion target and double-count.
 
-
-def test_zero_noise_is_exactly_a_no_op():
-    x = torch.randn(4, 37, 3)
-    assert torch.equal(D.add_structural_noise(x, 0.0), x)
-    assert torch.equal(D.add_structural_noise(x, None), x)
+    The paper's structural noise is the encoder's own ``augment_eps``: applied to
+    its atom14 input in train mode, never to the target. A dataset that also
+    noised ``x`` would train the denoiser to reproduce perturbed coordinates
+    *and* add a second, independent perturbation on top of the model's.
+    """
+    with pytest.raises(ValueError, match="augment_eps"):
+        D.StructureCropDataset(["a.pdb"], noise=0.3)
+    with pytest.raises(ValueError, match="augment_eps"):
+        D.StructureCropDataset(["a.pdb"], noise_targets=False)
+    # The default is accepted, so callers that pass it explicitly still work.
+    D.StructureCropDataset(["a.pdb"], noise=0.0)
 
 
 def test_cluster_index_samples_one_member_per_cluster(tmp_path):
@@ -94,15 +96,12 @@ def test_dataset_produces_fixed_size_batches_with_padding_marked():
     paths = [
         str(repo_root() / f"fampnn/data/casp14/pdbs/{n}.pdb") for n in ("T1031", "T1024")
     ]
-    dataset, loader = D.build_loader(
-        paths, batch_size=2, crop_size=96, noise=0.3, shuffle=False
-    )
+    dataset, loader = D.build_loader(paths, batch_size=2, crop_size=96, shuffle=False)
     batch = next(iter(loader))
     for key in D.BATCH_KEYS:
         assert batch[key].shape[:2] == (2, 96), key
     # T1031 is 95 residues, so exactly one padding position is marked.
     assert batch["seq_mask"].sum(-1).tolist() == [95.0, 96.0]
-    assert "x_input" in batch, "noised view is exposed separately"
 
 
 def test_epoch_changes_the_crop():

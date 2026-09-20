@@ -25,7 +25,7 @@ properties, each asserted:
   mask called missing is never revived.
 - **Side chains only.** Just the 33 non-backbone slots. A residue with an
   unreliable side chain keeps its N/CA/C/O, hence its local frame and its
-  `L_MLM` label — masking the backbone would drop the residue entirely.
+  `L_seq` label — masking the backbone would drop the residue entirely.
 - **Ghosts stay ghosts.** An atom that cannot exist for the residue type is not
   reported as a missing one.
 

@@ -103,8 +103,33 @@ def test_snapshot_is_plain_cpu_weights():
 # ---- schedule --------------------------------------------------------------
 
 
-def test_warmup_is_linear_and_reaches_the_target():
-    settings = OptimSettings(lr=1e-3, warmup_steps=100, schedule="constant")
+def test_noam_is_the_default_and_matches_the_original_scheduler():
+    """``NoamLR(model_size=128, factor=2, warmup=4000)``, stepped once per step.
+
+    The preprint gives no optimizer; the original training code does, and this
+    is it -- peak at the end of warmup, inverse-sqrt decay after.
+    """
+    settings = OptimSettings()
+    assert settings.optimizer == "noam"
+    assert settings.betas == (0.9, 0.98) and settings.eps == pytest.approx(1e-9)
+    assert settings.max_grad_norm == 0.0, "the original clips nothing"
+
+    def noam(step):
+        n = max(step, 1)
+        return 2.0 * (128**-0.5 * min(n**-0.5, n * 4000**-1.5))
+
+    for step in (0, 1, 100, 4000, 40000):
+        assert learning_rate(step, settings, 100000) == pytest.approx(noam(step))
+    peak = learning_rate(4000, settings, 100000)
+    assert learning_rate(100, settings, 100000) < peak
+    assert learning_rate(40000, settings, 100000) < peak
+
+
+def test_adamw_warmup_is_linear_and_reaches_the_target():
+    settings = OptimSettings(
+        optimizer="adamw", lr=1e-3, warmup_steps=100, schedule="constant"
+    )
+    assert settings.betas == (0.9, 0.999) and settings.eps == pytest.approx(1e-8)
     assert learning_rate(0, settings, 1000) == pytest.approx(1e-5)
     assert learning_rate(49, settings, 1000) == pytest.approx(5e-4)
     assert learning_rate(99, settings, 1000) == pytest.approx(1e-3)
@@ -112,16 +137,28 @@ def test_warmup_is_linear_and_reaches_the_target():
 
 
 def test_cosine_decays_to_the_floor():
-    settings = OptimSettings(lr=1e-3, warmup_steps=0, schedule="cosine", min_lr_ratio=0.1)
+    settings = OptimSettings(
+        optimizer="adamw", lr=1e-3, warmup_steps=0, schedule="cosine", min_lr_ratio=0.1
+    )
     assert learning_rate(0, settings, 1000) == pytest.approx(1e-3)
     assert learning_rate(999, settings, 1000) == pytest.approx(1e-4, rel=1e-2)
     mid = learning_rate(500, settings, 1000)
     assert 1e-4 < mid < 1e-3
 
 
-def test_unknown_schedule_is_rejected():
+def test_unknown_schedule_or_optimizer_is_rejected():
     with pytest.raises(ValueError, match="Unknown schedule"):
-        learning_rate(0, OptimSettings(schedule="magic", warmup_steps=0), 10)
+        learning_rate(
+            0, OptimSettings(optimizer="adamw", schedule="magic", warmup_steps=0), 10
+        )
+    with pytest.raises(ValueError, match="Unknown optimizer"):
+        OptimSettings(optimizer="lion")
+
+
+def test_the_departure_from_the_original_optimizer_is_recorded():
+    """A checkpoint must say whether it used the original schedule or ours."""
+    assert "allatom_design" in OptimSettings().source
+    assert "not the original" in OptimSettings(optimizer="adamw").source
 
 
 # ---- checkpoints -----------------------------------------------------------
@@ -149,7 +186,7 @@ def trained(tmp_path_factory):
         loader,
         out_dir=out,
         dataset=dataset,
-        optim=OptimSettings(lr=3e-4, warmup_steps=2),
+        optim=OptimSettings(optimizer="adamw", lr=3e-4, warmup_steps=2),
         train=TrainSettings(
             max_steps=4,
             log_every=2,
@@ -181,9 +218,13 @@ def test_checkpoint_serves_inference_and_resume(trained):
     # ...and the training state the released checkpoints lack.
     assert state["step"] == 4
     assert "optimizer" in state and state["ema"] is not None
-    # Settings are recorded because the paper does not specify them.
+    # Settings are recorded because the paper does not specify them, and this
+    # run deliberately departs from what the original training code used.
     assert state["optim_settings"]["lr"] == pytest.approx(3e-4)
-    assert "not specified in the preprint" in state["optim_settings"]["source"]
+    assert "not the original" in state["optim_settings"]["source"]
+    # The objective's own settings travel with the weights too.
+    assert state["train_settings"]["loss"]["sidechain_reduction"] == "per_token"
+    assert state["augment_eps"] == pytest.approx(0.0)
 
 
 def test_trained_checkpoint_loads_into_upstream_inference(trained):
@@ -223,11 +264,17 @@ def test_released_weights_cannot_be_resumed(trained):
 
 
 def test_training_actually_reduces_the_loss(tmp_path):
-    """The end-to-end check: overfit two structures and require the loss to fall.
+    """The end-to-end check: overfit two structures and require the error to fall.
 
     Every other test here checks a contract. This one checks that the objective,
     the gradients and the optimizer are wired to each other -- a mis-signed loss
     or a detached target would pass all the contract tests and fail this one.
+
+    It is read off the *normalized* diagnostics, not off ``loss_main``. With the
+    original's normalization the sequence term is a sum over masked tokens
+    divided by the crop length, so its value tracks how much the interpolant
+    happened to hide in that window (``keep_fraction`` swings between 0.5 and
+    0.95 here) and a 10-step window is dominated by that, not by learning.
     """
     import json
 
@@ -249,9 +296,9 @@ def test_training_actually_reduces_the_loss(tmp_path):
         loader,
         out_dir=tmp_path,
         dataset=dataset,
-        optim=OptimSettings(lr=3e-4, warmup_steps=5),
+        optim=OptimSettings(optimizer="adamw", lr=1e-3, warmup_steps=5),
         train=TrainSettings(
-            max_steps=60, log_every=10, checkpoint_every=0, train_confidence=False, seed=0
+            max_steps=120, log_every=10, checkpoint_every=0, train_confidence=False, seed=0
         ),
     )
     trainer.train(progress=None)
@@ -259,11 +306,18 @@ def test_training_actually_reduces_the_loss(tmp_path):
     records = [
         json.loads(line) for line in (tmp_path / "train_log.jsonl").read_text().splitlines()
     ]
-    assert len(records) >= 4
-    first, last = records[0]["loss_main"], records[-1]["loss_main"]
-    assert last < first / 3, f"loss_main only moved {first:.4f} -> {last:.4f}"
-    # Both objectives must be learning, not just one carrying the sum.
-    assert records[-1]["loss_mlm"] < records[0]["loss_mlm"]
-    assert records[-1]["loss_diffusion"] < records[0]["loss_diffusion"]
-    # Memorizing two crops should drive masked-token accuracy up.
-    assert records[-1]["sequence_accuracy"] > records[0]["sequence_accuracy"]
+    assert len(records) >= 8
+
+    def window(key, records):
+        return sum(r[key] for r in records) / len(records)
+
+    # Both objectives must be learning, not just one carrying the sum. The
+    # thresholds differ only because 120 clipped steps move them at different
+    # rates, not because one matters more.
+    for key, factor in (("sidechain_mse_local", 1.8), ("mlm_per_token", 1.4)):
+        first, last = window(key, records[:2]), window(key, records[-2:])
+        assert last < first / factor, f"{key} only moved {first:.4f} -> {last:.4f}"
+    # Memorizing two crops should leave masked-token accuracy high. Averaged over
+    # the second half, not the last window: at a 0.9 keep rate a window can hold
+    # only a couple of masked tokens, so a single miss reads as 0.5.
+    assert window("sequence_accuracy", records[len(records) // 2 :]) > 0.85

@@ -110,8 +110,11 @@ class CoupleSettings:
     # Steps at which to score the held-out set. Step 0 is always included, so
     # "at initialization" is a measurement rather than an assumption.
     eval_steps: tuple = ()
-    # Reduction for L_SC; see pxf.train.losses.SIDECHAIN_REDUCTIONS.
-    sidechain_reduction: str = "per_residue"
+    # Reduction for L_SC; see pxf.train.losses.SIDECHAIN_REDUCTIONS. The default
+    # is the original training code's, so L_SC is on the same scale as the loss
+    # FaMPNN was fitted with. Runs from before that was known used a per-residue
+    # average, and their absolute L_SC values are not comparable with these.
+    sidechain_reduction: str = "per_token"
     # The sigma_B distribution the batches were drawn from, as
     # CouplingNoiseSchedule.identity(). Recorded, not used: the schedule lives in
     # the batch generator, but a checkpoint that does not say which noise range
@@ -156,7 +159,11 @@ class CoupledTrainer:
                 "carry the config so --fampnn-checkpoint can rebuild SeqDenoiser"
             )
         self.settings = settings or CoupleSettings()
-        self.optim_settings = optim or OptimSettings()
+        # The coupling stages are this repo's own design, not FaMPNN's, and were
+        # built and measured under AdamW at a constant low rate; the Noam
+        # schedule that reproduces FaMPNN's own training is the wrong shape for
+        # a 20k-step adapter fit.
+        self.optim_settings = optim or OptimSettings(optimizer="adamw")
         self.out_dir = Path(out_dir)
         (self.out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         self.device = torch.device(device) if device else torch.device("cpu")
@@ -621,10 +628,12 @@ class CoupledTrainer:
             lr = learning_rate(self.step, self.optim_settings, target)
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
+            # max_grad_norm 0 means "do not clip", not "clip to zero" -- which
+            # is what clip_grad_norm_ would do with a literal 0.
+            limit = self.optim_settings.max_grad_norm or float("inf")
             grad_norm = float(
                 torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.tuned.parameters() if p.requires_grad],
-                    self.optim_settings.max_grad_norm,
+                    [p for p in self.tuned.parameters() if p.requires_grad], limit
                 )
             )
             self.optimizer.step()

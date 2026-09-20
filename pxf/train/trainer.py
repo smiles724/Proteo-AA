@@ -1,20 +1,32 @@
 """Training loop for FaMPNN.
 
-Implements the preprint's schedule (Appendix B.2) and fills the gaps it leaves.
+The schedule comes from the preprint (Appendix B.2); the optimizer comes from
+the original training code, ``allatom_design`` (commit ``51c9d53``), which the
+paper does not describe:
 
-What the paper specifies, and this follows:
+    optim.optimizer: noam
+    Adam(lr=0, betas=(0.9, 0.98), eps=1e-9)
+    NoamLR(model_size=128, factor=2, warmup=4000)
+    trainer.gradient_clip_val: 0.0        # nothing is clipped
+    trainer.precision: bf16-mixed
+                       -- allatom_design/configs/seq_denoiser/seq_denoiser.yaml
+                          allatom_design/model/seq_denoiser/lit_sd_model.py
+
+so ``optimizer="noam"`` is the default here and reproduces it. ``"adamw"`` keeps
+the low-constant-lr setup that suits *continuing* training from the released
+weights on a small set, which is what this loop is usually used for; it is a
+deliberate departure and is recorded as one.
+
+From the paper, unchanged:
 
 * CATH: batch 64, fixed size 256 residues, 100k steps, one GPU.
 * PDB: batch 8 per GPU on 4 GPUs with 4 gradient accumulation steps, i.e.
   effective batch 128, fixed size 1024 residues, 300k steps.
-* Post-hoc EMA for the PDB models (see :mod:`pxf.train.ema` for what is and is
-  not reproduced).
 
-What the paper does **not** specify -- optimizer, learning rate, schedule, weight
-decay, gradient clipping -- and is therefore chosen here and recorded in every
-checkpoint so a run is never ambiguous about it. The defaults are tuned for
-*continuing* training from the released weights rather than training from
-scratch: a low constant learning rate after a short warmup.
+**Structural noise is a model setting, not a data setting.** "The 0.3 A model"
+is ``ProteinFeatures.augment_eps = 0.3``, applied to the encoder's atom14 input
+in train mode and never to the diffusion target, so ``TrainSettings.
+structural_noise`` writes it onto the model rather than perturbing the dataset.
 
 Checkpoints deliberately carry ``state_dict`` and ``model_cfg`` alongside the
 optimizer, EMA and step. That means a checkpoint from this loop loads directly
@@ -25,28 +37,65 @@ only the first pair, which is why they cannot be resumed from.
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import torch
 
 from pxf.train.ema import EMA
+from pxf.train.losses import LossSettings
 from pxf.train.step import training_forward
+
+OPTIMIZERS = ("noam", "adamw")
+
+ORIGINAL_SOURCE = "allatom_design configs/seq_denoiser/seq_denoiser.yaml (optim.noam)"
+FINETUNE_SOURCE = "not the original; chosen here for fine-tuning from released weights"
 
 
 @dataclass
 class OptimSettings:
-    """Optimization settings. The paper does not state these; these are ours."""
+    """Optimizer and schedule.
 
+    ``noam`` is what the released weights were trained with, down to the betas
+    and epsilon. ``adamw`` is the fine-tuning alternative: a low constant rate
+    after a short warmup, which is a departure and says so in ``source``.
+    """
+
+    optimizer: str = "noam"
+    # -- noam (the original) --
+    noam_factor: float = 2.0
+    noam_warmup_steps: int = 4_000
+    noam_model_size: int = 128  # the MPNN hidden dim, hardcoded upstream too
+    # -- adamw --
     lr: float = 1e-4
-    weight_decay: float = 0.0
-    betas: tuple = (0.9, 0.999)
-    eps: float = 1e-8
-    warmup_steps: int = 1000
-    max_grad_norm: float = 1.0
+    warmup_steps: int = 1_000
     schedule: str = "constant"  # constant | cosine
     min_lr_ratio: float = 0.1  # cosine floor, as a fraction of lr
-    source: str = "not specified in the preprint; chosen for fine-tuning"
+    weight_decay: float = 0.0
+    # -- shared --
+    betas: tuple | None = None  # (0.9, 0.98) for noam, (0.9, 0.999) for adamw
+    eps: float | None = None  # 1e-9 for noam, 1e-8 for adamw
+    # 0 disables clipping, which is what the original does
+    # (trainer.gradient_clip_val: 0.0); the fine-tuning setup clips at 1.0.
+    max_grad_norm: float | None = None
+    source: str | None = None
+
+    def __post_init__(self):
+        if self.optimizer not in OPTIMIZERS:
+            raise ValueError(
+                f"Unknown optimizer {self.optimizer!r}; choose from {list(OPTIMIZERS)}"
+            )
+        if self.betas is None:
+            self.betas = (0.9, 0.98) if self.optimizer == "noam" else (0.9, 0.999)
+        self.betas = tuple(self.betas)
+        if self.eps is None:
+            self.eps = 1e-9 if self.optimizer == "noam" else 1e-8
+        if self.max_grad_norm is None:
+            self.max_grad_norm = 0.0 if self.optimizer == "noam" else 1.0
+        if self.source is None:
+            self.source = (
+                ORIGINAL_SOURCE if self.optimizer == "noam" else FINETUNE_SOURCE
+            )
 
 
 @dataclass
@@ -61,19 +110,34 @@ class TrainSettings:
     checkpoint_every: int = 5_000
     snapshot_every: int = 0  # >0 also writes plain EMA snapshots
     seed: int = 0
-    train_confidence: bool | None = None  # None = the paper's 1-in-8 sampling
+    train_confidence: bool | None = None  # None = the original's 1-in-8 sampling
     amp_dtype: str | None = None  # None | bf16 | fp16
-    # How L_diff reduces per-atom error: per_residue (every residue counts once)
-    # or per_atom (large side chains dominate). Unrecoverable from the released
-    # code, so it is a recorded setting rather than a hard-coded choice.
-    sidechain_reduction: str = "per_residue"
-    # Ablation only: score side chains the encoder was shown, which is not
-    # masked modeling. See pxf.train.step's module docstring.
-    supervise_visible_sidechains: bool = False
+    # sigma of the encoder-input coordinate noise: ProteinFeatures.augment_eps,
+    # 0.0 and 0.3 being the two released models. None leaves the checkpoint's
+    # own value alone.
+    structural_noise: float | None = None
+    # The objective itself: weights, label smoothing, the two normalizations.
+    loss: LossSettings = field(default_factory=LossSettings)
+    # Ablation only: score just the side chains the interpolant hid. The
+    # original scores every resolved one -- see pxf.train.step.
+    hidden_sidechains_only: bool = False
+
+    def __post_init__(self):
+        if isinstance(self.loss, dict):
+            self.loss = LossSettings(**self.loss)
 
 
 def learning_rate(step, settings: OptimSettings, max_steps):
-    """Warmup then constant or cosine decay."""
+    """The learning rate for ``step`` (0-based), under either optimizer."""
+    if settings.optimizer == "noam":
+        # Vaswani et al.'s schedule, as NoamLR computes it: the scheduler is
+        # stepped once per optimizer step and clamps its own counter at 1, so
+        # step 0 here is step 1 there.
+        n = max(step, 1)
+        return settings.noam_factor * (
+            settings.noam_model_size**-0.5
+            * min(n**-0.5, n * settings.noam_warmup_steps**-1.5)
+        )
     if settings.warmup_steps and step < settings.warmup_steps:
         return settings.lr * (step + 1) / settings.warmup_steps
     if settings.schedule == "constant":
@@ -84,6 +148,20 @@ def learning_rate(step, settings: OptimSettings, max_steps):
         floor = settings.lr * settings.min_lr_ratio
         return floor + 0.5 * (settings.lr - floor) * (1 + math.cos(math.pi * progress))
     raise ValueError(f"Unknown schedule {settings.schedule!r}")
+
+
+def set_structural_noise(model, sigma):
+    """Write ``augment_eps`` onto the encoder's ProteinFeatures.
+
+    This is where the paper's structural noise lives: applied to the atom14
+    input inside the encoder, in train mode only, leaving the diffusion target
+    clean. Returns the value that is now in effect.
+    """
+    features = model.denoiser.seq_design_module.features
+    if sigma is not None:
+        features.augment_eps = float(sigma)
+        model.denoiser.seq_design_module.augment_eps = float(sigma)
+    return float(features.augment_eps)
 
 
 class Trainer:
@@ -112,13 +190,25 @@ class Trainer:
         self.device = torch.device(device) if device else next(model.parameters()).device
         self.model.to(self.device)
 
-        self.optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=self.optim_settings.lr,
-            betas=tuple(self.optim_settings.betas),
-            eps=self.optim_settings.eps,
-            weight_decay=self.optim_settings.weight_decay,
-        )
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        if self.optim_settings.optimizer == "noam":
+            # Adam, not AdamW: the original applies no weight decay at all, and
+            # the rate is supplied per step by the Noam schedule.
+            self.optimizer = torch.optim.Adam(
+                trainable,
+                lr=0.0,
+                betas=self.optim_settings.betas,
+                eps=self.optim_settings.eps,
+            )
+        else:
+            self.optimizer = torch.optim.AdamW(
+                trainable,
+                lr=self.optim_settings.lr,
+                betas=self.optim_settings.betas,
+                eps=self.optim_settings.eps,
+                weight_decay=self.optim_settings.weight_decay,
+            )
+        self.augment_eps = set_structural_noise(model, self.settings.structural_noise)
         self.ema = None
         if self.settings.ema_relative_length or self.settings.ema_decay:
             self.ema = EMA(
@@ -152,6 +242,9 @@ class Trainer:
                 ema=self.ema.state_dict() if self.ema else None,
                 optim_settings=asdict(self.optim_settings),
                 train_settings=asdict(self.settings),
+                # The value actually in force, which is the checkpoint's own
+                # when structural_noise was left unset.
+                augment_eps=self.augment_eps,
                 generator=self.generator.get_state(),
             )
         return state
@@ -234,10 +327,8 @@ class Trainer:
                         batch,
                         train_confidence=self.settings.train_confidence,
                         generator=self.generator,
-                        reduction=self.settings.sidechain_reduction,
-                        supervise_visible_sidechains=(
-                            self.settings.supervise_visible_sidechains
-                        ),
+                        settings=self.settings.loss,
+                        hidden_sidechains_only=self.settings.hidden_sidechains_only,
                     )
                 (out.total / accum).backward()
                 pending += 1
@@ -254,10 +345,13 @@ class Trainer:
                 lr = learning_rate(self.step, self.optim_settings, target)
                 for group in self.optimizer.param_groups:
                     group["lr"] = lr
+                # The original clips nothing (gradient_clip_val: 0.0), but the
+                # norm is still worth logging, so compute it either way with an
+                # infinite threshold when clipping is off.
+                limit = self.optim_settings.max_grad_norm or float("inf")
                 grad_norm = float(
                     torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.model.parameters() if p.requires_grad],
-                        self.optim_settings.max_grad_norm,
+                        [p for p in self.model.parameters() if p.requires_grad], limit
                     )
                 )
                 self.optimizer.step()
@@ -280,10 +374,15 @@ class Trainer:
                     )
                     self._log(record)
                     if progress:
+                        # loss_mlm is normalized by the crop length, so it moves
+                        # with the masking rate; ce/tok and scn_mse are the two
+                        # numbers a curve should actually be read off.
                         progress(
                             f"step {self.step:>7d}  main {record['loss_main']:.4f}  "
                             f"mlm {record['loss_mlm']:.4f}  "
                             f"diff {record['loss_diffusion']:.4f}  "
+                            f"ce/tok {record.get('mlm_per_token', float('nan')):.4f}  "
+                            f"scn_mse {record.get('sidechain_mse_local', float('nan')):.4f}  "
                             f"seq_acc {record.get('sequence_accuracy', float('nan')):.3f}  "
                             f"lr {lr:.2e}  |g| {grad_norm:.2f}"
                         )

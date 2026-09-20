@@ -41,7 +41,7 @@ couple:
   # them comparable to each other.
   bs_policy: bypass
   sigma_data_backbone: 16.0
-  sidechain_reduction: per_residue
+  sidechain_reduction: per_token
   log_every: 25
   checkpoint_every: 500
   eval_steps: [500, 1000, 2000]   # step 0 is always included
@@ -74,6 +74,7 @@ sb_feedback:
     sigma_max: 2.0
     taper: 2.0
 optim:
+  optimizer: adamw
   lr: 1.0e-4
   weight_decay: 0.0
   # Short next to a 2000-step run, and the point is only to avoid a first-step

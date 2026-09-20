@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Train or continue training FaMPNN's full-atom modules.
 
-FaMPNN ships inference only, so the objectives and loop here are written from the
-preprint (bioRxiv 2025.02.13.637498); see pxf/train/ for the section references.
+FaMPNN ships inference only. The objectives and loop here are transcribed from
+the original training code (``allatom_design`` 51c9d53), with the preprint for
+the data schedule; see pxf/train/ for the per-symbol references.
 
     # continue training from the released weights on a directory of PDBs
     python scripts/train.py --pdb-dir <dir> --out runs/ft \
@@ -70,8 +71,23 @@ def parse_args(argv=None):
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--crop-size", type=int, default=None)
-    p.add_argument("--noise", type=float, default=None)
-    p.add_argument("--lr", type=float, default=None)
+    p.add_argument(
+        "--noise",
+        type=float,
+        default=None,
+        help=(
+            "structural noise sigma: the encoder's augment_eps (0.0 and 0.3 are "
+            "the two released models). Applied to the encoder's input only, never "
+            "to the diffusion target; omit to keep the checkpoint's own value"
+        ),
+    )
+    p.add_argument(
+        "--optimizer",
+        choices=("noam", "adamw"),
+        default=None,
+        help="noam reproduces the original training code; adamw suits fine-tuning",
+    )
+    p.add_argument("--lr", type=float, default=None, help="adamw only")
     p.add_argument("--grad-accum-steps", type=int, default=None)
     p.add_argument(
         "--train-confidence",
@@ -116,7 +132,6 @@ def main(argv=None):
     for key, value in (
         ("batch_size", args.batch_size),
         ("crop_size", args.crop_size),
-        ("noise", args.noise),
         ("num_workers", args.num_workers),
     ):
         if value is not None:
@@ -125,11 +140,16 @@ def main(argv=None):
         ("max_steps", args.max_steps),
         ("seed", args.seed),
         ("grad_accum_steps", args.grad_accum_steps),
+        # Structural noise is a model setting, not a data setting: it is the
+        # encoder's augment_eps and never touches the diffusion target.
+        ("structural_noise", args.noise),
     ):
         if value is not None:
             train_cfg[key] = value
     if args.lr is not None:
         optim_cfg["lr"] = args.lr
+    if args.optimizer is not None:
+        optim_cfg["optimizer"] = args.optimizer
     train_cfg["train_confidence"] = {"auto": None, "always": True, "never": False}[
         args.train_confidence
     ]
@@ -167,8 +187,6 @@ def main(argv=None):
             ids,
             masks=protenix_masks,
             crop_size=int(data_cfg.get("crop_size", 256)),
-            noise=float(data_cfg.get("noise", 0.0)),
-            noise_targets=bool(data_cfg.get("noise_targets", True)),
             spatial_crop_p=float(data_cfg.get("spatial_crop_p", 0.5)),
             seed=int(train_cfg.get("seed", 0)),
             apply_supervision=not args.no_supervision_mask,
@@ -201,8 +219,6 @@ def main(argv=None):
             paths,
             batch_size=int(data_cfg.get("batch_size", 1)),
             crop_size=int(data_cfg.get("crop_size", 256)),
-            noise=float(data_cfg.get("noise", 0.0)),
-            noise_targets=bool(data_cfg.get("noise_targets", True)),
             spatial_crop_p=float(data_cfg.get("spatial_crop_p", 0.5)),
             seed=int(train_cfg.get("seed", 0)),
             num_workers=int(data_cfg.get("num_workers", 0)),
@@ -275,6 +291,7 @@ def main(argv=None):
                     else dict(kind="paths", n=len(paths))
                 ),
                 trainable=args.trainable,
+                augment_eps=trainer.augment_eps,
                 upstream=provenance.runtime_sources(components=("fampnn",)),
                 paper="bioRxiv 2025.02.13.637498",
             ),
@@ -284,12 +301,15 @@ def main(argv=None):
     )
 
     logger.info(
-        "training on %s for %d steps (batch %s x accum %s, crop %s)",
+        "training on %s for %d steps (batch %s x accum %s, crop %s, %s, "
+        "augment_eps %.3g)",
         device,
         trainer.settings.max_steps,
         data_cfg.get("batch_size", 1),
         trainer.settings.grad_accum_steps,
         data_cfg.get("crop_size", 256),
+        trainer.optim_settings.optimizer,
+        trainer.augment_eps,
     )
     result = trainer.train(progress=lambda m: logger.info(m))
     logger.info("done: %s", result)

@@ -1,39 +1,101 @@
-"""FaMPNN training objectives, as specified in the preprint.
+"""FaMPNN's training objectives, as the original training code computes them.
 
-FaMPNN ships inference only (upstream issue #9 asks for training code and is
-unanswered), so the objectives are written here from the paper. Everything that
-*is* shipped -- the MAR and EDM interpolants, the denoiser MLP, the confidence
-head, the local-frame transforms -- is reused rather than reimplemented.
+The released ``fampnn`` package is inference only -- the training branch was
+stripped out of ``SidechainDiffusionModule.sidechain_diffusion`` and the loss
+module was not shipped at all (upstream issue #9 asks for training code and is
+unanswered). The objectives here are transcribed from the code the released
+weights were trained by: ``allatom_design`` (commit ``51c9d53``), the research
+tree ``fampnn`` was factored out of, specifically
 
-Reference: Shuai et al., "Sidechain conditioning and modeling for full-atom
-protein sequence design with FAMPNN", bioRxiv 2025.02.13.637498.
+    allatom_design/model/seq_denoiser/sd_loss.py          SDLoss
+    allatom_design/configs/seq_denoiser/seq_denoiser.yaml loss:
 
-* Appendix C.1 -- the total objective is ``L_total = L_MLM + L_diff``, summed with
-  no relative weighting ("We did not experiment with relative weightings of the
-  losses on each objective").
-* Appendix C -- masking rate ``t = sqrt(u)``, ``u ~ U(0,1)``, each residue *kept*
-  with probability ``t``. So the MLM term is scored on the complement: the
-  positions the interpolant masked.
-* Section 4.3.1 -- the side-chain denoiser is trained on the L2 error to the clean
-  coordinates under the variance-exploding EDM scheme, with EDM's own loss
-  weighting ``1/c_out(sigma)^2`` (shipped as ``EDM.get_loss_weight``).
-* Appendix D.4.1 -- the confidence head is a 33-way classifier over per-atom
-  side-chain error binned evenly on [0, 4] Angstrom, trained with cross entropy.
+so what follows is a transcription, not an inference from the preprint. Where
+the two disagree the code wins, and the disagreements are called out below --
+they are the places an implementation written from the paper alone goes wrong.
+
+``L_total = L_seq + L_scn_mse + L_psce``, each weighted by ``loss_weights``
+(all 1.0 in the released config, which is what "we did not experiment with
+relative weightings" means in Appendix C.1).
+
+Three details that a paper-only reading gets wrong, each with a test:
+
+* **The sequence term is normalized by the crop length, not by the number of
+  masked tokens** (``seq_loss.per_token_avg: false``). It is a *sum* over masked
+  positions divided by the fixed example size, so a batch the interpolant barely
+  masked contributes a correspondingly small loss. Dividing by the masked count
+  instead rescales every step by a random factor and changes the balance against
+  the diffusion term.
+* **The sequence term carries label smoothing 0.1** and excludes positions whose
+  true residue is unknown (``X``): the model must never be trained to emit the
+  mask token as a prediction.
+* **The diffusion term is averaged per coordinate component**, over every
+  supervised slot of the example, and only then multiplied by EDM's per-example
+  weight. It is not a per-residue average, and the division is by ``3 x atoms``,
+  not by atoms.
 """
+
+import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
-# Appendix D.4.1: 33 evenly spaced bins between 0 and 4 Angstrom. The shipped
-# inference head builds LOWER EDGES as linspace(min_bin, max_bin, n_bins) and
-# takes centres at edge + step/2, giving edges 0.125k and centres 0.0625 + 0.125k
-# -- exactly the paper's Algorithm 7 linspace(0.0625, 4.0625, 33). Training targets
-# must therefore use floor(error / step), not a round-to-nearest-centre, or every
-# label lands half a bin low.
+# Confidence bins: 33 lower edges evenly spaced on [0, 4] Angstrom, with the top
+# bin running to infinity. The shipped inference head takes bin *centres* at
+# ``edge + step/2``, so a training label must floor onto the edges; rounding to
+# the nearest centre puts every label half a bin low.
 PSCE_MIN_BIN = 0.0
 PSCE_MAX_BIN = 4.0
 PSCE_NUM_BINS = 33
 PSCE_BIN_WIDTH = (PSCE_MAX_BIN - PSCE_MIN_BIN) / (PSCE_NUM_BINS - 1)
+# model_cfg.inf: the open upper edge of the last bin, as a finite number.
+PSCE_INF = 1.0e9
+
+# How the side-chain squared error is reduced to one number per example.
+#
+#   per_token   sum over supervised coordinate components / their count
+#               (``mse_loss.per_token_avg: true``, the released setting)
+#   fixed_size  the same sum divided by the constant ``L * 33 * 3``, so a crop
+#               with few resolved side chains scores lower rather than being
+#               renormalized (``per_token_avg: false``)
+#
+# The EDM weight is applied *after* this reduction, per example, in both cases.
+SIDECHAIN_REDUCTIONS = ("per_token", "fixed_size")
+DEFAULT_SIDECHAIN_REDUCTION = "per_token"
+
+
+@dataclass
+class LossSettings:
+    """The ``loss:`` block of the original config, with its own defaults.
+
+    These are settings of the objective, not of the optimizer: two runs with
+    different values here are minimizing different things, so every field is
+    recorded in the checkpoint.
+    """
+
+    # seq_loss
+    label_smoothing: float = 0.1
+    n_aatype: int = 21
+    seq_per_token_avg: bool = False
+    # mse_loss
+    sidechain_reduction: str = DEFAULT_SIDECHAIN_REDUCTION
+    # psce_loss
+    inf: float = PSCE_INF
+    # loss_weights
+    weight_seq: float = 1.0
+    weight_sidechain: float = 1.0
+    weight_confidence: float = 1.0
+
+    def __post_init__(self):
+        if self.sidechain_reduction not in SIDECHAIN_REDUCTIONS:
+            raise ValueError(
+                f"Unknown reduction {self.sidechain_reduction!r}; choose from "
+                f"{list(SIDECHAIN_REDUCTIONS)}"
+            )
+
+
+DEFAULT_LOSS_SETTINGS = LossSettings()
 
 
 def psce_bin_spec(module=None):
@@ -48,179 +110,213 @@ def psce_bin_spec(module=None):
     return float(cfg.min_bin), float(cfg.max_bin), int(cfg.n_bins)
 
 
-# The reduction used to turn per-atom squared error into one scalar. The authors
-# did not release the training loop, so which one FaMPNN used cannot be
-# established from the released code; both are implemented and the active choice
-# is returned in the stats rather than left implicit.
-#
-#   per_residue  L_i = sum_a m_ia d_ia^2 / sum_a m_ia,  then L = mean_i w_i L_i
-#                every residue counts once, so Trp does not outweigh Ala.
-#   per_atom     L = sum_ia m_ia w_i d_ia^2 / sum_ia m_ia
-#                atom-weighted, so large side chains dominate the gradient.
-SIDECHAIN_REDUCTIONS = ("per_residue", "per_atom")
-DEFAULT_SIDECHAIN_REDUCTION = "per_residue"
+# ---- the primitives, one per term ------------------------------------------
 
 
-def _masked_mean(values, mask):
-    """Mean of ``values`` over ``mask``, or an exact zero when nothing is scored.
+def masked_mse(x, y, mask, *, per_token_avg=True):
+    """Per-example masked MSE over every trailing axis (``sd_loss.masked_mse``).
 
-    Returning a real zero that still carries grad keeps the loop differentiable
-    on batches where a term has no supervision (e.g. an all-glycine crop).
+    ``mask`` is the same shape as ``x``, so with a coordinate-shaped mask the
+    denominator counts *components* -- three per atom. Returns ``[b]``.
     """
-    mask = mask.to(values.dtype)
-    total = (values * mask).sum()
-    count = mask.sum()
-    return total / count.clamp_min(1.0), count
+    data_dims = tuple(range(1, x.dim()))
+    mask = mask.to(x.dtype)
+    squared = (x - y).pow(2) * mask
+    if per_token_avg:
+        return squared.sum(data_dims) / mask.sum(data_dims).clamp(min=1e-6)
+    n = math.prod(squared.shape[1:])
+    return squared.sum(data_dims) / n
 
 
-def _broadcast_weight(loss_weight, ndim):
-    """Right-pad a per-example weight with singleton axes up to ``ndim``."""
-    pad = ndim - loss_weight.dim()
-    if pad < 0:
-        raise ValueError(
-            f"loss weight has {loss_weight.dim()} dims, more than the {ndim} it must "
-            "broadcast against"
-        )
-    return loss_weight.reshape(*loss_weight.shape, *([1] * pad))
+def masked_cross_entropy(
+    logits, target, mask, *, label_smoothing=0.1, n_aatype=21, per_token_avg=False
+):
+    """Per-example label-smoothed cross entropy (``sd_loss.masked_cross_entropy``).
 
-
-def _per_residue_mean(squared, atom_mask):
-    """Average each residue's squared error over *its own* supervised atoms.
-
-    Returns ``(per_residue, residue_mask)``, both ``[..., L]``. A residue with no
-    supervised atom -- glycine, an unresolved side chain, a target masked out by
-    the interpolant -- gets an exact zero and is excluded by ``residue_mask``, so
-    it neither contributes error nor dilutes the mean.
+    Smoothing is applied to the one-hot target and renormalized, which is a
+    slightly different quantity from ``F.cross_entropy(label_smoothing=)``: the
+    smoothing mass is ``label_smoothing / n_aatype`` *added* to every class
+    before normalizing, not ``label_smoothing`` redistributed. Returns ``[b]``.
     """
-    mask = atom_mask.to(squared.dtype)
-    atoms_per_residue = mask.sum(-1)
-    per_residue = (squared * mask).sum(-1) / atoms_per_residue.clamp_min(1.0)
-    return per_residue, (atoms_per_residue > 0).to(squared.dtype)
+    target_oh = F.one_hot(target.long(), num_classes=logits.shape[-1]).to(logits.dtype)
+    target_oh = target_oh + label_smoothing / n_aatype
+    target_oh = target_oh / target_oh.sum(dim=-1, keepdim=True)
+
+    logprobs = F.log_softmax(logits.float(), dim=-1)
+    cel = -(logprobs * target_oh).sum(dim=-1)
+
+    mask = mask.to(cel.dtype)
+    if per_token_avg:
+        return (cel * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1e-8)
+    return (cel * mask).sum(dim=-1) / mask.shape[1]
 
 
-def sequence_mlm_loss(seq_logits, aatype, seq_mlm_mask, seq_mask):
-    """``L_MLM``: cross entropy on the residues the interpolant masked.
+def masked_seq_accuracy(logits, target, mask):
+    """Per-example accuracy over the scored positions. Returns ``[b]``."""
+    correct = (logits.argmax(dim=-1) == target.long()).to(logits.dtype)
+    mask = mask.to(correct.dtype)
+    return (correct * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1e-8)
+
+
+def psce_bin_targets(x_pred, x_target, *, min_bin=PSCE_MIN_BIN, max_bin=PSCE_MAX_BIN,
+                     num_bins=PSCE_NUM_BINS, inf=PSCE_INF):
+    """One-hot bin assignment for per-atom side-chain error (``sd_loss.psce_loss``).
+
+    Bin ``k`` is ``[lower_k, lower_{k+1})`` over ``linspace(min, max, num_bins)``,
+    with the last bin running to ``inf``. Returns ``(one_hot, error)``; an error
+    at or beyond ``inf`` produces an all-zero row, exactly as upstream, which
+    contributes nothing to the numerator while still counting in the denominator.
+    """
+    lower = torch.linspace(min_bin, max_bin, num_bins, device=x_pred.device)
+    upper = torch.cat([lower[1:], lower.new_tensor([inf])], dim=-1)
+    error = torch.norm(x_pred.float() - x_target.float(), dim=-1)
+    binned = ((error[..., None] >= lower) & (error[..., None] < upper)).to(torch.float32)
+    return binned, error
+
+
+# ---- the three terms -------------------------------------------------------
+
+
+def sequence_mlm_loss(
+    seq_logits,
+    aatype,
+    seq_mlm_mask,
+    seq_mask,
+    *,
+    seq_unk_mask=None,
+    settings=DEFAULT_LOSS_SETTINGS,
+):
+    """``L_seq``: cross entropy on the residues the interpolant masked.
 
     ``seq_mlm_mask`` follows the upstream convention -- 1 where a residue was
-    *kept*, 0 where it was masked -- so the objective scores ``1 - seq_mlm_mask``.
-    Padding is excluded via ``seq_mask``.
+    *kept* -- so the scored set is ``(1 - seq_mlm_mask) * seq_mask``, minus the
+    positions whose true identity is unknown (``seq_unk_mask``). Training on
+    those would teach the model to predict the ``X`` token it uses as its own
+    mask.
     """
     scored = (1.0 - seq_mlm_mask) * seq_mask
-    per_residue = F.cross_entropy(
-        seq_logits.reshape(-1, seq_logits.shape[-1]).float(),
-        aatype.reshape(-1).long(),
-        reduction="none",
-    ).reshape(aatype.shape)
-    loss, count = _masked_mean(per_residue, scored)
-    return loss, dict(masked_residues=count.detach())
+    if seq_unk_mask is not None:
+        scored = scored * (1.0 - seq_unk_mask.to(scored.dtype))
+    per_example = masked_cross_entropy(
+        seq_logits,
+        aatype,
+        scored,
+        label_smoothing=settings.label_smoothing,
+        n_aatype=settings.n_aatype,
+        per_token_avg=settings.seq_per_token_avg,
+    )
+    with torch.no_grad():
+        accuracy = masked_seq_accuracy(seq_logits, aatype, scored).mean()
+        # The same cross entropy, per masked token. The loss itself is normalized
+        # by the crop length, so its value moves with however much the
+        # interpolant happened to hide; this one is comparable across steps and
+        # is what a training curve should be read off.
+        per_token = masked_cross_entropy(
+            seq_logits,
+            aatype,
+            scored,
+            label_smoothing=settings.label_smoothing,
+            n_aatype=settings.n_aatype,
+            per_token_avg=True,
+        ).mean()
+    return per_example.mean(), dict(
+        masked_residues=scored.sum().detach(),
+        sequence_accuracy=accuracy.detach(),
+        mlm_per_token=per_token.detach(),
+    )
 
 
 def sidechain_diffusion_loss(
     x1_pred, x1_target, loss_weight, atom_mask, *, reduction=DEFAULT_SIDECHAIN_REDUCTION
 ):
-    """``L_diff``: EDM-weighted L2 between predicted and clean side-chain atoms.
+    """``L_scn_mse``: EDM-weighted L2 to the clean local-frame side chains.
 
-    Operates on local-frame side-chain coordinates ``[..., L, A, 3]``.
-    ``loss_weight`` is EDM's ``1/c_out(sigma)^2`` per example, broadcast over
-    residues and atoms; ``atom_mask`` selects the atoms that exist and are
-    supervised.
+    ``atom_mask`` may be ``[..., L, A]`` or the coordinate-shaped
+    ``[..., L, A, 3]``; either way the reduction divides by the number of
+    supervised *components*, which is what the original does (its mask is
+    ``x_mask``, already expanded over xyz).
 
-    ``reduction`` picks how per-atom error becomes one scalar, and it changes what
-    the objective actually optimizes:
-
-    ``"per_residue"`` (default)
-        Average within each residue first, then over residues. Every residue
-        carries weight 1, so Trp (14 supervised slots) does not count seven times
-        Ser (2). Prefer this when the quantity of interest is per-residue packing
-        quality, which is what the downstream side-chain metrics all report.
-
-    ``"per_atom"``
-        One global average over supervised atoms, so large side chains dominate
-        the gradient in proportion to their atom count.
-
-    FaMPNN released inference only, so the original reduction is not recoverable
-    from the code; both are kept and the active one is reported in the stats.
+    ``loss_weight`` is EDM's ``1 / c_out(sigma)^2``, one value per example, and
+    it multiplies the example's *already reduced* error. That ordering matters:
+    weighting inside the sum and dividing by the pooled count would let examples
+    with more resolved atoms carry more of the batch's weight.
     """
     if reduction not in SIDECHAIN_REDUCTIONS:
         raise ValueError(
             f"Unknown reduction {reduction!r}; choose from {list(SIDECHAIN_REDUCTIONS)}"
         )
-    squared = (x1_pred.float() - x1_target.float()).pow(2).sum(-1)  # [..., L, A]
-    atom_mask = atom_mask.to(squared.dtype)
-
-    if reduction == "per_residue":
-        per_residue, residue_mask = _per_residue_mean(squared, atom_mask)
-        weight = _broadcast_weight(loss_weight, per_residue.dim())
-        loss, residues = _masked_mean(per_residue * weight, residue_mask)
-        atoms = atom_mask.sum()
-    else:
-        weight = _broadcast_weight(loss_weight, squared.dim())
-        loss, atoms = _masked_mean(squared * weight, atom_mask)
-        residues = (atom_mask.sum(-1) > 0).to(squared.dtype).sum()
-
+    if atom_mask.dim() == x1_pred.dim() - 1:
+        atom_mask = atom_mask.unsqueeze(-1).expand_as(x1_pred)
+    mask = atom_mask.to(x1_pred.dtype)
+    per_example = masked_mse(
+        x1_pred.float(),
+        x1_target.float(),
+        mask,
+        per_token_avg=(reduction == "per_token"),
+    )
     with torch.no_grad():
-        # Always per-atom and unweighted, so this diagnostic stays comparable
+        # Always per-component and unweighted, so the diagnostic stays comparable
         # across reductions and across noise levels.
-        unweighted, _ = _masked_mean(squared, atom_mask)
-    return loss, dict(
-        scored_atoms=atoms.detach(),
-        scored_residues=residues.detach(),
-        sidechain_mse_local=unweighted.detach(),
+        unweighted = per_example.detach().clone()
+        if reduction != "per_token":
+            unweighted = masked_mse(x1_pred.float(), x1_target.float(), mask)
+    loss = per_example * loss_weight.to(per_example.dtype).reshape(-1)
+    return loss.mean(), dict(
+        scored_atoms=(mask.sum() / 3).detach(),
+        scored_residues=(mask.sum(dim=(-1, -2)) > 0).to(mask.dtype).sum().detach(),
+        sidechain_mse_local=unweighted.mean(),
         reduction=reduction,
     )
 
 
-def psce_bin_targets(
-    x_pred, x_target, *, min_bin=PSCE_MIN_BIN, max_bin=PSCE_MAX_BIN, num_bins=PSCE_NUM_BINS
-):
-    """Bin per-atom side-chain error onto the confidence head's classes.
+def confidence_loss(psce_logits, x_pred, x_target, atom_mask, *, bin_spec=None,
+                    inf=PSCE_INF):
+    """``L_psce``: cross entropy of the confidence head against binned error.
 
-    Bin ``k`` is the half-open interval ``[min + k*step, min + (k+1)*step)`` for
-    ``step = (max - min) / (num_bins - 1)``, which is the binning implied by the
-    shipped head's lower edges. Errors at or beyond the top edge saturate in the
-    last bin.
-    """
-    error = (x_pred.float() - x_target.float()).norm(dim=-1)
-    step = (max_bin - min_bin) / (num_bins - 1)
-    index = torch.floor((error - min_bin) / step).long()
-    return index.clamp_(0, num_bins - 1), error
-
-
-def confidence_loss(psce_logits, x_pred, x_target, atom_mask, *, bin_spec=None):
-    """Categorical cross entropy of the confidence head against binned error.
-
-    ``x_pred`` must already be detached: per Appendix D.4 the confidence inputs
-    carry a stop gradient so this term cannot influence the main model.
+    ``x_pred`` is the diffusion rollout and must already be detached -- the head
+    trains on stop-gradient inputs so it cannot reach the rest of the model.
+    Reduced per example over ``[L, 33]``, then averaged over the batch.
     """
     min_bin, max_bin, num_bins = bin_spec or (PSCE_MIN_BIN, PSCE_MAX_BIN, PSCE_NUM_BINS)
     if psce_logits.shape[-1] != num_bins:
         raise ValueError(
             f"confidence head emits {psce_logits.shape[-1]} bins, expected {num_bins}"
         )
-    target, error = psce_bin_targets(
-        x_pred, x_target, min_bin=min_bin, max_bin=max_bin, num_bins=num_bins
+    binned, error = psce_bin_targets(
+        x_pred, x_target, min_bin=min_bin, max_bin=max_bin, num_bins=num_bins, inf=inf
     )
-    per_atom = F.cross_entropy(
-        psce_logits.reshape(-1, psce_logits.shape[-1]).float(),
-        target.reshape(-1),
-        reduction="none",
-    ).reshape(target.shape)
-    loss, count = _masked_mean(per_atom, atom_mask)
+    logprobs = F.log_softmax(psce_logits.float(), dim=-1)
+    cel = -(logprobs * binned).sum(dim=-1)
+    mask = atom_mask.to(cel.dtype)
+    dims = tuple(range(1, cel.dim()))
+    per_example = (cel * mask).sum(dim=dims) / mask.sum(dim=dims).clamp(min=1e-8)
     with torch.no_grad():
-        mean_error, _ = _masked_mean(error, atom_mask)
-    return loss, dict(
-        confidence_atoms=count.detach(), true_sidechain_error=mean_error.detach()
+        mean_error = (error * mask).sum() / mask.sum().clamp(min=1e-8)
+    return per_example.mean(), dict(
+        confidence_atoms=mask.sum().detach(),
+        true_sidechain_error=mean_error.detach(),
     )
 
 
-def total_loss(loss_mlm, loss_diff, loss_confidence=None):
-    """``L_total = L_MLM + L_diff`` (Appendix C.1), confidence added separately.
+def total_loss(loss_seq, loss_sidechain, loss_confidence=None,
+               *, settings=DEFAULT_LOSS_SETTINGS):
+    """The weighted sum, with upstream's non-finite guard.
 
-    The confidence term is a separate head trained on stop-gradient inputs, so
-    adding it changes no gradient reaching the main model; it is summed here only
-    so one ``backward`` covers every parameter.
+    ``SDLoss`` drops a NaN or Inf term rather than letting it poison every
+    parameter through the sum; a single bad example otherwise ends the run. The
+    replacement zero still carries grad so ``backward`` has something to walk.
     """
-    total = loss_mlm + loss_diff
-    if loss_confidence is not None:
-        total = total + loss_confidence
+    terms = (
+        (loss_seq, settings.weight_seq),
+        (loss_sidechain, settings.weight_sidechain),
+        (loss_confidence, settings.weight_confidence),
+    )
+    total = None
+    for loss, weight in terms:
+        if loss is None:
+            continue
+        if not torch.isfinite(loss):
+            loss = loss.new_tensor(0.0, requires_grad=loss.requires_grad)
+        contribution = loss * weight
+        total = contribution if total is None else total + contribution
     return total

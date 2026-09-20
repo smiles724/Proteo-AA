@@ -1,8 +1,9 @@
 """The training forward, against the real model and real structures.
 
-The load-bearing checks are the ones the paper is specific about and the code
-could get silently wrong: the 8-way noise cloning, teacher forcing on the true
-sequence, and the confidence head's stop gradient.
+The load-bearing checks are the ones the original training code is specific
+about and a reimplementation gets silently wrong: which side chains are targets,
+what a ghost slot is supervised to, the 8-way noise cloning, teacher forcing on
+the true sequence, and the confidence head's stop gradient.
 """
 
 import pytest
@@ -34,8 +35,19 @@ def batch():
     from pxf.train.data import StructureCropDataset, collate
 
     paths = [str(repo_root() / f"fampnn/data/casp14/pdbs/{name}.pdb") for name in TARGETS]
-    dataset = StructureCropDataset(paths, crop_size=64, noise=0.0, seed=0)
+    dataset = StructureCropDataset(paths, crop_size=64, seed=0)
     return collate([dataset[0], dataset[1]])
+
+
+def _mar_draw(model, batch, seed=0):
+    """Reproduce the interpolant draw ``training_forward`` makes at this seed.
+
+    MAR is the first RNG consumer in ``training_forward``, so seeding and calling
+    it directly lands on the same masks.
+    """
+    torch.manual_seed(seed)
+    model.interpolant.training = bool(model.training)
+    return model.interpolant.forward(batch)
 
 
 def test_forward_produces_both_objectives(model, batch):
@@ -55,114 +67,189 @@ def test_missing_batch_keys_are_reported(model, batch):
         S.training_forward(model, partial)
 
 
-def test_noise_clones_match_the_configured_multiplier(model, batch):
-    """Section 4.3.1: conditioning is cloned and a noise level drawn per clone."""
-    expected = int(model.denoiser.scn_diffusion_module.cfg.training_batch_size_mult)
-    assert expected == 8, "the released config uses 8"
-    torch.manual_seed(0)
-    # Unrestricted, so the atom count is a fixed property of the batch rather
-    # than of the interpolant's draw; the restriction has its own tests below.
-    out = S.training_forward(
-        model, batch, train_confidence=False, supervise_visible_sidechains=True
-    )
-    assert int(out.stats["noise_clones"]) == expected
-    # Atoms scored = clones x per-batch supervised atoms.
-    _, atom_mask = S.sidechain_targets(model, batch)
-    assert int(out.stats["scored_atoms"]) == expected * int(atom_mask.sum())
+# ---- the masks the original loss reads off its dataset ---------------------
 
 
-def _mar_draw(model, batch, seed=0):
-    """Reproduce the interpolant draw ``training_forward`` makes at this seed.
+def test_batch_masks_reproduce_the_datasets_own(model, batch):
+    """``atom_mask``, ``x_mask`` and ``seq_unk_mask``, derived rather than carried.
 
-    MAR is the first RNG consumer in ``training_forward``, so seeding and calling
-    it directly lands on the same masks.
+    ``process_single_pdb`` computes all three; a pxf batch carries a smaller set,
+    so :func:`pxf.train.step.batch_masks` rebuilds them. Compare against the
+    upstream featurizer's own output for the same structure.
     """
-    torch.manual_seed(seed)
-    model.interpolant.training = bool(model.training)
-    return model.interpolant.forward(batch)
+    from fampnn.data.data import load_feats_from_pdb, process_single_pdb
+
+    from pxf.provenance import repo_root
+
+    example = process_single_pdb(
+        load_feats_from_pdb(str(repo_root() / f"fampnn/data/casp14/pdbs/{TARGETS[0]}.pdb"))
+    )
+    length = int(example["seq_mask"].sum())
+    single = {k: v[None, :length] for k, v in example.items() if torch.is_tensor(v)}
+    masks = S.batch_masks(single)
+    assert torch.equal(masks["atom_mask"], single["atom_mask"])
+    assert torch.equal(masks["x_mask"], single["x_mask"][..., 0])
+    assert torch.equal(masks["seq_unk_mask"], single["seq_unk_mask"])
 
 
-def test_diffusion_loss_scores_only_the_hidden_sidechains(model, batch):
-    """The objective is p(Y_M | Y_M-bar), so a visible side chain is not a target.
+def test_padding_is_masked_out_even_though_its_aatype_reads_as_alanine(model):
+    """Padding pads ``aatype`` with 0, which is a real residue type.
 
-    ``encoder_inputs`` hands the encoder every side chain where
-    ``scn_mlm_mask == 1``. Scoring those residues would ask the denoiser to
-    reproduce coordinates it was just shown -- a shortcut past the actual task.
+    Deriving ``atom_mask`` from the residue type alone would therefore mark five
+    atoms present at every padded position, and the loss would score them.
+    """
+    from pxf.provenance import repo_root
+    from pxf.train.data import StructureCropDataset, collate
+
+    # T1031 is 95 residues, so a 128-residue crop is a third padding.
+    path = str(repo_root() / "fampnn/data/casp14/pdbs/T1031.pdb")
+    padded = collate([StructureCropDataset([path], crop_size=128, seed=0)[0]])
+    masks = S.batch_masks(padded)
+    padding = padded["seq_mask"] == 0
+    assert bool(padding.any())
+    assert float(masks["atom_mask"][padding].sum()) == 0.0
+    assert float(masks["x_mask"][padding].sum()) == 0.0
+    _, loss_mask = S.sidechain_targets(model, padded)
+    assert float(loss_mask[padding].sum()) == 0.0
+
+
+# ---- which side chains are targets -----------------------------------------
+
+
+def test_every_resolved_sidechain_is_a_target_including_the_visible_ones(model, batch):
+    """The diffusion mask is ``x_mask * frames_exist``; ``scn_mlm_mask`` is absent.
+
+    The denoiser starts from pure noise in the local frame whatever the encoder
+    was shown, so a residue whose side chain was visible as *context* is still a
+    real prediction. Restricting the target set to the hidden residues -- the
+    natural reading of a masked-modelling objective -- trains against a different
+    loss from the one the released weights were fitted with.
     """
     mar_out = _mar_draw(model, batch)
     visible = mar_out["scn_mlm_mask"]
-    assert 0 < float((visible * batch["seq_mask"]).sum()), (
+    assert float((visible * batch["seq_mask"]).sum()) > 0, (
         "this batch hid every side chain, so the test cannot distinguish the masks"
     )
 
-    _, unrestricted = S.sidechain_targets(model, batch)
+    _, mask = S.sidechain_targets(model, batch)
+    scored_in_visible_rows = (mask.sum(-1) * visible).sum()
+    assert float(scored_in_visible_rows) > 0
+
+    # And the restriction is reachable, as an ablation.
     _, restricted = S.sidechain_targets(model, batch, scn_mlm_mask=visible)
-    assert int(restricted.sum()) < int(unrestricted.sum())
-
-    # No atom survives in a residue whose side chain the encoder received.
-    kept_in_visible_rows = (restricted.sum(-1) * visible).sum()
-    assert float(kept_in_visible_rows) == 0.0
-    # Everything else is untouched: restriction only drops rows.
-    hidden = 1.0 - visible
-    assert torch.equal(restricted, unrestricted * hidden.unsqueeze(-1))
-
-    clones = int(model.denoiser.scn_diffusion_module.cfg.training_batch_size_mult)
-    torch.manual_seed(0)
-    out = S.training_forward(model, batch, train_confidence=False)
-    assert int(out.stats["scored_atoms"]) == clones * int(restricted.sum())
+    assert int(restricted.sum()) < int(mask.sum())
+    assert float((restricted.sum(-1) * visible).sum()) == 0.0
 
 
-def test_the_encoder_input_and_the_loss_target_never_overlap(model, batch):
-    """The load-bearing invariant: no side chain is both an input and a target."""
-    mar_out = _mar_draw(model, batch)
+def test_ghost_slots_are_supervised_to_the_origin(model, batch):
+    """``x_mask`` drops missing atoms but keeps slots the residue type lacks.
+
+    The MLP always emits 33 atoms; this is what teaches it to put the
+    nonexistent ones at 0. Excluding them -- the natural reading of "supervise
+    the atoms that exist" -- leaves those outputs untrained.
+    """
+    from fampnn.data.data import get_rc_tensor
+
     from fampnn.data import residue_constants as rc
 
-    encoder_mask = S.encoder_inputs(model, batch, mar_out)
-    given = encoder_mask[..., rc.non_bb_idxs]  # side-chain atoms the encoder saw
-    _, scored = S.sidechain_targets(model, batch, scn_mlm_mask=mar_out["scn_mlm_mask"])
-    assert float((given * scored).sum()) == 0.0
-    # And the restriction is not vacuous -- both sets are non-empty.
-    assert float(given.sum()) > 0 and float(scored.sum()) > 0
+    targets = S.frame_targets(model, batch)
+    exists = get_rc_tensor(rc.STANDARD_ATOM_MASK_WITH_X, batch["aatype"].long())
+    ghost = (1 - exists)[..., rc.non_bb_idxs] * batch["seq_mask"].unsqueeze(-1)
+    ghost = ghost * targets["frames_exist"].unsqueeze(-1)
+    assert float(ghost.sum()) > 0
+
+    scored_ghosts = ghost * targets["loss_mask"]
+    assert float(scored_ghosts.sum()) == pytest.approx(float(ghost.sum()))
+    assert float(targets["local"][ghost.bool()].abs().max()) == 0.0
+    # The confidence head is scored on the narrower set: a ghost slot has no
+    # error to be confident about.
+    assert float((ghost * targets["atom_mask"]).sum()) == 0.0
 
 
-def test_supervising_visible_sidechains_is_an_explicit_opt_in(model, batch):
-    """The unrestricted objective stays reachable, but only by asking for it."""
+def test_targets_exclude_missing_atoms_and_padding(model, batch):
+    _, mask = S.sidechain_targets(model, batch)
+    from fampnn.data import residue_constants as rc
+
+    padding = batch["seq_mask"] == 0
+    assert float(mask[padding].sum()) == 0.0
+    missing = batch["missing_atom_mask"][..., rc.non_bb_idxs].bool()
+    assert float(mask[missing].sum()) == 0.0
+
+
+def test_sidechain_targets_live_in_the_local_frame(model, batch):
+    """Local-frame targets must be small -- they are offsets from CA, not positions."""
+    x_local, atom_mask = S.sidechain_targets(model, batch)
+    from fampnn.data import residue_constants as rc
+
+    assert x_local.shape == (*batch["aatype"].shape, len(rc.non_bb_idxs), 3)
+    scored = x_local[atom_mask.bool()]
+    assert scored.numel() > 0
+    assert float(scored.abs().max()) < 15.0, "local coordinates should be near the origin"
+    # Global coordinates are far from the origin, so this really is a transform.
+    assert float(batch["x"].abs().max()) > 15.0
+
+
+# ---- the diffusion step ----------------------------------------------------
+
+
+def test_noise_clones_match_the_configured_multiplier(model, batch):
+    """The conditioning is cloned and a noise level drawn per clone."""
+    expected = int(model.denoiser.scn_diffusion_module.cfg.training_batch_size_mult)
+    assert expected == 8, "the released config uses 8"
     torch.manual_seed(0)
-    masked = S.training_forward(model, batch, train_confidence=False)
-    torch.manual_seed(0)
-    everything = S.training_forward(
-        model, batch, train_confidence=False, supervise_visible_sidechains=True
-    )
-    assert int(everything.stats["scored_atoms"]) > int(masked.stats["scored_atoms"])
-    assert "hidden_sidechain_fraction" in masked.stats
-    assert "hidden_sidechain_fraction" not in everything.stats
-    fraction = float(masked.stats["hidden_sidechain_fraction"])
-    assert 0.0 < fraction < 1.0
-
-
-def test_no_hidden_sidechains_means_nothing_is_scored(model, batch):
-    """Everything visible is the degenerate case, and it must not silently train.
-
-    ``_masked_mean`` returns a differentiable zero rather than a NaN, so the loop
-    survives such a batch; what matters is that it contributes no gradient.
-    """
-    all_visible = batch["seq_mask"].clone()
-    _, restricted = S.sidechain_targets(model, batch, scn_mlm_mask=all_visible)
-    assert float(restricted.sum()) == 0.0
-
-
-def test_a_packing_batch_supervises_every_atom(model, batch):
-    """``scn_mlm_mask=None`` is the packing and coupling case: nothing was visible."""
-    _, unrestricted = S.sidechain_targets(model, batch, scn_mlm_mask=None)
-    _, default = S.sidechain_targets(model, batch)
-    assert torch.equal(unrestricted, default)
-    assert float(unrestricted.sum()) > 0
+    out = S.training_forward(model, batch, train_confidence=False)
+    assert int(out.stats["noise_clones"]) == expected
+    _, atom_mask = S.sidechain_targets(model, batch)
+    assert int(out.stats["scored_atoms"]) == expected * int(atom_mask.sum())
 
 
 def test_multiplier_can_be_overridden(model, batch):
     torch.manual_seed(0)
     out = S.training_forward(model, batch, train_confidence=False, multiplier=2)
     assert int(out.stats["noise_clones"]) == 2
+
+
+def test_a_pinned_diffusion_time_fixes_the_noise_level(model, batch):
+    """``t_scd`` is how the original evaluates a curve at fixed noise levels."""
+    features = _encode(model, batch, _mar_draw(model, batch))
+    interpolant = model.denoiser.scn_diffusion_module.scn_interpolant
+    for t in (0.2, 0.9):
+        _, stats = S.diffusion_loss(model, batch, features, multiplier=2, t_scd=t)
+        expected = float(interpolant.sigma(torch.tensor([t])))
+        assert float(stats["sigma_scn_mean"]) == pytest.approx(expected, rel=1e-5)
+    # Higher t is less noise, and the loss should reflect that ordering.
+    _, easy = S.diffusion_loss(model, batch, features, multiplier=4, t_scd=0.95)
+    _, hard = S.diffusion_loss(model, batch, features, multiplier=4, t_scd=0.2)
+    assert float(easy["sidechain_mse_local"]) < float(hard["sidechain_mse_local"])
+
+
+def test_the_ablation_switch_restricts_the_target_set(model, batch):
+    """``hidden_sidechains_only`` is reachable, but it is not the objective."""
+    torch.manual_seed(0)
+    original = S.training_forward(model, batch, train_confidence=False)
+    torch.manual_seed(0)
+    ablated = S.training_forward(
+        model, batch, train_confidence=False, hidden_sidechains_only=True
+    )
+    assert int(ablated.stats["scored_atoms"]) < int(original.stats["scored_atoms"])
+    assert "hidden_sidechain_fraction" in ablated.stats
+    assert "hidden_sidechain_fraction" not in original.stats
+
+
+def test_encoder_atom_mask_matches_the_inference_construction(model, batch):
+    """A mask built differently here would train on inputs inference never shows."""
+    from fampnn.data.data import get_rc_tensor
+
+    from fampnn.data import residue_constants as rc
+
+    mar_out = _mar_draw(model, batch)
+    mask = S.encoder_inputs(model, batch, mar_out)
+    expected = get_rc_tensor(rc.STANDARD_ATOM_MASK_WITH_X, mar_out["aatype_noised"])
+    expected = expected * batch["seq_mask"].unsqueeze(-1) * (1 - batch["missing_atom_mask"])
+    expected[..., rc.non_bb_idxs] = expected[..., rc.non_bb_idxs] * mar_out[
+        "scn_mlm_mask"
+    ].unsqueeze(-1)
+    assert torch.equal(mask, expected)
 
 
 def test_mar_interpolant_mode_is_mirrored_onto_the_plain_class(model, batch):
@@ -179,41 +266,22 @@ def test_mar_interpolant_mode_is_mirrored_onto_the_plain_class(model, batch):
     model.train()
 
 
-def test_encoder_atom_mask_matches_the_inference_construction(model, batch):
-    """A mask built differently here would train on inputs inference never shows."""
-    from fampnn.data.data import get_rc_tensor
+def test_sequence_and_sidechains_are_masked_separately(model, batch):
+    """``drop_sidechains`` hides side chains at positions whose identity is kept.
 
-    from fampnn.data import residue_constants as rc
-
+    That is the regime packing runs in -- identity known, conformation unknown --
+    and it only happens because MAR is driven in train mode.
+    """
+    mar_out = _mar_draw(model, batch)
+    seq_keep, scn_keep = mar_out["seq_mlm_mask"], mar_out["scn_mlm_mask"]
+    assert float((scn_keep * (1 - seq_keep)).sum()) == 0.0, "scn kept must imply seq kept"
+    assert float(scn_keep.sum()) < float(seq_keep.sum()), "some kept identities lost theirs"
     torch.manual_seed(0)
-    model.interpolant.training = True
-    mar_out = model.interpolant.forward(batch)
-    mask = S.encoder_inputs(model, batch, mar_out)
-    expected = get_rc_tensor(rc.STANDARD_ATOM_MASK_WITH_X, mar_out["aatype_noised"])
-    expected = expected * batch["seq_mask"].unsqueeze(-1) * (1 - batch["missing_atom_mask"])
-    expected[..., rc.non_bb_idxs] = expected[..., rc.non_bb_idxs] * mar_out[
-        "scn_mlm_mask"
-    ].unsqueeze(-1)
-    assert torch.equal(mask, expected)
+    out = S.training_forward(model, batch, train_confidence=False)
+    assert float(out.stats["sidechain_keep_fraction"]) < float(out.stats["keep_fraction"])
 
 
-def test_sidechain_targets_live_in_the_local_frame(model, batch):
-    """Local-frame targets must be small -- they are offsets from CA, not positions."""
-    x_local, atom_mask = S.sidechain_targets(model, batch)
-    from fampnn.data import residue_constants as rc
-
-    assert x_local.shape == (*batch["aatype"].shape, len(rc.non_bb_idxs), 3)
-    scored = x_local[atom_mask.bool()]
-    assert scored.numel() > 0
-    assert float(scored.abs().max()) < 15.0, "local coordinates should be near the origin"
-    # Global coordinates are far from the origin, so this really is a transform.
-    assert float(batch["x"].abs().max()) > 15.0
-
-
-def test_targets_exclude_missing_and_padded_atoms(model, batch):
-    _, atom_mask = S.sidechain_targets(model, batch)
-    padding = batch["seq_mask"] == 0
-    assert float(atom_mask[padding].sum()) == 0.0
+# ---- gradients -------------------------------------------------------------
 
 
 def test_gradients_reach_encoder_and_denoiser_but_not_confidence(model, batch):
@@ -228,7 +296,7 @@ def test_gradients_reach_encoder_and_denoiser_but_not_confidence(model, batch):
 
 
 def test_confidence_term_has_a_real_stop_gradient(model, batch):
-    """Appendix D.4: the confidence loss must not affect the main model."""
+    """The confidence loss must not affect the main model."""
 
     def encoder_grads(train_confidence):
         model.zero_grad()
@@ -271,23 +339,44 @@ def test_requesting_confidence_when_disabled_is_refused(model, batch):
         module.use_confidence_module = True
 
 
-def test_stats_report_the_masking_rate_and_accuracy(model, batch):
+# ---- the confidence rollout ------------------------------------------------
+
+
+def test_the_rollout_stays_in_the_local_frame_and_packs_well(model, batch):
+    """``mini_rollout`` is the shipped sampler, minus the trip through global.
+
+    The head scores local coordinates, and the training batch's backbone is not
+    the one the encoder saw once augment_eps is on, so a round trip would not
+    close. That it reproduces FaMPNN's published packing accuracy (~1.1 A on
+    CASP backbones) is what says the reconstruction is the right integrator.
+    """
+    mar_out = _mar_draw(model, batch)
+    features = _encode(model, batch, mar_out)
     torch.manual_seed(0)
-    out = S.training_forward(model, batch, train_confidence=False)
-    scalars = out.scalars()
-    assert 0.0 <= scalars["keep_fraction"] <= 1.0
-    assert 0.0 <= scalars["sequence_accuracy"] <= 1.0
-    assert "loss_main" in scalars, "the always-comparable total must be logged"
+    _, stats = S.confidence_loss(
+        model, batch, features, batch["aatype"].long(), scn_mlm_mask=mar_out["scn_mlm_mask"]
+    )
+    assert 0.3 < float(stats["rollout_scn_rmsd"]) < 2.5
 
 
-def test_the_confidence_head_sees_an_unrestricted_input(model, batch):
-    """The restriction must reach the psCE head's *score*, never its *input*.
+def test_the_rollout_restores_the_modules_training_mode(model, batch):
+    """Upstream ends with an unconditional ``self.train()``; that leaks into eval."""
+    module = model.denoiser.scn_diffusion_module
+    features = _encode(model, batch, _mar_draw(model, batch))
+    for mode in (True, False):
+        module.train(mode)
+        S.mini_rollout(module, features["h_V"], batch["aatype"].long(), batch["seq_mask"])
+        assert module.training is mode
+    module.train(True)
 
-    The head is a network over the whole packed structure. At deployment
-    ``sidechain_pack`` hides every side chain and the rollout packs every
-    residue, so the input is fully populated. Zeroing the visible residues'
-    coordinates before the head sees them would train it on an input
-    distribution that never occurs -- and the loss curve would look fine.
+
+def test_the_confidence_head_scores_only_hidden_sidechains_on_a_full_input(model, batch):
+    """The restriction reaches the psCE head's *score*, never its *input*.
+
+    A head trained to call a side chain it was handed "zero error" would be
+    calibrated for a case that never arises: ``sidechain_pack`` hides every side
+    chain. But the head is a network over the whole packed structure, so its
+    input has to stay fully populated, as it is at deployment.
     """
     mar_out = _mar_draw(model, batch)
     visible = mar_out["scn_mlm_mask"]
@@ -310,17 +399,24 @@ def test_the_confidence_head_sees_an_unrestricted_input(model, batch):
     finally:
         handle.remove()
 
-    _, unrestricted = S.sidechain_targets(model, batch)
-    populated = (captured["x"].abs().sum(-1) > 0).float() * unrestricted
-    # Every residue the rollout packed is present in the head's input, including
-    # the ones whose side chain the encoder was shown.
+    targets = S.frame_targets(model, batch)
+    populated = (captured["x"].abs().sum(-1) > 0).float() * targets["atom_mask"]
     in_visible_rows = (populated.sum(-1) * visible).sum()
-    assert float(in_visible_rows) > 0
+    assert float(in_visible_rows) > 0, "the head must see the residues it will not score"
 
-    # But only the hidden ones are scored.
-    _, restricted = S.sidechain_targets(model, batch, scn_mlm_mask=visible)
-    assert int(stats["confidence_atoms"]) == int(restricted.sum())
-    assert int(stats["confidence_atoms"]) < int(unrestricted.sum())
+    hidden = (1.0 - visible) * batch["seq_mask"] * targets["frames_exist"]
+    expected = (hidden.unsqueeze(-1) * targets["atom_mask"]).sum()
+    assert int(stats["confidence_atoms"]) == int(expected)
+    assert int(stats["confidence_atoms"]) < int(targets["atom_mask"].sum())
+
+
+def test_stats_report_the_masking_rate_and_accuracy(model, batch):
+    torch.manual_seed(0)
+    out = S.training_forward(model, batch, train_confidence=False)
+    scalars = out.scalars()
+    assert 0.0 <= scalars["keep_fraction"] <= 1.0
+    assert 0.0 <= scalars["sequence_accuracy"] <= 1.0
+    assert "loss_main" in scalars, "the always-comparable total must be logged"
 
 
 def _encode(model, batch, mar_out):

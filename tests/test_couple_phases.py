@@ -86,7 +86,7 @@ def make_trainer(fampnn, parts, phase, out_dir, *, perfect_proposal=False):
     trainer = CoupledTrainer(
         controller,
         out_dir=out_dir,
-        optim=OptimSettings(lr=1e-2, warmup_steps=1),
+        optim=OptimSettings(optimizer="adamw", lr=1e-2, warmup_steps=1),
         settings=CoupleSettings(
             phase=phase, max_steps=4, log_every=2, checkpoint_every=0, pack_steps=3
         ),

@@ -1,0 +1,39 @@
+# Held-out evaluation for the joint-refinement arms.
+#
+# Every field here is part of the protocol identity: two runs may only be
+# merged into one paired comparison if they agree on the panel, the sigmas,
+# the noise policy, the weights selection and the metric version. Model list
+# and shard selection are deliberately NOT part of that identity, so a model
+# can be added in a separate job without invalidating existing rows.
+
+mode: backbone            # 'full' is not implemented and is refused, not degraded
+
+# The panel. Build one with --build-panel-from <dir> --panel <out.jsonl>.
+# cif_val is the held-out split; cif_phase1 is what the arms trained on and
+# must not be scored here.
+panel: /scratch/m000137-pm06/Proteo-AA/pxf/runs/eval_joint/heldout_val.jsonl
+min_length: 64
+max_length: 256
+
+donor: /scratch/m000137-pm06/Proteo-AA/pxf/component_donors/pxdesign_v0.1.0.pt
+
+# EMA consistently across trained arms. Choosing raw-or-EMA per arm on the
+# test panel would be selection on the thing being measured.
+weights: ema
+
+# The refinement window the arms were trained in.
+sigmas: [0.105, 0.314, 0.847, 1.939]
+replicates: 1
+
+# Evaluation randomness. NOT a training seed: it names the noise draws every
+# arm shares, and changing it changes the events, not the models.
+seed: 17
+
+baseline: B0              # the matched backbone-only arm the gate is against
+bootstrap_resamples: 10000
+bootstrap_seed: 20260920
+
+# Milestone 3+ settings, unused until full mode exists.
+fampnn_checkpoint: "0.0"
+pack_steps: 50
+packing_replicates: 1

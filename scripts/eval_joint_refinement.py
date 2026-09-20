@@ -240,9 +240,14 @@ def native_and_mask(batch, supplied):
     return native, (present * supplied.to(present.device))
 
 
-def score_event(loaded, batch, panel_row, sigma, replicate, *, panel_id, seed):
-    """Predict and score one event for one model."""
-    conditioning = joint_eval.conditioning_for(loaded, batch)
+def score_event(loaded, batch, panel_row, sigma, replicate, *, panel_id, seed,
+                conditioning):
+    """Predict and score one event for one model.
+
+    ``conditioning`` is passed in rather than computed here: it depends on
+    the model and the target but not on sigma or the replicate, so computing
+    it per event would repeat the trunk once per noise level for nothing.
+    """
     eps = joint_eval.replay_backbone_noise(
         batch.backbone_target.shape, seed, panel_id,
         panel_row["sample_id"], sigma, replicate,
@@ -444,15 +449,22 @@ def run_predictions(args, panel_rows, panel_id, done, rows_path, failures_path):
 
         batch_rows = []
         for entry in prepared:
-            for sigma in args.sigmas:
-                for replicate in range(int(args.replicates)):
-                    key = (label, panel_id, entry["row"]["sample_id"],
-                           joint_eval.sigma_key(sigma), replicate)
-                    if key in done:
-                        continue
-                    row = score_event(loaded, entry["batch"], entry["row"], sigma,
-                                      replicate, panel_id=panel_id, seed=args.seed)
-                    batch_rows.append(row)
+            wanted = [
+                (sigma, replicate)
+                for sigma in args.sigmas
+                for replicate in range(int(args.replicates))
+                if (label, panel_id, entry["row"]["sample_id"],
+                    joint_eval.sigma_key(sigma), replicate) not in done
+            ]
+            if not wanted:
+                continue
+            # Once per (model, target), then reused across every noise level.
+            conditioning = joint_eval.conditioning_for(loaded, entry["batch"])
+            for sigma, replicate in wanted:
+                row = score_event(loaded, entry["batch"], entry["row"], sigma,
+                                  replicate, panel_id=panel_id, seed=args.seed,
+                                  conditioning=conditioning)
+                batch_rows.append(row)
         joint_report.append_rows(rows_path, batch_rows)
         produced += batch_rows
         print(f"[{label}] {len(batch_rows)} events")

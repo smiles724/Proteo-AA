@@ -335,25 +335,13 @@ def test_detaching_only_the_features_would_leave_the_frame_path_live(rig, live):
 
 # ---- the derivative is the real one -----------------------------------------
 
-
-@needs_donor
-def test_finite_differences_agree_with_autograd_through_fampnn(rig):
-    """Central differences on a real structure, along a random direction.
-
-    Autograd can be self-consistently wrong -- a mis-specified custom backward,
-    a detached branch that still looks connected -- so the side-chain loss's
-    derivative with respect to the predicted backbone is checked against the
-    function it claims to differentiate. The perturbation is small enough not to
-    reorder FaMPNN's k-nearest-neighbour graph, which is a genuine
-    non-differentiability rather than an error in the graph.
-    """
+def _sidechain_loss_fn(fampnn, batch, sidechain_noise):
+    """``flat backbone -> L_local``, the function the gradient claims to be of."""
     from pxf.couple import fampnn_iface as iface
     from pxf.train import losses as loss_fns
     from pxf.train import step as train_step
 
-    batch = rig["batch"]
     native = batch.native_batch
-    _bb_noise, sidechain_noise = _noise(rig, multiplier=1)
 
     def sidechain_loss_of(flat):
         coords37, supplied = M.densify_prediction(flat, batch.topology)
@@ -361,7 +349,7 @@ def test_finite_differences_agree_with_autograd_through_fampnn(rig):
             native["aatype"], native["seq_mask"], supplied
         )
         _logits, _h, features = iface.encode(
-            rig["fampnn"],
+            fampnn,
             coords37,
             native["aatype"],
             seq_mask=native["seq_mask"],
@@ -370,7 +358,7 @@ def test_finite_differences_agree_with_autograd_through_fampnn(rig):
             atom_availability=encoder_mask,
         )
         prediction = train_step.sidechain_training_pass(
-            rig["fampnn"],
+            fampnn,
             native,
             features,
             multiplier=1,
@@ -385,25 +373,106 @@ def test_finite_differences_agree_with_autograd_through_fampnn(rig):
         )
         return loss
 
-    base = batch.backbone_target.detach().clone().double().float().to(rig["device"])
+    return sidechain_loss_of
+
+
+def _loss_and_gradient(fampnn, batch, sidechain_noise, *, direction=None):
+    """``(loss, gradient, directional derivative)`` at the batch's own backbone."""
+    loss_of = _sidechain_loss_fn(fampnn, batch, sidechain_noise)
+    base = batch.backbone_target.detach().clone()
     leaf = base.clone().requires_grad_(True)
-    loss = sidechain_loss_of(leaf)
+    loss = loss_of(leaf)
     (gradient,) = torch.autograd.grad(loss, leaf)
-    assert float(gradient.abs().sum()) > 0
+    directional = None if direction is None else float((gradient * direction).sum())
+    return loss_of, base, gradient, directional
+
+
+
+
+@needs_donor
+def test_finite_differences_agree_with_autograd_through_fampnn(rig):
+    """Central differences on a real structure, along a random direction.
+
+    Autograd can be self-consistently wrong -- a mis-specified custom backward,
+    a detached branch that still looks connected -- so the side-chain loss's
+    derivative with respect to the predicted backbone is checked against the
+    function it claims to differentiate. The perturbation is small enough not to
+    reorder FaMPNN's k-nearest-neighbour graph, which is a genuine
+    non-differentiability rather than an error in the graph.
+
+    **Run on a CPU copy, deliberately.** A central difference divides a
+    difference of two losses by a small number, so it needs the loss to be
+    reproducible to far better than that difference. On an H200 it is not: the
+    same check there reported 0.0184 against autograd's 0.0212, 13% low, with
+    the gradient itself correct -- ``test_the_gradient_agrees_across_devices``
+    is what establishes that. Loosening the tolerance until the GPU passed
+    would have thrown away the only test that can catch a wrong derivative, to
+    accommodate a limitation of the estimator rather than of the code.
+    """
+    import copy
+
+    fampnn = copy.deepcopy(rig["fampnn"]).to("cpu")
+    batch = rig["batch"].to("cpu")
+    _bb_noise, sidechain_noise = _noise(rig, multiplier=1)
+    sidechain_noise = sidechain_noise.to("cpu")
 
     torch.manual_seed(0)
-    direction = torch.randn_like(base)
+    direction = torch.randn_like(batch.backbone_target)
     direction = direction / direction.norm()
-    analytic = float((gradient * direction).sum())
+    loss_of, base, gradient, analytic = _loss_and_gradient(
+        fampnn, batch, sidechain_noise, direction=direction
+    )
+    assert float(gradient.abs().sum()) > 0
 
     step = 1e-3
     with torch.no_grad():
-        plus = float(sidechain_loss_of(base + step * direction))
-        minus = float(sidechain_loss_of(base - step * direction))
+        plus = float(loss_of(base + step * direction))
+        minus = float(loss_of(base - step * direction))
     numeric = (plus - minus) / (2 * step)
     assert numeric == pytest.approx(analytic, rel=0.05, abs=1e-6), (
         f"autograd says {analytic:.6g}, central differences say {numeric:.6g}"
     )
+
+
+@needs_donor
+def test_the_gradient_agrees_across_devices(rig):
+    """The GPU gradient is the CPU gradient, which finite differences validated.
+
+    This is what a GPU run actually needs to know, and it is a better question
+    than "do finite differences agree on a GPU": it compares the quantity that
+    is used against the same quantity computed where it is already checked,
+    instead of against an estimator that is itself the least reliable part on
+    that device.
+
+    Skipped when the rig is already on the CPU -- there is nothing to compare.
+    """
+    import copy
+
+    if rig["device"].type == "cpu":
+        pytest.skip("the rig is on the CPU; there is no second device")
+
+    _bb_noise, sidechain_noise = _noise(rig, multiplier=1)
+    torch.manual_seed(0)
+    direction = torch.randn_like(rig["batch"].backbone_target)
+    direction = direction / direction.norm()
+
+    _of, _base, on_device, device_directional = _loss_and_gradient(
+        rig["fampnn"], rig["batch"], sidechain_noise, direction=direction
+    )
+    _of, _base, on_cpu, cpu_directional = _loss_and_gradient(
+        copy.deepcopy(rig["fampnn"]).to("cpu"),
+        rig["batch"].to("cpu"),
+        sidechain_noise.to("cpu"),
+        direction=direction.cpu(),
+    )
+
+    scale = float(on_cpu.abs().max())
+    difference = float((on_device.cpu() - on_cpu).abs().max())
+    assert difference < 0.02 * scale, (
+        f"the gradient differs by {difference:.3g} between devices, "
+        f"{difference / max(scale, 1e-12):.1%} of its largest component"
+    )
+    assert device_directional == pytest.approx(cpu_directional, rel=0.02)
 
 
 @needs_donor

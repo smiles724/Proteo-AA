@@ -1,0 +1,103 @@
+# Checkpoint roster for the binder-design experiment matrix.
+#
+# The plan's rule, restated because it is the whole point of this file:
+# a missing candidate is recorded as explicitly unavailable and its arms are
+# dropped. It is never replaced by a randomly initialized module, and a
+# same-shape checkpoint from a different donor is never silently substituted.
+#
+# `scripts/build_checkpoint_manifest.py` turns this roster into
+# checkpoint_manifest.json: absolute path, SHA-256, training step, EMA
+# availability, module dimensions, recorded donor hashes, and the backbone-noise
+# window each adapter was actually trained on. It also cross-checks every donor
+# hash a checkpoint recorded at training time against the donor file on disk
+# now, which is the check that catches a swapped FaMPNN variant -- the 0.0 and
+# 0.3 weights have identical tensor shapes, so loading proves nothing.
+#
+# ${PXF_RUNS} and ${PXF_REPO} are expanded from the environment, falling back to
+# the defaults below.
+defaults:
+  PXF_RUNS: /scratch/m000137-pm06/Proteo-AA/pxf/runs
+  PXF_DONORS: /scratch/m000137-pm06/Proteo-AA/pxf/component_donors
+  PXF_REPO: /users/yfsun/Proteo-AA-pxdesign-fampnn-pack
+
+entries:
+  # ---------------------------------------------------------------- donors
+  - role: donor_pxdesign
+    family: donor
+    required: true
+    path: ${PXF_DONORS}/pxdesign_v0.1.0.pt
+    note: >-
+      Released PXDesign generator. The common backbone source for every arm in
+      Phase 1A, and the frozen upstream for A_BS.
+
+  - role: donor_fampnn_0_0
+    family: donor
+    required: true
+    path: ${PXF_REPO}/fampnn/weights/fampnn_0_0.pt
+    note: >-
+      THE donor for the primary adapter-on/off comparison. A_BS was trained
+      against this file and the manifest verifies that by hash, not by shape.
+
+  - role: donor_fampnn_0_3
+    family: donor
+    required: false
+    path: ${PXF_REPO}/fampnn/weights/fampnn_0_3.pt
+    note: >-
+      Additional external reference only. Not interchangeable with 0.0 for the
+      A_BS comparison even though the tensors line up.
+
+  # ------------------------------------------------------------ the adapter
+  - role: a_bs
+    family: adapter
+    required: true
+    path: ${PXF_RUNS}/couple_phase1/checkpoints/final.pt
+    note: Trained backbone-to-side-chain adapter under test in Phase 1A.
+
+  # ------------------------------------------- early conditioners (Phase 1B)
+  - role: early_bb_only
+    family: adapter
+    required: false
+    path: ${PXF_RUNS}/pxf_early_cond/early_s_bb_only_119662/checkpoints/final.pt
+    note: Early backbone-only conditioner; compared against released PXDesign.
+
+  - role: early_full_sc
+    family: adapter
+    required: false
+    path: ${PXF_RUNS}/pxf_early_cond/early_s_full_119661/checkpoints/final.pt
+    note: >-
+      Early full-side-chain conditioner; its control is the matched BB-only
+      conditioner above, not the released donor.
+
+  # ------------------------------------------- joint-loss backbones (Phase 1B)
+  - role: joint_B0
+    family: joint
+    required: false
+    path: ${PXF_RUNS}/pxf_joint/B0/checkpoints/final.pt
+    note: Ordinary backbone fine-tuning. The control for B1/B2.
+  - role: joint_B1
+    family: joint
+    required: false
+    path: ${PXF_RUNS}/pxf_joint/B1/checkpoints/final.pt
+  - role: joint_B2
+    family: joint
+    required: false
+    path: ${PXF_RUNS}/pxf_joint/B2/checkpoints/final.pt
+  - role: joint_BF
+    family: joint
+    required: false
+    path: ${PXF_RUNS}/pxf_joint/BF/checkpoints/final.pt
+    note: Mechanism-interpretation arm, not a headline comparison.
+  - role: joint_BS
+    family: joint
+    required: false
+    path: ${PXF_RUNS}/pxf_joint/BS/checkpoints/final.pt
+    note: Mechanism-interpretation arm, not a headline comparison.
+
+  # ------------------------------------------------- adapted sequence model
+  - role: fampnn_ft_phase1
+    family: adapter
+    required: false
+    path: ${PXF_RUNS}/ft_fampnn_phase1/checkpoints/final.pt
+    note: >-
+      Existing FaMPNN fine-tune. Not a Phase-1A arm; recorded so Phase 2's T2
+      has a declared starting point and its provenance is pinned now.

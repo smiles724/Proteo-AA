@@ -217,6 +217,9 @@ def main() -> None:
     parser.add_argument("--init-from", default=None,
                         help="declared cross-donor transfer experiment")
     parser.add_argument("--allow-split", action="store_true")
+    parser.add_argument("--cache-size", type=int, default=48,
+                        help="featurized structures held on device; an "
+                             "eviction costs a recomputation, nothing else")
     parser.add_argument("--allow-unpinned-sources", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--verify-only", default=None,
@@ -291,7 +294,11 @@ def main() -> None:
         print(f"\ndry run: wrote {out / 'identity.json'}, trained nothing")
         return
 
-    from pxf.train.bs_seq_sc import joint_loss, prepare_example
+    from collections import OrderedDict
+
+    from pxf.train.bs_seq_sc import (
+        example_from_structure, joint_loss, prepare_structure,
+    )
     from pxf.train.ema import EMA
 
     opt_cfg = config["optimizer"]
@@ -309,7 +316,7 @@ def main() -> None:
     order = list(range(len(frame)))
     rng = torch.Generator().manual_seed(seed)
     checkpoints = {int(s) for s in config["run"]["checkpoint_steps"]}
-    cache: dict[int, Any] = {}
+    cache: "OrderedDict[int, Any]" = OrderedDict()
     log_path = out / "train_log.jsonl"
     handle = log_path.open("a")
     started = time.time()
@@ -320,15 +327,25 @@ def main() -> None:
         index = order[(step - 1) % len(order)]
         row = frame.iloc[index]
 
-        # Featurization is the expensive part and is deterministic given the
-        # example seed, so it is cached. The MASKS are not: a fresh draw per
-        # visit is the corruption the objective is defined over.
-        if index not in cache:
-            cache[index] = (row.cif_path, row.converted_binder_chain)
-        example = prepare_example(
-            cache[index][0], cache[index][1],
-            packer=ctx["packer"], driver=ctx["driver"], device=ctx["device"],
-            sigma_b=float(config["noise"]["sigma_b"]),
+        # Featurization and a_token are mask-independent, so a revisited
+        # structure pays for them once. Bounded LRU rather than unbounded:
+        # 512 featurized structures would not fit, and an eviction only costs
+        # a recomputation. The MASKS are redrawn every visit -- that is the
+        # corruption the objective is defined over, and caching it would
+        # train against one fixed draw per structure.
+        if index in cache:
+            cache.move_to_end(index)
+        else:
+            cache[index] = prepare_structure(
+                row.cif_path, row.converted_binder_chain,
+                packer=ctx["packer"], driver=ctx["driver"], device=ctx["device"],
+                sigma_b=float(config["noise"]["sigma_b"]),
+                a_token_seed=seed * 1_000_003 + index,
+            )
+            while len(cache) > args.cache_size:
+                cache.popitem(last=False)
+        example = example_from_structure(
+            cache[index], packer=ctx["packer"], device=ctx["device"],
             mask_fraction=float(config["masking"]["mask_fraction"]),
             binder_sidechain_dropout=float(config["masking"]["binder_sidechain_dropout"]),
             target_sidechain_dropout=float(config["masking"]["target_sidechain_dropout"]),

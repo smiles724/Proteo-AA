@@ -288,12 +288,46 @@ def prepare_example(
     matches. Passing the author id straight through silently selects the
     wrong chain on any file where the two differ.
     """
+    cached = prepare_structure(
+        cif_path, binder_chain_author, packer=packer, driver=driver,
+        device=device, sigma_b=sigma_b, crop_size=crop_size,
+        a_token_seed=seed,
+    )
+    return example_from_structure(
+        cached, packer=packer, device=device, mask_fraction=mask_fraction,
+        binder_sidechain_dropout=binder_sidechain_dropout,
+        target_sidechain_dropout=target_sidechain_dropout, seed=seed,
+    )
+
+
+def prepare_structure(
+    cif_path,
+    binder_chain_author: str,
+    *,
+    packer,
+    driver,
+    device,
+    sigma_b: float,
+    crop_size: int = 768,
+    a_token_seed: int = 0,
+):
+    """The MASK-INDEPENDENT half: featurization, roles, atom37 block, a_token.
+
+    Split out because it is the expensive half and nothing in it depends on
+    the masking draw, so a trainer that revisits a structure can pay for it
+    once. An earlier version of the trainer claimed to cache this and in fact
+    cached only the file path, re-featurizing on every one of 2,000 steps.
+
+    ``a_token_seed`` fixes the noise used to perturb the backbone to sigma_b.
+    Holding it per structure -- rather than per visit -- is deliberate: the
+    features the adapter reads should be a property of the structure, not
+    resampled underneath it, and the corruption the objective is defined over
+    is the MASK draw, which is redrawn every visit.
+    """
     from pxf.backbone.chain_ids import featurizer_chain_id
     from pxf.backbone.driver import featurize_structures, to_featurized
-    from pxf.couple.binder_masks import build_masks
     from pxf.couple.binder_residual import ChainRoles
     from pxf.couple.converter import PXFaRepresentationConverter
-    from pxf.couple.fampnn_iface import encode
 
     label = featurizer_chain_id(cif_path, binder_chain_author)
     sample_id, dataset = featurize_structures(
@@ -303,23 +337,6 @@ def prepare_example(
     structure = to_featurized(sample_id, dataset[0]).to(device)
     roles = ChainRoles(binder=structure.design_mask.reshape(-1).bool().cpu())
 
-    generator = torch.Generator().manual_seed(int(seed))
-    masks = build_masks(
-        roles, structure.aatype.reshape(1, -1).cpu(),
-        mask_fraction=mask_fraction,
-        binder_sidechain_dropout=binder_sidechain_dropout,
-        target_sidechain_dropout=target_sidechain_dropout,
-        generator=generator,
-    )
-    masks = BinderMaskSet(
-        roles=masks.roles,
-        seq_mask=masks.seq_mask.to(device),
-        seq_mlm_mask=masks.seq_mlm_mask.to(device),
-        sidechain_visible=masks.sidechain_visible.to(device),
-        aatype_encoder=masks.aatype_encoder.to(device),
-        aatype_true=masks.aatype_true.to(device),
-    )
-
     converter = PXFaRepresentationConverter()
     topology = structure.topology
     inputs = converter.px_backbone_to_fampnn(
@@ -328,6 +345,62 @@ def prepare_example(
         res_names=topology.res_names, residue_index=topology.residue_index,
         chain_index=topology.chain_index, aatype=structure.aatype,
     ).to(device)
+
+    sigma = torch.full((1,), float(sigma_b), device=device)
+    bound = driver.bind(driver.conditioning(structure.feature_dict))
+    with torch.no_grad():
+        target = structure.backbone_target.float()
+        noise = torch.randn(
+            target.shape, generator=torch.Generator().manual_seed(int(a_token_seed))
+        ).to(device)
+        _bb0, a_token = bound((target + noise * float(sigma_b))[None], sigma)
+    if a_token is None:
+        raise RuntimeError(f"{cif_path}: the driver returned no a_token")
+    if a_token.dim() == 2:
+        a_token = a_token[None]
+
+    return {
+        "roles": roles, "aatype": structure.aatype.reshape(1, -1).cpu(),
+        "inputs": inputs, "a_token": a_token, "sigma": sigma,
+        "tokens": int(topology.num_tokens),
+    }
+
+
+def example_from_structure(
+    cached,
+    *,
+    packer,
+    device,
+    mask_fraction: float,
+    binder_sidechain_dropout: float = 1.0,
+    target_sidechain_dropout: float = 0.0,
+    seed: int = 0,
+):
+    """The PER-VISIT half: a fresh mask draw and the encoder pass it implies.
+
+    The encoder cannot be cached with the structure: it reads
+    ``aatype_encoder`` and ``sidechain_visible``, both of which change with
+    every draw. That is the corruption the objective is defined over.
+    """
+    from pxf.couple.binder_masks import build_masks
+    from pxf.couple.fampnn_iface import encode
+
+    roles, inputs = cached["roles"], cached["inputs"]
+    generator = torch.Generator().manual_seed(int(seed))
+    drawn = build_masks(
+        roles, cached["aatype"], mask_fraction=mask_fraction,
+        binder_sidechain_dropout=binder_sidechain_dropout,
+        target_sidechain_dropout=target_sidechain_dropout,
+        generator=generator,
+    )
+    masks = BinderMaskSet(
+        roles=drawn.roles,
+        seq_mask=drawn.seq_mask.to(device),
+        seq_mlm_mask=drawn.seq_mlm_mask.to(device),
+        sidechain_visible=drawn.sidechain_visible.to(device),
+        aatype_encoder=drawn.aatype_encoder.to(device),
+        aatype_true=drawn.aatype_true.to(device),
+    )
 
     # ENCODER: masked identities. SC branch: ground truth, via
     # batch_from_inputs. The asymmetry is the objective, not an oversight.
@@ -340,23 +413,9 @@ def prepare_example(
             chain_index=inputs.chain_index,
             sidechain_visible=masks.sidechain_visible,
         )
-    batch = batch_from_inputs(inputs, masks.aatype_true)
-
-    sigma = torch.full((1,), float(sigma_b), device=device)
-    bound = driver.bind(driver.conditioning(structure.feature_dict))
-    with torch.no_grad():
-        target = structure.backbone_target.float()
-        noise = torch.randn(
-            target.shape, generator=torch.Generator().manual_seed(int(seed))
-        ).to(device)
-        _bb0, a_token = bound((target + noise * float(sigma_b))[None], sigma)
-    if a_token is None:
-        raise RuntimeError(f"{cif_path}: the driver returned no a_token")
-    if a_token.dim() == 2:
-        a_token = a_token[None]
-
     return {
-        "roles": roles, "masks": masks, "features": features, "batch": batch,
-        "a_token": a_token, "sigma": sigma,
-        "tokens": int(topology.num_tokens),
+        "roles": roles, "masks": masks, "features": features,
+        "batch": batch_from_inputs(inputs, masks.aatype_true),
+        "a_token": cached["a_token"], "sigma": cached["sigma"],
+        "tokens": cached["tokens"],
     }

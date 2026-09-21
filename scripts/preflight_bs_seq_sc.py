@@ -27,7 +27,8 @@ coefficient is not chosen here.
   4. With the adapter's output zeroed, logits and SC predictions reproduce the
      unadapted 0.3 donor bit-for-bit under the same corruption and noise.
   5. No target row receives a residual or contributes to either loss.
-  6. Finite differences on CPU agree with the analytical sequence gradient.
+  6. Finite differences agree with the analytical sequence gradient -- ON A
+     CPU COPY -- and the GPU gradient agrees with the CPU one.
 
 Check 4 is the one that catches a routing error rather than a gradient error:
 a fresh adapter is zero-initialised at its output projection, so the coupled
@@ -276,20 +277,30 @@ def section7(example, ctx, args) -> dict[str, Any]:
     return out
 
 
-def finite_difference_check(example, ctx, args) -> dict[str, Any]:
+def finite_difference_check(example, ctx, args, *, device_note="") -> dict[str, Any]:
     """Check 6: analytical vs numerical gradient of L_seq, one scalar.
 
-    Order matters and the first attempt got it wrong. Perturbing a parameter
-    in place while a graph that references it is still alive gives
+    **Run this on CPU only.** Commit 8fe1b72 established why, on an H200:
 
-        RuntimeError: one of the variables needed for gradient computation
-        has been modified by an inplace operation ... is at version 7;
-        expected version 6
+        autograd says 0.0211725, central differences say 0.0183508
 
-    because autograd version-counts the leaf. So: the analytical gradient is
-    taken FIRST on a clean graph, and the numerical probes then run entirely
-    under no_grad, where no graph is built and the version counter is
-    irrelevant.
+    13% apart, with the ESTIMATOR at fault, not the gradient. A central
+    difference divides a difference of two losses by a small number, so it
+    needs the loss reproducible to far better than that difference, and on a
+    GPU it is not. Widening the tolerance until the GPU passes would throw
+    away the only check that can catch a genuinely wrong derivative in order
+    to accommodate a limitation of the estimator -- and would have to be
+    widened past 13%, wide enough to admit real errors.
+
+    So the two questions are separated, following that commit: finite
+    differences keep 5% and speak about the graph's math, which does not
+    depend on the device; whether the GPU computes the same gradient as the
+    CPU is asked directly by :func:`cross_device_check`.
+
+    Ordering also matters here and my first attempt got it wrong: perturbing
+    a parameter in place while a graph referencing it is alive trips
+    autograd's version counter. The analytical gradient is taken FIRST on a
+    clean graph; the numerical probes then run entirely under no_grad.
     """
     from pxf.train.bs_seq_sc import joint_loss
 
@@ -333,6 +344,57 @@ def finite_difference_check(example, ctx, args) -> dict[str, Any]:
         "note": "one scalar, central differences; narrow on purpose -- an "
                 "independent confirmation that the analytical path is the "
                 "function it claims to be",
+    }
+
+
+def cross_device_check(example, ctx, args) -> dict[str, Any]:
+    """Does the GPU compute the gradient the CPU computes?
+
+    The question a GPU run actually needs answered. Finite differences cannot
+    answer it there (see :func:`finite_difference_check`), and this can: the
+    same inputs, the same parameters, two devices, compared directly.
+    """
+    from pxf.train.bs_seq_sc import gradient_norms, joint_loss
+
+    if ctx["device"].type != "cuda":
+        return {"pass": None, "skipped": "not on a GPU"}
+
+    def norm_on(device):
+        moved = {
+            "batch": {k: (v.to(device) if torch.is_tensor(v) else v)
+                      for k, v in example["batch"].items()},
+            "features": {k: (v.to(device) if torch.is_tensor(v) else v)
+                         for k, v in example["features"].items()},
+        }
+        adapters = ctx["adapters"].to(device)
+        masks = example["masks"]
+        moved_masks = type(masks)(
+            roles=masks.roles,
+            seq_mask=masks.seq_mask.to(device),
+            seq_mlm_mask=masks.seq_mlm_mask.to(device),
+            sidechain_visible=masks.sidechain_visible.to(device),
+            aatype_encoder=masks.aatype_encoder.to(device),
+            aatype_true=masks.aatype_true.to(device),
+        )
+        loss = joint_loss(
+            ctx["packer"].model.to(device), moved["batch"], moved["features"],
+            adapters=adapters, a_token=example["a_token"].to(device),
+            sigma_b=example["sigma"].to(device), roles=example["roles"],
+            masks=moved_masks, lambda_seq=1.0, lambda_sc=0.0,
+            multiplier=args.multiplier, allow_zero=True,
+        ).sequence
+        return gradient_norms(loss, adapters, retain=False)
+
+    gpu = norm_on(ctx["device"])
+    cpu = norm_on(torch.device("cpu"))
+    ctx["packer"].model.to(ctx["device"])
+    ctx["adapters"].to(ctx["device"])
+    denom = max(abs(gpu), abs(cpu), 1e-12)
+    rel = abs(gpu - cpu) / denom
+    return {
+        "pass": bool(rel < args.cross_device_tolerance),
+        "gpu_grad_norm": gpu, "cpu_grad_norm": cpu,
+        "relative_error": rel, "tolerance": args.cross_device_tolerance,
     }
 
 
@@ -450,6 +512,7 @@ def main() -> None:
     parser.add_argument("--skip-finite-difference", action="store_true")
     parser.add_argument("--fd-eps", type=float, default=1e-3)
     parser.add_argument("--fd-tolerance", type=float, default=0.05)
+    parser.add_argument("--cross-device-tolerance", type=float, default=0.02)
     args = parser.parse_args()
 
     import pandas as pd
@@ -478,9 +541,37 @@ def main() -> None:
               f"peak {pf['peak_gib']} GiB  {pf['seconds_per_step']}s/step  "
               f"lambda_seq~{checks['lambda_suggestion'].get('lambda_seq')}")
 
+    cross = cross_device_check(examples[0], ctx, args)
+    if cross.get("pass") is not None:
+        print(f"  cross-device: {'ok' if cross['pass'] else 'FAIL'} "
+              f"gpu={cross['gpu_grad_norm']:.6g} cpu={cross['cpu_grad_norm']:.6g} "
+              f"rel={cross['relative_error']:.3g}")
+
     fd = None
     if not args.skip_finite_difference:
-        fd = finite_difference_check(examples[0], ctx, args)
+        # CPU only: on a GPU the estimator, not the gradient, is what fails.
+        saved = ctx["device"]
+        ctx["device"] = torch.device("cpu")
+        ctx["packer"].model.to("cpu"); ctx["adapters"].to("cpu")
+        cpu_example = dict(examples[0])
+        for key in ("batch", "features"):
+            cpu_example[key] = {
+                k: (v.to("cpu") if torch.is_tensor(v) else v)
+                for k, v in examples[0][key].items()
+            }
+        masks = examples[0]["masks"]
+        cpu_example["masks"] = type(masks)(
+            roles=masks.roles,
+            seq_mask=masks.seq_mask.cpu(), seq_mlm_mask=masks.seq_mlm_mask.cpu(),
+            sidechain_visible=masks.sidechain_visible.cpu(),
+            aatype_encoder=masks.aatype_encoder.cpu(),
+            aatype_true=masks.aatype_true.cpu(),
+        )
+        cpu_example["a_token"] = examples[0]["a_token"].cpu()
+        cpu_example["sigma"] = examples[0]["sigma"].cpu()
+        fd = finite_difference_check(cpu_example, ctx, args)
+        ctx["device"] = saved
+        ctx["packer"].model.to(saved); ctx["adapters"].to(saved)
         print(f"  finite-difference: {'ok' if fd['pass'] else 'FAIL'} "
               f"num={fd['numerical']:.6g} ana={fd['analytical']:.6g} "
               f"rel={fd['relative_error']:.3g}")
@@ -497,6 +588,8 @@ def main() -> None:
     )
     if fd and not fd["pass"]:
         failed += 1
+    if cross.get("pass") is False:
+        failed += 1
     if smoke_report and not smoke_report["pass"]:
         failed += 1
 
@@ -507,7 +600,8 @@ def main() -> None:
         "settings": vars(args), "environment": {
             "adapter_is_identity_at_init": ctx["is_identity"], **ctx["freeze"],
         },
-        "examples": records, "finite_difference": fd, "smoke": smoke_report,
+        "examples": records, "finite_difference": fd,
+        "cross_device": cross, "smoke": smoke_report,
         "note": (
             "val structures; no checkpoint kept, no coefficient adopted. "
             "lambda_seq must be calibrated on a training-only batch."

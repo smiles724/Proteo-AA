@@ -64,8 +64,15 @@ shared:
       task: bs_seq_sc_v1
       role: >-
         joint sequence + side-chain design. Trained by
-        scripts/train_bs_seq_sc.py; until that exists there is no 0.3 adapter
-        and U03 is the only 0.3 row that may be reported.
+        scripts/train_bs_seq_sc.py. TRAINED AND SELECTED: J03, 2,000 updates,
+        lambda_seq 0.0051, lambda_sc 1.0, sigma_b 0.429, mask_fraction 0.5,
+        two seeds. Checkpoint chosen at step 500 for both seeds by the
+        predeclared rule in configs/bs_seq_sc/selection.yaml -- the side-chain
+        guardrail rules out every later checkpoint. EMA weights.
+        seed 0 sha256 c506c7e1c43104dd..., seed 1 sha256 ee673b982c4f5dd7...
+        Stage-1 reconstruction results: docs/results/bs_seq_sc_v1_stage1.md.
+        Designability on the AlphaProteo panel is NOT yet measured; it needs
+        the shared backbone collection, which needs the official runtime.
   donor_policy: >-
     A 0.0 vs 0.3 difference is a DONOR change and is never reported as an
     adapter gain. The existing 0.0 adapter is never loaded on top of 0.3:
@@ -111,9 +118,34 @@ arms:
     note: >-
       Upstream's recommended sequence-design donor, adapter OFF. The external
       reference that says what the 0.0 pin costs in absolute designability,
-      and the baseline the future 0.3 adapter (J03) will be paired against.
+      and the baseline the trained 0.3 adapter (J03, below) is paired against.
       It is NOT the uncoupled half of any 0.0 pair -- pairing across donors
       would confound the donor with the residual.
+
+  - id: J03
+    context: complex_sc
+    residual_source: matched
+    fampnn_variant: "0.3"
+    application_mode: shared_prelogit
+    pair: U03
+    checkpoint: runs/bs_seq_sc/J03_seed{seed}/checkpoints/step00000500.pt
+    weights: ema
+    seeds: [0, 1]
+    note: >-
+      The trained bs_seq_sc_v1 adapter, adapter ON, on the 0.3 donor. Its
+      uncoupled half is U03 and nothing else: U03 is the same donor with the
+      residual off, so the pair isolates the residual.
+
+      This arm is paired with U03 rather than with R0 ON PURPOSE. R0 is
+      ProteinMPNN under `context: complex`, so a J03 - R0 difference moves the
+      designer, the context level and the adapter at once. R0 is a shared
+      absolute reference for the whole matrix, not the uncoupled half of any
+      pair; reporting J03 - R0 as an adapter gain would be the same error the
+      donor_policy above forbids for 0.0 vs 0.3.
+
+      Note also that J03 and the legacy C3/R3 pair are NOT comparable as
+      adapters: different donor (0.3 vs 0.0), different application_mode
+      (shared_prelogit vs packing_only) and different training task.
 
   - id: R0
     designer: proteinmpnn
@@ -156,6 +188,12 @@ arms:
 comparisons:
   primary: C3 - R3
   secondary: [C2 - R2, C1 - R1]
+  new_main_family: J03 - U03
+  new_main_family_note: >-
+    The 0.3 family's own on/off pair, reported separately from the legacy
+    0.0 family rather than pooled with it. Two seeds, reported per
+    configs/bs_seq_sc/selection.yaml's seed_policy: both seeds and their
+    agreement, not an average that hides a seed-dependent result.
   note: >-
     One primary comparison, declared before any result is seen. The secondaries
     are reported with a declared multiplicity correction or labelled secondary;

@@ -87,7 +87,9 @@ def crop_to_amino_acids(source: Path, chains: dict[str, Any], out_pdb: Path):
     dropped_non_aa: dict[str, int] = {}
     insertion_coded: dict[str, int] = {}
 
-    new_model = gemmi.Model(model.name)
+    # gemmi 0.7 replaced Model.name with Model.num, and HAI's official env
+    # carries 0.7.5, so read whichever this build offers rather than pinning.
+    new_model = gemmi.Model(getattr(model, "name", None) or model.num)
     for chain in model:
         if chain.name not in wanted:
             continue

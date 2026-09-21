@@ -52,6 +52,7 @@ trajectory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -73,6 +74,61 @@ DEFAULT_ARMS = REPO_ROOT / "configs" / "binder_benchmark" / "arms.yaml"
 # PXDesign's own CLI constants, not Protenix's generic ones.
 DEFAULT_N_STEP = 400
 DEFAULT_ETA = 2.5
+
+# Where the official install lives, as pxf/official/require.py names it.
+OFFICIAL_ROOT = "/hai/scratch/yfsun/pxdesign_official"
+
+
+def official_sources(checkpoint_dir: str) -> dict[str, Any]:
+    """What actually generated these backbones -- the OFFICIAL install.
+
+    Not `pxf.provenance.runtime_sources`, which records the revisions this repo
+    *vendors* (Protenix c3bfc36). Nothing here runs against those: generation
+    goes through the official install (Protenix 0.5.0+pxd), which is the entire
+    reason this step lives on HAI. Writing the vendored pins into a manifest
+    that ships to Marlowe would assert the exact pairing
+    `pxf/official/require.py` refuses, in the one file a later reader would
+    trust to tell them which code produced the backbones.
+
+    The checkpoint is hashed rather than named: the directory path means
+    nothing on the cluster this manifest is read on.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as package_version
+
+    import protenix
+    import pxdesign
+
+    record: dict[str, Any] = {}
+    for name, module in (("pxdesign", pxdesign), ("protenix", protenix)):
+        path = module.__file__ or ""
+        if "site-packages" not in path and OFFICIAL_ROOT not in path:
+            raise SystemExit(
+                f"{name} resolves to {path}, which is neither the official "
+                f"install nor {OFFICIAL_ROOT}. scripts/_bootstrap puts this "
+                "repo's submodules at the front of sys.path; against the "
+                "official runtime that is the shadow that produced the "
+                "invalid baseline. Refusing to record it as official."
+            )
+        try:
+            installed = package_version(name)
+        except PackageNotFoundError:
+            installed = None
+        record[name] = {
+            "component": name, "version": installed, "path": path,
+            "install": "official",
+        }
+
+    weights = Path(checkpoint_dir) / "pxdesign_v0.1.0.pt"
+    record["pxdesign_weights"] = {
+        "component": "pxdesign_weights",
+        "file": weights.name,
+        "sha256": (
+            hashlib.file_digest(weights.open("rb"), "sha256").hexdigest()
+            if weights.is_file() else None
+        ),
+    }
+    return record
 
 
 def _write_single_length_yaml(target_config: Path, length: int, out: Path) -> Path:
@@ -98,31 +154,96 @@ def pick_event(schedule: torch.Tensor, sigma_b: float) -> int:
     return int(torch.argmin((values - float(sigma_b)).abs()).item())
 
 
+def topology_record(atom_array, features, n_tokens: int) -> dict[str, Any]:
+    """Everything the design stage needs in order to read ``x0``.
+
+    ``x0`` is a flat ``[n_atom, 3]`` tensor: without the atom names, the
+    ``atom_to_token_idx`` axis and the chain roles it is coordinates of
+    nothing. `pxf.official.bridge` recovers those from the dataloader's
+    AtomArray plus three feature keys -- and that dataloader is the official
+    featurizer, which exists on HAI and not on Marlowe. So they travel with
+    the design rather than being re-derived on the far side, which is what
+    this module's docstring already promises ("the token map and chain roles,
+    so the design stage never re-derives them").
+
+    Every AtomArray annotation is kept rather than a chosen four: they are a
+    few hundred kilobytes against a cache that costs a GPU-hour per target,
+    and the one that turns out to be missing is the expensive kind of loss.
+    """
+    import numpy as np
+
+    from pxf.official.bridge import design_mask
+
+    annotations = {
+        name: np.asarray(atom_array.get_annotation(name))
+        for name in atom_array.get_annotation_categories()
+    }
+    return {
+        "annotations": annotations,
+        "atom_to_token_idx": features["atom_to_token_idx"].reshape(-1).long().cpu(),
+        "residue_index": features["residue_index"].reshape(-1)[:n_tokens].long().cpu(),
+        "asym_id": features["asym_id"].reshape(-1)[:n_tokens].long().cpu(),
+        "n_tokens": int(n_tokens),
+        "design_mask": design_mask(atom_array, features, n_tokens).cpu(),
+    }
+
+
 def _rmsd(a: torch.Tensor, b: torch.Tensor) -> float:
     a = a.reshape(-1, 3).float()
     b = b.reshape(-1, 3).float()
     return float(torch.sqrt(((a - b) ** 2).sum(-1).mean()))
 
 
-def generate_one(
-    *, runner, sigma_b: float, n_step: int, eta: float, seed: int,
-) -> dict[str, Any]:
-    """One trajectory, plus the event's features and the transfer measurement."""
-    from pxf.couple.pxdesign_iface import BackboneTap
-    from pxf.couple.replay import RandomStream, run_trajectory
+def build_conditioning(*, runner, sigma_b: float, n_step: int) -> dict[str, Any]:
+    """Everything a (target, length) pair shares across its samples.
+
+    Hoisted out of :func:`generate_one` for two reasons. The cheap one is
+    cost: the trunk forward and the checkpoint load dominate -- measured on
+    PDL1 L100, 8 s of trajectory inside a 109 s job -- so rebuilding them per
+    sample spends an order of magnitude more GPU time on setup than on the
+    sampling the run exists for.
+
+    The one that matters is correctness. ``OfficialDenoiser.__init__`` deletes
+    the template and MSA keys from the feature dict it is handed, in place,
+    because the conditioning has already consumed them. Constructing a second
+    denoiser from the same batch therefore conditions on a dict those keys
+    have already been removed from. One denoiser per batch makes that
+    unrepresentable rather than merely unattempted.
+
+    Nothing here is sample-dependent: every draw in the trajectory comes from
+    a :class:`RngStream` seeded per design, so the order the samples run in
+    does not enter any of them. That is not the same as making a design
+    reproducible -- it is not; see ``bit_reproducible`` in the manifest -- but
+    it does keep the seed the only thing separating one sample from the next.
+    """
     from pxf.official.runtime import OfficialDenoiser, first_batch
 
     data, atom_array = first_batch(runner)
     denoiser = OfficialDenoiser(runner, data)
     schedule = denoiser.schedule(n_step)
-    event_step = pick_event(schedule, sigma_b)
+    return {
+        "denoiser": denoiser,
+        "schedule": schedule,
+        "event_step": pick_event(schedule, sigma_b),
+        "topology": topology_record(
+            atom_array, denoiser.features, int(data["N_token"])
+        ),
+    }
 
-    # A NAMED stream. RandomStream's first argument is the subsystem name, and
+
+def generate_one(
+    *, denoiser, schedule, event_step: int, n_step: int, eta: float, seed: int,
+) -> dict[str, Any]:
+    """One trajectory, plus the event's features and the transfer measurement."""
+    from pxf.couple.pxdesign_iface import BackboneTap
+    from pxf.couple.replay import RngStream, run_trajectory
+
+    # A NAMED stream. RngStream's first argument is the subsystem name, and
     # naming it is the plan's requirement rather than decoration: backbone
     # generation, sequence decoding, side-chain sampling and scoring each draw
     # their own, so two arms stay matched even when they consume different
     # numbers of draws. Sharing one integer seed does not give that.
-    stream = RandomStream("backbone", seed, device=denoiser.device)
+    stream = RngStream("backbone", seed, device=denoiser.device)
     started = time.time()
     x0, records, stats = run_trajectory(
         denoise=denoiser.denoise,
@@ -137,7 +258,11 @@ def generate_one(
     )
     if not records:
         raise SystemExit(f"no state recorded at step {event_step}")
-    event = records[0]
+    # run_trajectory records states with `detach_cpu`, and its own resume path
+    # moves them back before denoising. This is the same call by another route,
+    # so it needs the same move -- without it the re-denoise dies inside the
+    # Fourier embedding on a CPU sigma against CUDA weights.
+    event = records[0].to(denoiser.device)
 
     # Re-denoise the recorded event with the tap installed. Same x_noisy, same
     # sigma as the in-loop call, so the captured a_token is the event's.
@@ -156,8 +281,6 @@ def generate_one(
     return {
         "x0": x0.detach().to("cpu"),
         "a_token": a_token.detach().to("cpu"),
-        "atom_array": atom_array,
-        "features": denoiser.features,
         "record": {
             "event_step": event_step,
             "n_step": int(n_step),
@@ -223,7 +346,6 @@ def main() -> None:
     (out / "designs").mkdir(parents=True, exist_ok=True)
     (out / "yaml").mkdir(parents=True, exist_ok=True)
 
-    from pxf import provenance
     from pxf.official.require import require_official_protenix
 
     # Before anything expensive. Without this the failure is an ImportError
@@ -240,13 +362,22 @@ def main() -> None:
             "lengths": list(lengths),
             "checkpoint_dir": str(args.checkpoint_dir),
             "fixed_target": False,
+            "bit_reproducible": False,
+            "bit_reproducible_note": (
+                "measured: two identical invocations at the same seed on the "
+                "same GPU give x0 up to 0.55 A apart, because the CUDA "
+                "reductions inside 400 denoiser calls are not deterministic. "
+                "This collection is an artifact to be copied, not a recipe to "
+                "be re-run; `sha256` per design is how a reader proves the "
+                "arms consumed the same one."
+            ),
             "fixed_target_note": (
                 "never passed: the target's pose is emergent from a distogram "
                 "condition, so clamping the native frame would put binder and "
                 "target in different frames"
             ),
         },
-        "sources": provenance.runtime_sources(strict=False),
+        "sources": official_sources(args.checkpoint_dir),
         "designs": [],
     }
 
@@ -258,30 +389,53 @@ def main() -> None:
             single = _write_single_length_yaml(
                 config_path, length, out / "yaml" / f"{name}_L{length}.yaml"
             )
+            # build_runner returns (runner, configs), as the other two
+            # official-runtime scripts unpack it.
+            runner, _configs = build_runner(
+                str(single), str(out / "work" / f"{name}_L{length}"),
+                load_checkpoint_dir=args.checkpoint_dir,
+                n_step=args.n_step, n_sample=1, use_msa=args.use_msa,
+                dtype=args.dtype, eta_type="const",
+                eta_min=args.eta, eta_max=args.eta,
+            )
+            shared = build_conditioning(
+                runner=runner, sigma_b=sigma_b, n_step=args.n_step
+            )
             for sample in range(args.n_samples):
                 design_id = f"{name}_L{length}_s{sample:04d}"
                 seed = args.seed + 1000 * length + sample
                 logger.info("%s (seed %d)", design_id, seed)
-                runner = build_runner(
-                    str(single), str(out / "work" / design_id),
-                    load_checkpoint_dir=args.checkpoint_dir,
-                    n_step=args.n_step, n_sample=1, use_msa=args.use_msa,
-                    dtype=args.dtype, eta_type="const",
-                    eta_min=args.eta, eta_max=args.eta,
-                )
                 result = generate_one(
-                    runner=runner, sigma_b=sigma_b, n_step=args.n_step,
+                    denoiser=shared["denoiser"], schedule=shared["schedule"],
+                    event_step=shared["event_step"], n_step=args.n_step,
                     eta=args.eta, seed=seed,
                 )
                 payload = {
                     "design_id": design_id, "target": name,
                     "binder_length": int(length), "sample": sample,
                     "x0": result["x0"], "a_token": result["a_token"],
+                    "topology": shared["topology"],
+                    # Also in backbones.json; duplicated here so a design can
+                    # be loaded without joining against the manifest to find
+                    # the sigma its a_token was captured at.
+                    "actual_sigma": result["record"]["actual_sigma"],
                 }
-                torch.save(payload, out / "designs" / f"{design_id}.pt")
+                design_path = out / "designs" / f"{design_id}.pt"
+                torch.save(payload, design_path)
                 record = {"design_id": design_id, "target": name,
                           "binder_length": int(length), "sample": sample,
-                          "path": str(out / "designs" / f"{design_id}.pt"),
+                          "path": str(design_path),
+                          # Measured, not assumed: two identical invocations
+                          # of this script -- same seed, same node, same GPU,
+                          # back to back -- produce x0 differing by up to
+                          # 0.55 A. Non-deterministic CUDA reductions amplify
+                          # over 400 denoiser calls. So this collection cannot
+                          # be regenerated, only copied, and "the arms shared
+                          # one collection" has to be checkable rather than
+                          # believed. Hence the digest.
+                          "sha256": hashlib.file_digest(
+                              design_path.open("rb"), "sha256"
+                          ).hexdigest(),
                           **result["record"]}
                 manifest["designs"].append(record)
                 made += 1

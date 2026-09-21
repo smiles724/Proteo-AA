@@ -274,7 +274,10 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--mmcif-dir", default=str(DEFAULT_MMCIF))
     parser.add_argument("--out", required=True)
-    parser.add_argument("--target", nargs="*", default=None)
+    # --targets is the spelling every other script in this set uses;
+    # --target is kept so existing invocations do not break.
+    parser.add_argument("--targets", "--target", dest="targets",
+                        nargs="*", default=None)
     parser.add_argument("--verify", action="store_true",
                         help="also featurize each prepared target (imports the "
                              "training stack)")
@@ -287,8 +290,8 @@ def main() -> None:
     (out / "configs").mkdir(parents=True, exist_ok=True)
 
     entries = config["targets"]
-    if args.target:
-        wanted = {t.lower() for t in args.target}
+    if args.targets:
+        wanted = {t.lower() for t in args.targets}
         entries = [e for e in entries if e["name"].lower() in wanted]
 
     lengths = config["sampling"]["lengths"]

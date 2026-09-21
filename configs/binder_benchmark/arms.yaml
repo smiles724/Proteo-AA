@@ -44,10 +44,33 @@ shared:
   # uncoupled half of an on/off pair.
   fampnn_variant: "0.0"
   fampnn_variant_note: >-
-    Not upstream's recommended sequence-design model. Chosen because
-    scripts/build_checkpoint_manifest.py verifies A_BS records
-    fampnn_0_0 (sha256 afbdfda2...) as its training donor, and a 0.3 run would
-    query the adapter out of distribution while the tensor widths still match.
+    LEGACY FAMILY. Not upstream's recommended sequence-design model. The
+    existing A_BS records fampnn_0_0 (sha256 afbdfda2...) as its training donor
+    -- hash-verified by scripts/build_checkpoint_manifest.py -- and was trained
+    on the PACKING task (phase bb_to_sc, pack_steps 10), not on iterative
+    sequence design. Running it against 0.3 would query it out of distribution
+    while the tensor widths still match (both donors are 10,513,177
+    parameters), so both halves of every legacy on/off pair pin 0.0.
+  donor_families:
+    legacy:
+      fampnn: "0.0"
+      adapter: existing A_BS (couple_phase1, step 20000)
+      application_mode: packing_only
+      role: historical packing/coupling reference
+    new_main:
+      fampnn: "0.3"
+      adapter: fresh A_BS, zero-initialised output projection
+      application_mode: shared_prelogit
+      task: bs_seq_sc_v1
+      role: >-
+        joint sequence + side-chain design. Trained by
+        scripts/train_bs_seq_sc.py; until that exists there is no 0.3 adapter
+        and U03 is the only 0.3 row that may be reported.
+  donor_policy: >-
+    A 0.0 vs 0.3 difference is a DONOR change and is never reported as an
+    adapter gain. The existing 0.0 adapter is never loaded on top of 0.3:
+    identical widths and a clean load do not establish compatible feature
+    distributions.
   seq_steps: 100
   temperature: 0.1
   psce_threshold: 0.3
@@ -80,6 +103,18 @@ residual:
     target sends through the encoder, which tests a different hypothesis.
 
 arms:
+  - id: U03
+    context: complex_sc
+    residual_source: none
+    fampnn_variant: "0.3"
+    role: donor_reference
+    note: >-
+      Upstream's recommended sequence-design donor, adapter OFF. The external
+      reference that says what the 0.0 pin costs in absolute designability,
+      and the baseline the future 0.3 adapter (J03) will be paired against.
+      It is NOT the uncoupled half of any 0.0 pair -- pairing across donors
+      would confound the donor with the residual.
+
   - id: R0
     designer: proteinmpnn
     context: complex

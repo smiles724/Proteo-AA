@@ -35,6 +35,11 @@ objective into something upstream never trained, and feeding the true ones to
 the encoder would make the sequence loss trivially zero. Both mistakes produce
 a number.
 
+What the two branches do share is that ``L_MLM`` never scores a residue whose
+true identity is ``X`` -- see :func:`unknown_identities`. That is the source's
+behaviour (``SDLoss`` masks by ``1 - seq_unk_mask``) and a third mistake that
+produces a number: the model would be trained to emit its own mask token.
+
 ### S03 vs J03
 
 S03 sets ``lambda_seq = 0``. It still builds the same masks and encodes the
@@ -96,6 +101,32 @@ def batch_from_inputs(coupled_inputs, aatype_true: torch.Tensor) -> dict[str, An
     return batch
 
 
+def unknown_identities(batch: dict[str, Any], masks: BinderMaskSet) -> torch.Tensor:
+    """The ``X`` rows `L_MLM` must not score, derived the way the source does.
+
+    ``SDLoss`` multiplies its sequence mask by ``1 - seq_unk_mask`` before
+    scoring anything, so a residue whose true identity is unknown is never a
+    label. Training on those teaches the model to emit the very token it uses
+    as its own mask. `pxf.train.step`'s single-task path already passes this;
+    the joint path has the same obligation, and derives it from the same
+    helper rather than restating the predicate.
+
+    The equality check is the point of the function existing at all: the
+    labels here come from `masks`, the mask from `batch`, and the two are the
+    same tensor only because `batch_from_inputs` was handed `aatype_true`. A
+    caller that builds its batch some other way gets an error rather than a
+    mask that silently describes different residues than the labels do.
+    """
+    aatype = batch["aatype"]
+    if not torch.equal(aatype.long(), masks.aatype_true.long()):
+        raise ValueError(
+            "batch['aatype'] is not masks.aatype_true, so the unknown-identity "
+            "mask would not line up with the labels. Build the batch with "
+            "batch_from_inputs(coupled_inputs, masks.aatype_true)."
+        )
+    return train_step.batch_masks(batch)["seq_unk_mask"]
+
+
 def joint_loss(
     model,
     batch: dict[str, Any],
@@ -138,6 +169,7 @@ def joint_loss(
         masks.aatype_true,
         masks.seq_mlm_mask,
         masks.seq_mask,
+        seq_unk_mask=unknown_identities(batch, masks),
         settings=seq_settings,
     )
     sidechain, sc_stats = train_step.diffusion_loss(

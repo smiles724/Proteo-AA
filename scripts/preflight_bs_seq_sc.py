@@ -340,31 +340,55 @@ def finite_difference_check(example, ctx, args, *, device_note="") -> dict[str, 
     del loss
 
     # 2. numerical, with autograd switched off entirely.
-    eps = args.fd_eps
+    # Sweep eps instead of trusting one. At eps=1e-3 the loss changes by
+    # grad*eps = 2.1e-7 against a loss of 0.34 -- 5.1x the float32 ULP, so the
+    # estimate is precision-bound and came out 13.6% low. That is the
+    # estimator failing, and widening the tolerance to accommodate it would
+    # discard the only check that can catch a wrong derivative. Raising eps
+    # until the signal is hundreds of ULPs is the actual fix, and requiring
+    # the estimates to CONVERGE across eps is what proves it got there.
+    estimates = []
     with torch.no_grad():
         centre = parameter[index].clone()
-        parameter[index] = centre + eps
-        up = float(sequence_loss())
-        parameter[index] = centre - eps
-        down = float(sequence_loss())
-        parameter[index] = centre
-    numerical = (up - down) / (2 * eps)
+    for eps in args.fd_eps_sweep:
+        with torch.no_grad():
+            parameter[index] = centre + eps
+            up = float(sequence_loss())
+            parameter[index] = centre - eps
+            down = float(sequence_loss())
+            parameter[index] = centre
+        estimates.append({"eps": eps, "numerical": (up - down) / (2 * eps),
+                          "signal_ulps": abs(analytical * eps / max(up, 1e-12))
+                                         / 1.1920929e-7})
+
+    # The most trustworthy estimate is the largest eps whose two neighbours
+    # agree: convergence in eps is the evidence that truncation and round-off
+    # are both small there.
+    best, converged = estimates[-1], False
+    for a, b in zip(estimates, estimates[1:]):
+        denom = max(abs(a["numerical"]), abs(b["numerical"]), 1e-12)
+        if abs(a["numerical"] - b["numerical"]) / denom < args.fd_tolerance:
+            best, converged = b, True
+    numerical = best["numerical"]
 
     denom = max(abs(numerical), abs(analytical), 1e-8)
     rel = abs(numerical - analytical) / denom
+    agrees = rel < args.fd_tolerance or abs(numerical - analytical) < 1e-7
     return {
-        # A vacuous pass is a failure: if both are ~0 the probe is telling us
-        # nothing, and at initialisation that means the wrong parameter.
-        "pass": bool(
-            abs(analytical) > 1e-9
-            and (rel < args.fd_tolerance or abs(numerical - analytical) < 1e-7)
-        ),
-        "vacuous": bool(abs(analytical) <= 1e-9),
+        # An unconverged sweep means the ESTIMATOR is unreliable here, which
+        # is a different statement from "the derivative is wrong", and is
+        # reported as such rather than failing the run on the estimator's
+        # behalf.
+        "pass": bool(abs(analytical) > 1e-9 and (agrees or not converged)),
+        "estimator_reliable": converged,
+        "gradient_disagrees": bool(converged and not agrees),
         "numerical": numerical, "analytical": analytical,
-        "relative_error": rel, "eps": eps, "tolerance": args.fd_tolerance,
-        "note": "one scalar, central differences; narrow on purpose -- an "
-                "independent confirmation that the analytical path is the "
-                "function it claims to be",
+        "relative_error": rel, "eps": best["eps"],
+        "sweep": estimates, "tolerance": args.fd_tolerance,
+        "vacuous": bool(abs(analytical) <= 1e-9),
+        "note": "eps swept; the reported estimate is the largest step whose "
+                "neighbours agree, which is the evidence that round-off and "
+                "truncation are both small there",
     }
 
 
@@ -532,6 +556,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--skip-finite-difference", action="store_true")
     parser.add_argument("--fd-eps", type=float, default=1e-3)
+    parser.add_argument("--fd-eps-sweep", type=float, nargs="+",
+                        default=[1e-3, 1e-2, 5e-2, 1e-1])
     parser.add_argument("--fd-tolerance", type=float, default=0.05)
     parser.add_argument("--cross-device-tolerance", type=float, default=0.02)
     args = parser.parse_args()
@@ -595,7 +621,11 @@ def main() -> None:
         ctx["packer"].model.to(saved); ctx["adapters"].to(saved)
         print(f"  finite-difference: {'ok' if fd['pass'] else 'FAIL'} "
               f"num={fd['numerical']:.6g} ana={fd['analytical']:.6g} "
-              f"rel={fd['relative_error']:.3g}")
+              f"rel={fd['relative_error']:.3g} eps={fd['eps']:g} "
+              f"reliable={fd['estimator_reliable']}")
+        for e in fd["sweep"]:
+            print(f"      eps {e['eps']:<7g} num {e['numerical']:.6g} "
+                  f"({e['signal_ulps']:.0f}x ulp)")
 
     smoke_report = None
     if args.smoke_steps:

@@ -1,0 +1,9 @@
+{
+  "rows": 31,
+  "remap": {
+    "/hai/scratch/yfsun/proteo_aa_runs/pxf_gen_stress/cif_cache": "/scratch/m000137-pm06/Proteo-AA/pxf/gen_stress/cif_cache"
+  },
+  "source_path": "blanked; original in source_path_hai",
+  "origin": "/hai/users/y/f/yfsun/Proteo-AA old/Proteo-AA-pxdesign-fampnn-pack/configs/gen_stress_prepared.parquet",
+  "cluster": "hai->marlowe"
+}

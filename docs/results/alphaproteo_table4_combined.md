@@ -8,19 +8,29 @@ Literature rows are A-CODE Table 4 as published. **The three rows below the
 rule are not drop-in comparable to them**; the reasons are listed under the
 table and they are not small.
 
-| Type | Model | BHRF1 | H1 | IL17A | IL7RA | IR | PDL1 | SC2RBD | TNFa | TrkA | VEGFA |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Two-Stage | BoltzGen | 14.56 | 19.21 | 0.31 | 12.41 | 22.34 | 14.26 | 0.69 | 0.88 | 28.65 | 7.69 |
-| Two-Stage | ODesign | 42.23 | 7.29 | 0.10 | 7.61 | 16.82 | 10.26 | 3.13 | 0.00 | 9.99 | 3.71 |
-| Two-Stage | RFDiffusion-3 | 33.38 | 0.89 | 0.82 | 6.47 | 18.17 | 16.81 | 4.34 | 0.00 | 14.44 | 2.95 |
-| Two-Stage | PXDesign | 43.90 | 12.08 | 0.82 | 29.80 | 25.04 | 45.33 | 11.20 | 3.43 | 23.55 | 16.72 |
-| Two-Stage | A-CODE (PMPNN) | 25.00 | **65.59** | **1.79** | 4.93 | 30.09 | 39.96 | **28.05** | 6.16 | 6.87 | 1.37 |
-| One-Stage | Protpardelle-1c | 3.73 | 0.27 | 0.00 | 0.09 | 0.19 | 7.04 | 0.99 | 0.00 | 3.52 | 0.17 |
-| One-Stage | A-CODE (Co-Design) | 22.87 | 55.71 | 1.24 | 4.05 | **41.67** | 28.70 | **37.50** | **7.57** | 3.70 | 0.96 |
-| | | | | | | | | | | | |
-| *this work* | PXD bb + FaMPNN 0.3 + A_BS (**J03**) | 66.7 | 6.2 | 4.2 | 47.9 | 50.0 | 62.5 | 4.2 | 4.2 | 8.3 | 14.6 |
-| *this work* | PXD bb + FaMPNN 0.3 (**U03**) | 66.7 | 2.1 | 4.2 | 47.9 | 54.2 | 58.3 | 2.1 | 6.2 | 8.3 | 14.6 |
-| *this work* | PXD bb + ProteinMPNN (**R0**) | 58.3 | 6.2 | 0.0 | 43.8 | 45.8 | 54.2 | 4.2 | 0.0 | 4.2 | 14.6 |
+| Type | Method | BHRF1 | H1 | IL17A | IL7RA | IR | PDL1 | SC2RBD | TNFa | TrkA | VEGFA | Mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Two-Stage | BoltzGen | 14.56 | 19.21 | 0.31 | 12.41 | 22.34 | 14.26 | 0.69 | 0.88 | **28.65** | 7.69 | 12.1 |
+| Two-Stage | ODesign | 42.23 | 7.29 | 0.10 | 7.61 | 16.82 | 10.26 | 3.13 | 0.00 | 9.99 | 3.71 | 10.1 |
+| Two-Stage | RFDiffusion-3 | 33.38 | 0.89 | 0.82 | 6.47 | 18.17 | 16.81 | 4.34 | 0.00 | 14.44 | 2.95 | 9.8 |
+| Two-Stage | PXDesign | 43.90 | 12.08 | 0.82 | 29.80 | 25.04 | 45.33 | 11.20 | 3.43 | 23.55 | **16.72** | 21.2 |
+| Two-Stage | A-CODE (PMPNN) | 25.00 | **65.59** | 1.79 | 4.93 | 30.09 | 39.96 | 28.05 | 6.16 | 6.87 | 1.37 | 21.0 |
+| One-Stage | Protpardelle-1c | 3.73 | 0.27 | 0.00 | 0.09 | 0.19 | 7.04 | 0.99 | 0.00 | 3.52 | 0.17 | 1.6 |
+| One-Stage | A-CODE (Co-Design) | 22.87 | 55.71 | 1.24 | 4.05 | 41.67 | 28.70 | **37.50** | **7.57** | 3.70 | 0.96 | 20.4 |
+| This work | PXD bb + FaMPNN 0.3 + A_BS (**J03**) | **66.7** | 6.2 | **4.2** | **47.9** | 50.0 | **62.5** | 4.2 | 4.2 | 8.3 | 14.6 | **26.9** |
+| This work | PXD bb + FaMPNN 0.3 (**U03**) | **66.7** | 2.1 | **4.2** | **47.9** | **54.2** | 58.3 | 2.1 | 6.2 | 8.3 | 14.6 | 26.5 |
+| This work | PXD bb + ProteinMPNN (**R0**) | 58.3 | 6.2 | 0.0 | 43.8 | 45.8 | 54.2 | 4.2 | 0.0 | 4.2 | 14.6 | 23.1 |
+
+Bold = best on that target across ALL rows (not per model type, unlike the
+published table). Ties are bolded jointly.
+
+**Read the bolds on this work's rows with the n=48 caveat in front of you.**
+Six of the ten targets are "won" here, but on IL17A that win is 2/48 = 4.2%
+against 1.79%, i.e. one design either way, and the Wilson interval is
+[1.2, 14.0]. The wins that survive their intervals are BHRF1, IL7RA and PDL1,
+where the margins are 15-23 points. And all three of these rows share the
+released-PXDesign backbones, so what they mostly show is that PXDesign's
+generator is strong on exactly those targets -- see the backbone section.
 
 Overall, pooled over all 480 designs: J03 **26.9%**, U03 **26.5%**, R0 **23.1%**.
 

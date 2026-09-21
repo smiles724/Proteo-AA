@@ -234,19 +234,31 @@ def convert_spec(chains: dict[str, Any], chain_map, mapping) -> dict[str, Any]:
 PDL1_PUBLISHED = {"crop": ["1-116"], "hotspots": [40, 99, 107]}
 
 
-def featurizes(cif_path: Path, binder_chain: str, crop_size: int) -> dict[str, Any]:
-    """Prove the written file survives the path the backbone driver uses.
+def featurizes(cif_path: Path, stand_in_chain: str, crop_size: int) -> dict[str, Any]:
+    """Prove the written file survives the parser the backbone driver uses.
 
-    The whole point of cropping is that the featurizer accepts the result, so
-    this is the only check that actually closes the loop. It is optional
-    because it imports the training stack.
+    A PARSER SMOKE TEST, not a rehearsal of generation. These files are
+    target-only: the binder does not exist yet, and PXDesign generates it from
+    a length. But `featurize_structures` requires a binder chain to scrub, so
+    one converted chain is nominated as a stand-in purely to get the file
+    through `CifFileProvider -> DesignSourceDataset`. Nothing about that chain
+    is a binder and no output of this function is a design input.
+
+    `stand_in_chain` must be a CONVERTED chain name. Passing the author name
+    is the bug this docstring exists to prevent: it silently matches nothing,
+    the cropper finds no binder, and the target reads as unparseable when it
+    is fine. It cost a full round on the five targets whose author chain is
+    not already 'A' (IL7RA B, IR E, SC2RBD E, TrkA X, VEGFA V).
+
+    The real end-to-end check is the official runtime accepting the emitted
+    config, which belongs to backbone caching.
     """
     try:
         from pxf.backbone.driver import featurize_structures, to_featurized
 
         items = featurize_structures(
             [str(cif_path)], crop_size=crop_size,
-            binder_chain_ids=[binder_chain], parser_dataset="Distillation",
+            binder_chain_ids=[stand_in_chain], parser_dataset="Distillation",
         )
         sample_id, dataset = items[0]
         structure = to_featurized(sample_id, dataset[0])
@@ -354,8 +366,10 @@ def main() -> None:
         record["config"] = str(config_path)
 
         if args.verify:
-            binder_chain = sorted(entry["chains"])[0]
-            record["featurizes"] = featurizes(cif_path, binder_chain, args.crop_size)
+            # A converted chain name, never the author one.
+            stand_in = sorted(converted)[0]
+            record["featurizes"] = featurizes(cif_path, stand_in, args.crop_size)
+            record["featurizes"]["stand_in_chain"] = stand_in
 
         status = "ok"
         if problems:

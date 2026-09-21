@@ -277,11 +277,19 @@ def section7(example, ctx, args) -> dict[str, Any]:
 
 
 def finite_difference_check(example, ctx, args) -> dict[str, Any]:
-    """Check 6: analytical vs numerical gradient of L_seq, on CPU.
+    """Check 6: analytical vs numerical gradient of L_seq, one scalar.
 
-    One scalar parameter, central differences. It is slow and narrow on
-    purpose -- the point is an independent confirmation that the analytical
-    path is the function it claims to be, not a broad test.
+    Order matters and the first attempt got it wrong. Perturbing a parameter
+    in place while a graph that references it is still alive gives
+
+        RuntimeError: one of the variables needed for gradient computation
+        has been modified by an inplace operation ... is at version 7;
+        expected version 6
+
+    because autograd version-counts the leaf. So: the analytical gradient is
+    taken FIRST on a clean graph, and the numerical probes then run entirely
+    under no_grad, where no graph is built and the version counter is
+    irrelevant.
     """
     from pxf.train.bs_seq_sc import joint_loss
 
@@ -289,38 +297,42 @@ def finite_difference_check(example, ctx, args) -> dict[str, Any]:
     parameter = next(p for p in adapters.parameters() if p.requires_grad and p.numel() > 1)
     index = (0,) * (parameter.dim() - 1) + (0,)
 
-    def loss_at(value):
-        with torch.no_grad():
-            saved = parameter[index].clone()
-            parameter[index] = value
-        out = joint_loss(
+    def sequence_loss():
+        return joint_loss(
             ctx["packer"].model, example["batch"], example["features"],
             adapters=adapters, a_token=example["a_token"],
             sigma_b=example["sigma"], roles=example["roles"],
             masks=example["masks"], lambda_seq=1.0, lambda_sc=0.0,
             multiplier=args.multiplier, allow_zero=True,
         ).sequence
-        with torch.no_grad():
-            parameter[index] = saved
-        return out
 
-    eps = 1e-3
-    with torch.no_grad():
-        centre = parameter[index].clone()
-    up = float(loss_at(centre + eps).detach())
-    down = float(loss_at(centre - eps).detach())
-    numerical = (up - down) / (2 * eps)
-
-    loss = loss_at(centre)
+    # 1. analytical, on a graph nothing has touched.
+    loss = sequence_loss()
     analytical = float(
         torch.autograd.grad(loss, parameter, retain_graph=False)[0][index]
     )
+    del loss
+
+    # 2. numerical, with autograd switched off entirely.
+    eps = args.fd_eps
+    with torch.no_grad():
+        centre = parameter[index].clone()
+        parameter[index] = centre + eps
+        up = float(sequence_loss())
+        parameter[index] = centre - eps
+        down = float(sequence_loss())
+        parameter[index] = centre
+    numerical = (up - down) / (2 * eps)
+
     denom = max(abs(numerical), abs(analytical), 1e-8)
     rel = abs(numerical - analytical) / denom
     return {
-        "pass": bool(rel < 0.05 or abs(numerical - analytical) < 1e-6),
+        "pass": bool(rel < args.fd_tolerance or abs(numerical - analytical) < 1e-7),
         "numerical": numerical, "analytical": analytical,
-        "relative_error": rel, "eps": eps,
+        "relative_error": rel, "eps": eps, "tolerance": args.fd_tolerance,
+        "note": "one scalar, central differences; narrow on purpose -- an "
+                "independent confirmation that the analytical path is the "
+                "function it claims to be",
     }
 
 
@@ -436,6 +448,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--skip-finite-difference", action="store_true")
+    parser.add_argument("--fd-eps", type=float, default=1e-3)
+    parser.add_argument("--fd-tolerance", type=float, default=0.05)
     args = parser.parse_args()
 
     import pandas as pd

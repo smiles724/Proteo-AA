@@ -1,0 +1,36 @@
+{
+  "targets": "/hai/scratch/yfsun/proteo_aa_runs/pxf_train_pool/train_targets.parquet",
+  "cache": "/hai/scratch/yfsun/proteo_aa_runs/pxf_train_pool/cif_cache",
+  "crop_size": 512,
+  "train": 512,
+  "calibration": 16,
+  "candidates_screened": 807,
+  "short_of_quota": {},
+  "protein_only": true,
+  "by_pool_train": {
+    "pdb": 256,
+    "ted": 256
+  },
+  "by_pool_calibration": {
+    "pdb": 8,
+    "ted": 8
+  },
+  "rejects": {
+    "N of N tokens are not amino acids": 278,
+    "DesignSourceDataset: failed to find a crop-valid example after N attempts starting at index N (tried [N]). Last retryable sample error: DesignCropper: binder has N tokens but crop_size=N. Increase crop_size or shrink the binder selection.": 1
+  },
+  "generated_tokens": {
+    "min": 31,
+    "median": 103,
+    "max": 279
+  },
+  "target_tokens": {
+    "min": 43,
+    "median": 145,
+    "max": 384
+  },
+  "binder_rule": "smaller chain after conversion; ties on chain id",
+  "normalisation": "gemmi -> PDB -> protenix pdb_to_cif -> CIF",
+  "parser": "Distillation",
+  "seconds": 441.0
+}

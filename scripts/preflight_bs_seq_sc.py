@@ -133,11 +133,14 @@ def prepare_example(row, ctx, args):
     # The ENCODER sees the masked identities; the SC branch is teacher-forced
     # on ground truth. Getting this backwards produces a number either way.
     with torch.no_grad():
+        # coords_af2 and aatype are POSITIONAL, and there is no atom_mask
+        # argument: encode builds it from missing_atom_mask and
+        # sidechain_visible, which is what keeps a hidden residue's side chain
+        # out of the encoder rather than merely out of the loss.
         _logits, _h_v, features = encode(
             ctx["packer"].model,
-            coords_af2=inputs.coords_af2,
-            aatype=masks.aatype_encoder,
-            atom_mask=inputs.atom_mask,
+            inputs.coords_af2,
+            masks.aatype_encoder,
             seq_mask=inputs.seq_mask,
             missing_atom_mask=inputs.missing_atom_mask,
             residue_index=inputs.residue_index,

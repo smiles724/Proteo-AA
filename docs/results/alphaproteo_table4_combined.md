@@ -57,18 +57,17 @@ representable counterpart here -- a 0.0 in these rows means "none of 48", not
 "below 0.1%". The Wilson intervals above are 25-30 points wide on the
 mid-range targets.
 
-**3. The length grid differs, and systematically.** These runs use a fixed
-{80, 90, 100, 110, 120, 130} for every target. AlphaProteo's per-target ranges
-(`configs/binder_benchmark/targets.yaml`) start at 40-50 for eight of the ten
-and none extends to 130. So the short end is unsampled everywhere except
-BHRF1/SC2RBD, and every target is sampled at one length outside its declared
-range. Pooled rates are therefore over a different population of lengths.
+**3. The length grid MATCHES.** A-CODE Table 4's protocol is "for each
+different target, we sample 328-728 binders with lengths ranging from 80 to
+130" -- the same {80, 90, 100, 110, 120, 130} used here.
 
-Whether that explains the H1 gap (6.2% here vs 65.59% for A-CODE PMPNN) is
-NOT established: H1 allows binders down to 40 and this grid starts at 80, so
-the hypothesis is live, but per-length cells here are 8 designs each and the
-overall length trend is flat (30.0 / 27.5 / 35.0 / 21.2 / 23.8 / 23.8 % at
-80-130). It is a hypothesis, not a finding.
+CORRECTION: an earlier version of this document listed the length grid as a
+comparability gap, on the basis of the per-target `alphaproteo_length_range`
+in `configs/binder_benchmark/targets.yaml` (40-50 up to 120-140). Those are
+AlphaProteo Table S1's ranges, not A-CODE's sampling protocol. The grid is
+not a difference, and the H1 hypothesis that rested on unsampled short
+lengths is WITHDRAWN -- A-CODE did not sample below 80 either. See the
+backbone section below for what the H1 gap actually is.
 
 **4. AF2-IG settings are this repo's**: 3 recycles, `model_1_ptm` for the
 complex and `model_3_ptm` for the monomer, single-sequence (no MSA). R0
@@ -77,6 +76,42 @@ no side chains and ColabDesign feeds `all_atom_positions` into `prev_pos`
 (`colabdesign/af/design.py:166`). That handicaps R0 by an unmeasured amount;
 a U03-backbone-only calibration arm is the way to measure it and has not been
 run yet.
+
+## What the H1 gap actually points at: the backbones, not the sequence stage
+
+With the length grid identical and the filter identical, the remaining large
+differences are the BACKBONE SOURCE and n. Lining the rows up by backbone
+provenance makes the pattern legible -- these rows and the PXDesign row share
+the released-PXDesign generator; the A-CODE rows do not:
+
+| target | J03 (this work) | PXDesign | J03 - PXD | A-CODE (PMPNN) | J03 - A-CODE |
+|---|---|---|---|---|---|
+| TrkA | 8.3 | 23.55 | -15.2 | 6.87 | +1.4 |
+| SC2RBD | 4.2 | 11.20 | -7.0 | 28.05 | -23.9 |
+| H1 | 6.2 | 12.08 | -5.9 | **65.59** | **-59.4** |
+| VEGFA | 14.6 | 16.72 | -2.1 | 1.37 | +13.2 |
+| TNFa | 4.2 | 3.43 | +0.8 | 6.16 | -2.0 |
+| IL17A | 4.2 | 0.82 | +3.4 | 1.79 | +2.4 |
+| PDL1 | 62.5 | 45.33 | +17.2 | 39.96 | +22.5 |
+| IL7RA | 47.9 | 29.80 | +18.1 | 4.93 | +43.0 |
+| BHRF1 | 66.7 | 43.90 | +22.8 | 25.00 | +41.7 |
+| IR | 50.0 | 25.04 | +25.0 | 30.09 | +19.9 |
+| | | | **mean abs 11.8** | | **mean abs 22.9** |
+
+On H1 this work gets 6.2% and PXDesign -- the same backbone generator -- gets
+12.08%, while A-CODE gets 65.59% with its own backbones. So H1 is a target
+where A-CODE's generator is far better than PXDesign's, and the 59-point gap
+is a BACKBONE result that no sequence stage on PXDesign backbones was going
+to close. The same reading applies to SC2RBD (11.20 vs 28.05).
+
+It cuts the other way on IL7RA and BHRF1, where PXDesign backbones are much
+better than A-CODE's (29.80 vs 4.93, 43.90 vs 25.00) and these rows inherit
+that advantage.
+
+That is the main thing to take from the combined table: rows agree more
+closely when they share a BACKBONE generator (mean absolute difference
+11.8 pp) than when they share a SEQUENCE designer (22.9 pp). This benchmark
+is dominated by the backbone stage -- the stage this work did not change.
 
 ## The filter is binding, and was checked
 

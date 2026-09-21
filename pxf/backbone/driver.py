@@ -374,12 +374,36 @@ def to_featurized(sample_id, item):
     # structure_res_name, which would teacher-force glycine everywhere.
     from fampnn.data import residue_constants as rc
 
-    # aa_clean uses -100 for tokens that are not amino acids at all -- ligands,
-    # ions, waters. `int(a) < 20` is true for -100 and AA_ORDER[-100] raises
-    # IndexError, so the bound has to be two-sided. CASP14 targets are
-    # protein-only, which is why this only appears on PDB entries with hetero
-    # groups (101m: 154 residues plus 49 HEM tokens).
-    non_protein = int(((aatype < 0) | (aatype >= 20)).sum())
+    # `aa_clean` marks anything it cannot name with -100, its ignore-index
+    # convention. Two quite different things land there:
+    #
+    #   * UNK protein residues -- observed backbone, identity not assigned.
+    #     Protenix's own `restype` already calls these X (20), and every
+    #     downstream consumer here treats aatype as a *class index*: the
+    #     encoder embeds it, `masked_cross_entropy` one-hots it, and
+    #     `batch_masks` indexes STANDARD_ATOM_MASK_WITH_X with it. -100 is out
+    #     of bounds for all three, which is an index assert on GPU and a
+    #     silently wrong `seq_unk_mask` everywhere (it tests `== X`, so a -100
+    #     row is not recognised as unknown and would be *scored* as a label).
+    #     These are remapped to X, which is what `restype` says and what the
+    #     rest of the pipeline already assumes.
+    #
+    #   * Tokens that are not amino acids at all -- ligands, ions, waters
+    #     (101m: 154 residues plus 49 HEM tokens). Those are remapped too, so
+    #     the tensor is always a valid index, but they are counted separately
+    #     and still warned about, because for them the side-chain targets
+    #     genuinely do not line up.
+    #
+    # `is_protein` is what separates the two; without it, assume protein and
+    # let the warning stay quiet rather than cry wolf on every UNK.
+    unnamed = aatype < 0
+    if "is_protein" in feature_dict:
+        is_protein = feature_dict["is_protein"].reshape(-1).bool()[:num_tokens]
+    else:
+        is_protein = torch.ones_like(unnamed)
+    unknown_protein = int((unnamed & is_protein).sum())
+    non_protein = int((unnamed & ~is_protein).sum()) + int((aatype >= 20).sum())
+    aatype = torch.where(unnamed, torch.full_like(aatype, atom37.UNKNOWN_AA_INDEX), aatype)
     per_token = [
         rc.restype_1to3[atom37.AA_ORDER[int(a)]] if 0 <= int(a) < 20 else "UNK"
         for a in aatype
@@ -394,6 +418,17 @@ def to_featurized(sample_id, item):
         residue_index=feature_dict.get("residue_index"),
         chain_index=feature_dict.get("asym_id"),
     )
+    if unknown_protein:
+        # Benign, and common: ~29% of the binder val panel has some. They are
+        # read as X, which excludes them from L_seq via seq_unk_mask and gives
+        # them ghost side-chain slots. Logged at debug so a run that cares can
+        # see the count without burying the real warning below.
+        logger.debug(
+            "%s: %d of %d tokens are UNK protein residues, read as X.",
+            sample_id,
+            unknown_protein,
+            num_tokens,
+        )
     if non_protein:
         # Not raised here: the structure is still usable for backbone work. But
         # the side-chain module only accepts the canonical twenty, and

@@ -90,85 +90,25 @@ def build(args):
 
 
 def prepare_example(row, ctx, args):
-    """Featurize one dimer into (masks, roles, features, batch, a_token)."""
-    from pxf.backbone.chain_ids import featurizer_chain_id
-    from pxf.backbone.driver import featurize_structures, to_featurized
-    from pxf.couple.binder_masks import build_masks
-    from pxf.couple.binder_residual import ChainRoles
-    from pxf.couple.converter import PXFaRepresentationConverter
-    from pxf.couple.fampnn_iface import encode
-    from pxf.train.bs_seq_sc import batch_from_inputs
+    """One manifest row -> everything joint_loss needs.
 
-    device = ctx["device"]
-    label = featurizer_chain_id(row.cif_path, row.converted_binder_chain)
-    sample_id, dataset = featurize_structures(
-        [row.cif_path], crop_size=args.crop_size,
-        binder_chain_ids=[label], parser_dataset="Distillation",
-    )[0]
-    structure = to_featurized(sample_id, dataset[0]).to(device)
-    roles = ChainRoles(binder=structure.design_mask.reshape(-1).bool().cpu())
+    Delegates to `pxf.train.bs_seq_sc.prepare_example`, which is the same
+    function the TRAINER calls. This script used to carry its own copy, and
+    the copy had already drifted: the library split featurization from the
+    mask draw and started seeding a_token per structure, while this one still
+    seeded both from the visit. Two implementations of "what the model sees"
+    is the train/inference skew every other check here is written to prevent,
+    so there is now one.
+    """
+    from pxf.train.bs_seq_sc import prepare_example as _prepare
 
-    generator = torch.Generator().manual_seed(args.seed)
-    masks = build_masks(
-        roles, structure.aatype.reshape(1, -1).cpu(),
-        mask_fraction=args.mask_fraction, generator=generator,
+    example = _prepare(
+        row.cif_path, row.converted_binder_chain,
+        packer=ctx["packer"], driver=ctx["driver"], device=ctx["device"],
+        sigma_b=args.sigma_b, mask_fraction=args.mask_fraction,
+        crop_size=args.crop_size, seed=args.seed,
     )
-    masks = type(masks)(
-        roles=masks.roles,
-        seq_mask=masks.seq_mask.to(device),
-        seq_mlm_mask=masks.seq_mlm_mask.to(device),
-        sidechain_visible=masks.sidechain_visible.to(device),
-        aatype_encoder=masks.aatype_encoder.to(device),
-        aatype_true=masks.aatype_true.to(device),
-    )
-
-    converter = PXFaRepresentationConverter()
-    topology = structure.topology
-    inputs = converter.px_backbone_to_fampnn(
-        structure.backbone_target, topology.atom_names,
-        topology.atom_to_token_idx, topology.num_tokens,
-        res_names=topology.res_names, residue_index=topology.residue_index,
-        chain_index=topology.chain_index, aatype=structure.aatype,
-    ).to(device)
-
-    # The ENCODER sees the masked identities; the SC branch is teacher-forced
-    # on ground truth. Getting this backwards produces a number either way.
-    with torch.no_grad():
-        # coords_af2 and aatype are POSITIONAL, and there is no atom_mask
-        # argument: encode builds it from missing_atom_mask and
-        # sidechain_visible, which is what keeps a hidden residue's side chain
-        # out of the encoder rather than merely out of the loss.
-        _logits, _h_v, features = encode(
-            ctx["packer"].model,
-            inputs.coords_af2,
-            masks.aatype_encoder,
-            seq_mask=inputs.seq_mask,
-            missing_atom_mask=inputs.missing_atom_mask,
-            residue_index=inputs.residue_index,
-            chain_index=inputs.chain_index,
-            sidechain_visible=masks.sidechain_visible,
-        )
-    batch = batch_from_inputs(inputs, masks.aatype_true)
-
-    sigma = torch.full((1,), float(args.sigma_b), device=device)
-    cond = ctx["driver"].conditioning(structure.feature_dict)
-    bound = ctx["driver"].bind(cond)
-    with torch.no_grad():
-        target = structure.backbone_target.float()
-        noise = torch.randn(
-            target.shape, generator=torch.Generator().manual_seed(args.seed)
-        ).to(device)
-        _bb0, a_token = bound((target + noise * float(args.sigma_b))[None], sigma)
-    if a_token is None:
-        raise SystemExit("the driver returned no a_token")
-    if a_token.dim() == 2:
-        a_token = a_token[None]
-
-    return {
-        "roles": roles, "masks": masks, "features": features, "batch": batch,
-        "a_token": a_token, "sigma": sigma, "inputs": inputs,
-        "tokens": int(topology.num_tokens),
-    }
+    return example
 
 
 # ------------------------------------------------------------- the 6 checks

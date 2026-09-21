@@ -1,58 +1,59 @@
-# Phase 0 development complexes: held out, and NOT the benchmark ten.
+# Phase 0 development complexes: held out, protein-only, and SCREENED.
 #
-# Four small two-chain complexes drawn from the recentPDB low-homology eval
-# index (protenix_data/indices/recentPDB_low_homology_maxtoken1536.csv), which
-# is the split this repo already treats as held out. None of them is an
-# AlphaProteo target, so exercising the harness on them cannot contaminate the
-# benchmark.
+# Four two-chain complexes from the recentPDB low-homology eval index
+# (protenix_data/indices/recentPDB_low_homology_maxtoken1536.csv), the split
+# this repo already treats as held out. None is an AlphaProteo target, so
+# exercising the harness on them cannot contaminate the benchmark.
 #
-# They are chosen small (186-197 tokens) because Phase 0 measures plumbing, not
-# biology: every check here is about whether the hook fires, whether the
-# residual lands on the intended rows, and whether the uncoupled path is
-# reproduced exactly. None of it needs a large or interesting interface, and a
-# small complex makes the checks cheap enough to re-run on every change.
+# "Screened" is the operative word, and it cost a round. The first selection
+# filtered on chain composition and three of four then failed at
+# featurization:
 #
-# `binder` is the smaller chain, following the same rule
-# scripts/prepare_dimer_targets.py uses. It is a role assignment for the
-# harness, not a claim that this chain is a designed binder.
+#   7bca  IndexError: index -100 is out of bounds ...  -- protein/DNA complex;
+#         the chain filter counted only its two protein chains
+#   7pz2  same                                          -- Cl- and SO4 present
+#   7qii  InferenceSafeBinder: strict token count 257 != native 287
 #
-# The residue counts below come from a raw gemmi read of the deposited file and
-# are ADVISORY. The authoritative split is the featurizer's
-# `design_token_mask`, which is what ChainRoles is built from at run time: the
-# WeightedPDB parser expands the bioassembly, so its token count can differ.
-# On 7f7p the file reads 96 + 90 = 186 and the featurizer produces 96 + 96 =
-# 192. Phase 0 reports the featurizer's numbers, and they are the ones that
-# matter.
+# `aa_clean` marks any non-amino-acid token -100 and a 21-way lookup then
+# indexes with it. So the entries below were chosen by ACTUALLY FEATURIZING
+# them, not by inspecting the file: of 27 protein-only two-chain candidates in
+# the mirror, these four survive `CifFileProvider -> DesignSourceDataset`.
+# `tokens` and `design_tokens` are the featurizer's own numbers.
 #
-# The gen_stress dev set (configs/gen_stress_prepared.parquet, 31 val dimers)
-# would be the richer choice, but its prepared CIFs live only under /hai and
-# were not transferred; these come from a mirror that is present.
+# The same failure hits eight of the ten benchmark targets, which carry
+# glycans, ions or ligands; see scripts/validate_binder_targets.py. They need
+# cropping to amino acids before the backbone driver sees them.
+#
+# Chain roles are a harness assignment (smaller chain is the binder), not a
+# claim that either chain is a designed binder. The authoritative split at run
+# time is the featurizer's `design_token_mask`, which ChainRoles is built from.
+#
+# The gen_stress val set (configs/gen_stress_prepared.parquet, 31 dimers with
+# roles already assigned) would be richer, but its prepared CIFs live only
+# under /hai and were not transferred.
 
 mmcif_dir: /scratch/m000137-pm06/Proteo-AA/pxf/protenix_data/mmcif
 source_index: recentPDB_low_homology_maxtoken1536.csv
+selection: protein-only two-chain entries that featurize; screened, not assumed
 
 complexes:
   - id: 7f7p
     target_chain: A
     binder_chain: B
-    target_residues: 96
-    binder_residues: 90
-    total_residues: 186
-  - id: 7qii
+    featurizer_tokens: 192
+    featurizer_design_tokens: 96
+  - id: 7f91
     target_chain: A
     binder_chain: B
-    target_residues: 110
-    binder_residues: 76
-    total_residues: 186
-  - id: 7bca
+    featurizer_tokens: 280
+    featurizer_design_tokens: 140
+  - id: 7p0s
     target_chain: A
     binder_chain: B
-    target_residues: 96
-    binder_residues: 93
-    total_residues: 189
-  - id: 7pz2
-    target_chain: B
-    binder_chain: A
-    target_residues: 100
-    binder_residues: 97
-    total_residues: 197
+    featurizer_tokens: 348
+    featurizer_design_tokens: 26
+  - id: 7ppb
+    target_chain: A
+    binder_chain: B
+    featurizer_tokens: 466
+    featurizer_design_tokens: 125

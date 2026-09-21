@@ -10,15 +10,21 @@
 #SBATCH --output=/scratch/m000137-pm06/Proteo-AA/pxf/runs/logs/pxf_phase0/%x-%j.out
 #SBATCH --error=/scratch/m000137-pm06/Proteo-AA/pxf/runs/logs/pxf_phase0/%x-%j.out
 #
-# Phase 0: the iterative BB->SC hook on real weights, two chains, four
-# held-out dev complexes. See scripts/phase0_pack_hook_check.py for what each
-# of the seven checks is protecting against.
+# Phase 0: the iterative BB->SC hook on real weights, two chains, and the
+# held-out dev complexes in configs/binder_benchmark/dev_complexes.yaml (six
+# as of 550bdad). See scripts/phase0_pack_hook_check.py for what each of the
+# seven checks is protecting against.
 #
-# This runs as a batch job rather than on a login node for a practical reason
-# learned the hard way: the full set is ~20 designs at 100 unmasking steps,
-# which is minutes on a GPU and the better part of an hour on CPU, and a
-# long-running login-node process does not survive a session ending. Two CPU
-# attempts were killed mid-run (exit 144) with nothing to show.
+# This runs as a batch job because the set is ~30 designs at 100 unmasking
+# steps: minutes on a GPU, about four minutes per complex on CPU.
+#
+# An earlier version of this comment blamed two exit-144 deaths on a
+# login-node process not surviving a session ending. That was wrong, and the
+# correction is worth keeping because the real cause recurs: both runs were
+# killed by `pkill -u $USER -f phase0_pack_hook_check` issued from the same
+# compound command that launched the replacement, so the pattern matched the
+# launching shell's own command line and it killed itself. Login-node
+# survival was never demonstrated either way.
 #
 # Usage:
 #   source /users/yfsun/marlowe_env.sh

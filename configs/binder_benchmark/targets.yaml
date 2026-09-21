@@ -1,0 +1,169 @@
+# The ten AlphaProteo binder-design targets, in AUTHOR numbering.
+#
+# Recovered from origin/bench/alphaproteo-10-targets @ 4461087 (the revision
+# that actually holds benchmarks/alphaproteo10/, which is absent from the
+# branches this experiment builds on) and cross-checked residue-for-residue
+# against an independently written transcription of the same table,
+# Proteo-AA/pxdesign_train/benchmarks/targets/conditional_binder_design_v1.json.
+#
+# Nine of the ten agree exactly between those two sources. That is meaningful
+# corroboration: they were transcribed separately from AlphaProteo Table S1
+# (Zambaldi et al., arXiv:2409.08022, p38) and they converge.
+#
+# The tenth is H1, and its disagreement is recorded in full below rather than
+# resolved by fiat. Run scripts/validate_binder_targets.py to re-derive the
+# evidence against the structures on disk.
+#
+# Every crop and hotspot below is an AUTHOR residue number, i.e. what the
+# deposited mmCIF calls it. Published values are NOT always author numbers --
+# see H1 -- so the conversion is done once, here, and recorded.
+
+source:
+  primary: >-
+    AlphaProteo (Zambaldi et al., arXiv:2409.08022) Table S1, "Binder design
+    problem specifications for in silico benchmarking and experimental testing".
+  corroborating: >-
+    PXDesign technical report Table 3 reproduces six of the ten verbatim.
+  recovered_from: origin/bench/alphaproteo-10-targets@4461087
+  cross_checked_against: >-
+    Proteo-AA/pxdesign_train/benchmarks/targets/conditional_binder_design_v1.json
+  structures: /scratch/m000137-pm06/Proteo-AA/protenix_data/mmcif
+
+# A-CODE Section 4.2 samples 80-130 across all ten targets, 328-728 per target.
+# AlphaProteo's own per-target range is recorded per entry for traceability and
+# is deliberately unused. There is no single `binder_length` here on purpose:
+# a fixed length is not a reproduction of a length range.
+sampling:
+  lengths: [80, 90, 100, 110, 120, 130]
+  source: A-CODE arXiv:2605.03360 Section 4.2
+
+targets:
+  - name: BHRF1
+    pdb_id: 2wh6
+    full_name: "Epstein-Barr virus Bcl-2 homolog BHRF1"
+    alphaproteo_length_range: [80, 120]
+    chains:
+      A:
+        crop: ["2-158"]
+        hotspots: [65, 74, 77, 82, 85, 93]
+  - name: H1
+    pdb_id: 5vli
+    full_name: "Influenza A H1 hemagglutinin"
+    alphaproteo_length_range: [40, 120]
+    # NUMBERING CONFLICT -- unresolved, and the hotspots do not depend on it.
+    #
+    # Chain B is settled. AlphaProteo writes "B1-68, B80-170" with hotspots
+    # B21/B45/B52, which is canonical HA2 numbering; 5vli deposits HA2 at
+    # +500. Proof from the structure, not convention: HA2 residue 1 is G and
+    # 5vli chain B auth 501 is G, and B21 -> auth 521 is TRP, B45 -> 545,
+    # B52 -> 552. Both source transcriptions agree on +500.
+    #
+    # Chain A is NOT settled. Three readings of Table S1's
+    # "A1-50, A76-80, A107-111, A258-322" survive inspection of 5vli:
+    #
+    #   literal auth (+0)   A1-50 -> auth 5-50   the other transcription's reading
+    #   label/SEQRES (+3)   A1-50 -> auth 5-53   the recovered YAML's reading, used here
+    #   mature HA1  (+4/+5) A1-50 -> auth 6-54   auth 6 is mature HA1 Asp-1 by sequence
+    #
+    # What each has going for it, measured:
+    #   * chain A auth runs 5-325 with one insertion code at 49A; auth 6 is the
+    #     mature HA1 N-terminal Asp, so auth = mature + 5 before the insertion
+    #     and + 4 after it. That argues the published numbers are mature.
+    #   * "A1-50" selects exactly 50 residues under the +3 and +4 readings and
+    #     only 47 under the literal one.
+    #   * but min-distance to chain B mildly contradicts that: the retained
+    #     loop 107-111 sits 2.83 A from HA2 read literally, 4.90 A at +3 and
+    #     7.94 A at +4, while loop 76-80 goes the other way (10.66 / 6.81 /
+    #     6.81 A). No reading wins both.
+    #   * mixing conventions inside one table row would be odd, and chain B is
+    #     definitively not in auth numbering, which argues against the literal
+    #     reading for chain A.
+    #
+    # The +3 reading is carried below because it came from a script that read
+    # the mapping off 5vli rather than assuming one, and because it keeps the
+    # HA1 C-terminus in the crop. It is a judgement call on target CONTEXT
+    # only: all three readings give identical hotspots, and the hotspots are
+    # what steer the design. Flagged for a decision before the final run.
+    numbering_alternatives:
+      literal_auth: {A: ["1-50", "76-80", "107-111", "258-322"]}
+      mature_ha1:   {A: ["6-54", "80-84", "111-115", "262-325"]}
+    chains:
+      A:
+        crop: ["5-53", "79-83", "110-114", "261-325"]
+      B:
+        crop: ["501-568", "580-670"]
+        hotspots: [521, 545, 552]
+  - name: IL17A
+    pdb_id: 4hsa
+    full_name: "Interleukin-17A"
+    alphaproteo_length_range: [50, 140]
+    chains:
+      A:
+        crop: ["17-131"]
+        hotspots: [94, 116]
+      B:
+        crop: ["19-127"]
+        hotspots: [67]
+  - name: IL7RA
+    pdb_id: 3di3
+    full_name: "Interleukin-7 receptor alpha"
+    alphaproteo_length_range: [50, 120]
+    chains:
+      B:
+        crop: ["17-209"]
+        hotspots: [58, 80, 139]
+  - name: IR
+    pdb_id: 4zxb
+    full_name: "Insulin receptor L1 domain"
+    alphaproteo_length_range: [40, 120]
+    chains:
+      E:
+        crop: ["6-155"]
+        hotspots: [64, 88, 96]
+  - name: PDL1
+    pdb_id: 5o45
+    full_name: "Programmed death-ligand 1"
+    alphaproteo_length_range: [50, 120]
+    chains:
+      A:
+        crop: ["17-132"]
+        hotspots: [56, 115, 123]
+  - name: SC2RBD
+    pdb_id: 6m0j
+    full_name: "SARS-CoV-2 spike receptor-binding domain"
+    alphaproteo_length_range: [80, 120]
+    chains:
+      E:
+        crop: ["333-526"]
+        hotspots: [485, 489, 494, 500, 505]
+  - name: TNFa
+    pdb_id: 1tnf
+    full_name: "Tumor necrosis factor alpha"
+    alphaproteo_length_range: [50, 120]
+    chains:
+      A:
+        crop: ["12-157"]
+        hotspots: [113]
+      B:
+        crop: ["12-157"]
+      C:
+        crop: ["12-157"]
+        hotspots: [73]
+  - name: TrkA
+    pdb_id: 1www
+    full_name: "Tropomyosin receptor kinase A"
+    alphaproteo_length_range: [50, 120]
+    chains:
+      X:
+        crop: ["282-382"]
+        hotspots: [294, 296, 333]
+  - name: VEGFA
+    pdb_id: 1bj1
+    full_name: "Vascular endothelial growth factor A"
+    alphaproteo_length_range: [50, 140]
+    chains:
+      V:
+        crop: ["14-107"]
+      W:
+        crop: ["14-107"]
+        hotspots: [81, 83, 91]

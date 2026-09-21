@@ -17,6 +17,22 @@
 # Every crop and hotspot below is an AUTHOR residue number, i.e. what the
 # deposited mmCIF calls it. Published values are NOT always author numbers --
 # see H1 -- so the conversion is done once, here, and recorded.
+#
+# The chain KEYS are author ids too, and those need a conversion this file
+# deliberately does not bake in. The featurizer matches `label_asym_id`, and
+# for three of the ten it is a different letter:
+#
+#   SC2RBD  6m0j  author E   -> label B
+#   TrkA    1www  author X   -> label C
+#   VEGFA   1bj1  author V W -> label C D
+#
+# Do not pass a key below straight to `binder_chain_ids`. Resolve it with
+# `pxf.backbone.chain_ids.featurizer_chain_id`, which reads the mapping out
+# of the structure, so it cannot drift from the file the way a second copy
+# recorded here would. 6m0j is why this is stated rather than left to be
+# noticed: label E exists there as a glycan on ACE2, so the unconverted id
+# selects something and the run succeeds against the wrong molecule.
+# `scripts/validate_binder_targets.py` prints the resolved id per chain.
 
 source:
   primary: >-

@@ -1,0 +1,164 @@
+# The Phase 1A arm matrix, and what each arm is allowed to conclude.
+#
+# Seven primary arms over ONE shared set of PXDesign backbones. Sharing the
+# backbones is what makes the on/off differences paired: R2 and C2 see the same
+# geometry, the same target, the same seed, and differ only in whether the
+# BB->SC residual is applied. Anything that changes the backbone belongs in
+# Phase 1B, not here.
+#
+# `scripts/design_binder_matrix.py` reads this file. Nothing about an arm is
+# hard-coded there: an arm is its context masks plus its residual source, and
+# both are declared below so a run records the definition it used rather than
+# the definition someone remembers.
+#
+# ---------------------------------------------------------------------------
+# Three context levels, and why they are separate arms rather than settings
+# ---------------------------------------------------------------------------
+#
+#   binder_only    FaMPNN sees the binder backbone alone. The target is absent
+#                  from the sequence model entirely.
+#   complex        FaMPNN sees target + binder backbones and the target's fixed
+#                  sequence. No target side-chain coordinates are supplied.
+#   complex_sc     as complex, plus the target's resolved side chains held
+#                  fixed as context.
+#
+# C1 is NOT "target-unconditioned". Its PXDesign backbone and its a_token were
+# produced with the target present, so the target's information is already in
+# the geometry and in the residual. What C1 removes is the target from FaMPNN's
+# own receptive field. Describing it as unconditioned would overstate every
+# conclusion drawn from it.
+#
+# All arms, including the binder_only pair, are SCORED as complexes: their
+# binder output is recombined with the same cached target before AF2-IG. A
+# binder scored alone is answering a different question than Table 4 asks.
+
+shared:
+  # Every Phase 1A arm consumes the identical backbone collection.
+  backbone_source: released_pxdesign
+  designer: fampnn
+  # A_BS was trained against FaMPNN 0.0. Upstream recommends 0.3 for sequence
+  # design, so this is a real conflict and it is resolved in favour of the
+  # adapter: the primary comparison must query A_BS in distribution, and the
+  # uncoupled arm must use the same donor or the difference is confounded by
+  # the donor. 0.3 is available as an external reference, never as the
+  # uncoupled half of an on/off pair.
+  fampnn_variant: "0.0"
+  fampnn_variant_note: >-
+    Not upstream's recommended sequence-design model. Chosen because
+    scripts/build_checkpoint_manifest.py verifies A_BS records
+    fampnn_0_0 (sha256 afbdfda2...) as its training donor, and a 0.3 run would
+    query the adapter out of distribution while the tensor widths still match.
+  seq_steps: 100
+  temperature: 0.1
+  psce_threshold: 0.3
+  repack_last: true
+  sequences_per_backbone: 1
+
+# sigma_B is the backbone diffusion noise the a_token is read at. It is NOT
+# FaMPNN's sequence-unmasking time and not side-chain diffusion time.
+#
+# 0.429 is inside every adapter's trained window -- A_BS supports 0.0092-4.76 A
+# and the early conditioners 0.099-1.88 A, both verified by
+# scripts/build_checkpoint_manifest.py --probe-sigma. It is also the `sigma_on`
+# knee of gates A and B, so at this sigma those gates are fully open and the
+# arm reproduces the adapter as trained.
+#
+# It is a development starting point, not a measured optimum. Lock it on the
+# dev pilot before the benchmark run.
+residual:
+  sigma_b: 0.429
+  gate: one
+  gate_note: >-
+    `one` is the ungated adapter exactly as trained. Phase 0 measured the
+    residual at this setting as 0.99x the norm of h_V itself, so the gate sweep
+    is a real knob and not a formality -- the risk here is an intervention that
+    is too strong, not one too weak to matter.
+  binder_masked: true
+  binder_masked_note: >-
+    The residual reaches binder rows only and is bit-exactly zero on target
+    rows. An unmasked residual would still perturb the messages the fixed
+    target sends through the encoder, which tests a different hypothesis.
+
+arms:
+  - id: R0
+    designer: proteinmpnn
+    context: complex
+    residual_source: none
+    role: external_baseline
+    note: >-
+      One shared ProteinMPNN row for all of Phase 1A, because every arm shares
+      the same backbones. It is NOT seven independent baselines, and repeating
+      it per arm would manufacture agreement out of one measurement.
+
+  - id: R1
+    context: binder_only
+    residual_source: none
+    pair: C1
+  - id: C1
+    context: binder_only
+    residual_source: matched
+    pair: R1
+
+  - id: R2
+    context: complex
+    residual_source: none
+    pair: C2
+  - id: C2
+    context: complex
+    residual_source: matched
+    pair: R2
+
+  - id: R3
+    context: complex_sc
+    residual_source: none
+    pair: C3
+  - id: C3
+    context: complex_sc
+    residual_source: matched
+    pair: R3
+    primary: true
+
+comparisons:
+  primary: C3 - R3
+  secondary: [C2 - R2, C1 - R1]
+  note: >-
+    One primary comparison, declared before any result is seen. The secondaries
+    are reported with a declared multiplicity correction or labelled secondary;
+    they are not three chances at a positive.
+
+# Controls run only on the primary context, and specified now rather than after
+# looking at results. They separate "the residual carries information about
+# THIS sample" from "a residual of about this size helps".
+mechanism_controls:
+  - id: C3_shuffled
+    of: C3
+    residual_source: matched
+    a_token_from: other_protein
+    donor_mapping: deterministic_other_protein_same_sigma
+    note: >-
+      a_token taken from a different protein at the same sigma, gate and scale
+      held fixed. If C3 beats R3 and C3_shuffled matches C3, the benefit is not
+      sample-specific and must not be described as target-information transfer.
+  - id: C3_mean
+    of: C3
+    residual_source: mean
+    note: >-
+      mu(sigma) from configs/mean_residual_phase1.json, estimated on TRAINING
+      proteins. A mean estimated from the benchmark panel would let the control
+      peek at the set it is scored on, which is the one thing this arm exists
+      to rule out.
+  - id: C3_zero_input
+    of: C3
+    residual_source: zero_input
+    note: >-
+      A(0, sigma). Deliberately not the same as bypass: normalization offsets,
+      biases and the sigma embedding make it non-zero, and how much of the
+      effect that alone explains is the question.
+  - id: C3_repack_only
+    of: C3
+    residual_source: matched
+    apply: final_repack_only
+    note: >-
+      Isolates packing changes from iterative sequence effects. A coupled arm
+      can improve packing without improving designability; that is a result in
+      itself and is reported as one.

@@ -27,6 +27,17 @@ Three things are verified per target:
 `--show-alternatives` additionally evaluates any `numbering_alternatives` an
 entry records. H1 has three surviving readings of its chain A crop and this is
 how they are compared side by side; see the note in the config.
+
+It also reports **non-amino-acid content**, which is not cosmetic. Eight of the
+ten depositions carry glycans, ions or ligands (NAG, MAN, FUC, BMA, ZN, CL, BR,
+GOL, PEG, SO4, 9KK/CCS/NH2); only 1tnf and 1www are clean. The featurization
+path this repo drives the backbone through (`CifFileProvider` ->
+`DesignSourceDataset`) does not tolerate them: `aa_clean` marks a non-amino-acid
+token -100 and a downstream lookup raises `IndexError: index -100 is out of
+bounds for dimension 0 with size 21`, or the crop fails an
+`InferenceSafeBinder` token-count check first. Measured: 5o45 fails, 1www
+succeeds. Any target with a non-empty count below must be cropped to amino
+acids before featurizing.
 """
 from __future__ import annotations
 
@@ -54,6 +65,25 @@ NO_PARTNER_ANGSTROMS = 13.0
 def _parse_range(text: str) -> tuple[int, int]:
     first, _, last = str(text).partition("-")
     return int(first), int(last)
+
+
+def _non_amino_acid_tokens(model) -> dict[str, int]:
+    """Residue names in the deposition that are not amino acids, waters aside.
+
+    Reported because the featurizer cannot consume them, not because they are
+    wrong: a glycan on an ectodomain is real structure. They have to be cropped
+    out before the backbone driver sees the file.
+    """
+    import gemmi
+
+    counts: dict[str, int] = {}
+    for chain in model:
+        for residue in chain:
+            info = gemmi.find_tabulated_residue(residue.name)
+            if (info and info.is_amino_acid()) or residue.name == "HOH":
+                continue
+            counts[residue.name] = counts.get(residue.name, 0) + 1
+    return counts
 
 
 def _load(mmcif_dir: Path, pdb_id: str):
@@ -129,6 +159,7 @@ def check_target(entry: dict[str, Any], mmcif_dir: Path) -> dict[str, Any]:
     result: dict[str, Any] = {
         "name": entry["name"], "pdb_id": entry["pdb_id"], "structure": str(path),
         "chains": {}, "hotspots": [], "problems": [],
+        "non_amino_acid_tokens": _non_amino_acid_tokens(model),
     }
     total = 0
     for chain_id, spec in chains.items():
@@ -242,6 +273,11 @@ def main() -> None:
                       f"{hotspot['res_name']:<4} nearest non-crop atom {shown}")
             for problem in result["problems"]:
                 print(f"       PROBLEM: {problem}")
+            hetero = result.get("non_amino_acid_tokens") or {}
+            if hetero:
+                shown = ", ".join(f"{k}x{v}" for k, v in sorted(hetero.items())[:6])
+                print(f"       non-amino-acid tokens: {shown}"
+                      f"  -- must be cropped before featurizing")
             if result.get("note"):
                 print(f"       note: {result['note']}")
             failures += len(result["problems"])

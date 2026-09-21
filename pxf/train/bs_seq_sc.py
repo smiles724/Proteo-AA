@@ -114,6 +114,7 @@ def joint_loss(
     multiplier: Optional[int] = None,
     self_cond_p: Optional[float] = None,
     generator: Optional[torch.Generator] = None,
+    allow_zero: bool = False,
     seq_settings=loss_fns.DEFAULT_LOSS_SETTINGS,
     reduction=loss_fns.DEFAULT_SIDECHAIN_REDUCTION,
 ) -> JointLoss:
@@ -123,6 +124,7 @@ def joint_loss(
         seq_module, features,
         adapters=adapters, a_token=a_token, sigma_b=sigma_b,
         roles=roles, source=source, gate=gate, mean=mean,
+        allow_zero=allow_zero,
     )
     if logits is None:
         raise ValueError(

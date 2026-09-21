@@ -178,10 +178,13 @@ def section7(example, ctx, args) -> dict[str, Any]:
 
     adapters, packer = ctx["adapters"], ctx["packer"]
     out: dict[str, Any] = {}
+    # A fresh adapter is zero at its output projection, so the residual IS
+    # identically zero here and that is the point -- check 4 requires it. The
+    # gradient is still live, so checks 1-3 are unaffected.
     common = dict(
         adapters=adapters, a_token=example["a_token"], sigma_b=example["sigma"],
         roles=example["roles"], masks=example["masks"],
-        multiplier=args.multiplier,
+        multiplier=args.multiplier, allow_zero=True,
     )
 
     # --- 4. zero-init parity (run FIRST, before any update) ----------------
@@ -196,7 +199,7 @@ def section7(example, ctx, args) -> dict[str, Any]:
         coupled_logits, conditioned, delta = conditioned_forward(
             seq_module, example["features"], adapters=adapters,
             a_token=example["a_token"], sigma_b=example["sigma"],
-            roles=example["roles"],
+            roles=example["roles"], allow_zero=True,
         )
     max_logit_delta = float((coupled_logits - baseline_logits).abs().max())
     max_h_delta = float(
@@ -295,7 +298,7 @@ def finite_difference_check(example, ctx, args) -> dict[str, Any]:
             adapters=adapters, a_token=example["a_token"],
             sigma_b=example["sigma"], roles=example["roles"],
             masks=example["masks"], lambda_seq=1.0, lambda_sc=0.0,
-            multiplier=args.multiplier,
+            multiplier=args.multiplier, allow_zero=True,
         ).sequence
         with torch.no_grad():
             parameter[index] = saved
@@ -338,7 +341,7 @@ def preflight(example, ctx, args) -> dict[str, Any]:
         adapters=ctx["adapters"], a_token=example["a_token"],
         sigma_b=example["sigma"], roles=example["roles"],
         masks=example["masks"], lambda_seq=1.0, lambda_sc=1.0,
-        multiplier=args.multiplier,
+        multiplier=args.multiplier, allow_zero=True,
     )
     joint.total.backward()
     if device.type == "cuda":
@@ -381,6 +384,7 @@ def smoke(examples, ctx, args) -> dict[str, Any]:
             sigma_b=example["sigma"], roles=example["roles"],
             masks=example["masks"], lambda_seq=args.lambda_seq,
             lambda_sc=args.lambda_sc, multiplier=args.multiplier,
+            allow_zero=True,
         )
         if not torch.isfinite(joint.total):
             return {"pass": False, "step": step, "reason": "non-finite loss"}

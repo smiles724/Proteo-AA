@@ -122,8 +122,16 @@ def binder_masked_residual(
     gate=None,
     device=None,
     dtype=None,
+    allow_zero: bool = False,
 ) -> Optional[torch.Tensor]:
     """``[1, L, c_h_V]`` residual, zero on target rows, or ``None`` for bypass.
+
+    ``allow_zero`` permits an identically-zero residual. It exists for exactly
+    one caller: a FRESHLY INITIALISED adapter, whose output projection is
+    zero by construction, and whose whole purpose at that moment is to
+    reproduce the donor bit-for-bit. The gradient is still live there --
+    dL/dW_out = dL/dh' * h_in^T is non-zero even when W_out is zero -- so
+    training works from step one. Everywhere else the default stands.
 
     ``None`` propagates from ``bs_policy.residual`` unchanged: the bypass arm
     and a gate that closed to exactly zero both mean "take the uncoupled path",
@@ -175,11 +183,13 @@ def binder_masked_residual(
             "masking failed: residual is non-zero on target rows. Check the "
             "binder mask orientation against the token axis."
         )
-    if bool(masked.abs().sum() == 0):
+    if not allow_zero and bool(masked.abs().sum() == 0):
         raise AssertionError(
             "residual is identically zero on the binder rows too. The coupled "
             "arm would be a duplicate of the uncoupled one; refusing to report "
-            "that as a null result."
+            "that as a null result. If this is a freshly initialised adapter, "
+            "whose output projection is zero by construction, pass "
+            "allow_zero=True and say so."
         )
     return masked
 

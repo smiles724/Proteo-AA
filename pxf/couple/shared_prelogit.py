@@ -128,6 +128,7 @@ def conditioned_forward(
     gate=None,
     mean=None,
     detach_a_token: bool = True,
+    allow_zero: bool = False,
 ):
     """Build the binder-masked residual and condition both heads with it.
 
@@ -139,7 +140,7 @@ def conditioned_forward(
     token = a_token.detach() if detach_a_token else a_token
     delta = binder_masked_residual(
         adapters, source, roles=roles, a_token=token, sigma=sigma_b,
-        mean=mean, gate=gate,
+        mean=mean, gate=gate, allow_zero=allow_zero,
     )
     logits, conditioned = condition(seq_module, features, delta)
     return logits, conditioned, delta

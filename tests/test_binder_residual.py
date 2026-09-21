@@ -195,3 +195,27 @@ def test_describe_handles_the_bypass_arm():
     report = describe_residual(None, roles, gate_value=0.0)
     assert report["applied"] is False
     assert report["n_binder"] == 2
+
+
+def test_allow_zero_permits_a_freshly_initialised_adapter():
+    """A fresh adapter is zero at its output projection BY DESIGN.
+
+    The zero-residual guard is right for a trained adapter -- an all-zero
+    residual there means the coupled arm silently duplicates the uncoupled one.
+    It is wrong for a fresh one, whose whole job at initialisation is to
+    reproduce the donor bit-for-bit so the routing can be checked. The two
+    requirements are both correct and are distinguished by allow_zero, not by
+    weakening the guard.
+    """
+    roles = ChainRoles.from_lengths(3, 3)
+    kwargs = dict(roles=roles, a_token=_a_token(6), sigma=torch.tensor([0.4]))
+    with pytest.raises(AssertionError, match="identically zero"):
+        binder_masked_residual(StubAdapters(value=0.0), "matched", **kwargs)
+
+    delta = binder_masked_residual(
+        StubAdapters(value=0.0), "matched", allow_zero=True, **kwargs
+    )
+    assert delta is not None and float(delta.abs().sum()) == 0.0
+    # Still a real tensor on the graph's terms, not None: the uncoupled arm is
+    # None, and a zero-init coupled arm is not the uncoupled arm.
+    assert delta.shape == (1, 6, 8)

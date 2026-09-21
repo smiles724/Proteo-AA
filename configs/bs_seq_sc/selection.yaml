@@ -1,0 +1,71 @@
+# Checkpoint-selection criterion for bs_seq_sc_v1, DECLARED BEFORE ANY RESULT.
+#
+# Written while the four pilot runs were still at step ~1500/2000 and no
+# evaluation had been run. That is the only condition under which a selection
+# rule is worth anything: a criterion chosen after seeing the curves selects
+# the curve you already liked.
+#
+# Section 8: "Select checkpoints by a predeclared development criterion that
+# considers both sequence loss and physical SC quality. Do not select a
+# sequence-loss winner that substantially degrades packing, or an SC winner
+# that collapses sequence diversity."
+
+evaluated_checkpoints: [500, 1000, 2000]
+panel: configs/gen_stress_prepared.marlowe.parquet   # the 31 val dimers
+weights: ema
+
+# ---------------------------------------------------------------- the rule
+#
+# Primary quantity: masked-sequence per-token NLL on the held-out panel,
+# MEDIAN over structures. Median and not mean, and this is not a stylistic
+# choice -- the side-chain loss on this data is heavy-tailed (median 0.0023,
+# max 28 in the training logs, ~10% of structures above 0.1), so a mean is a
+# statement about a handful of structures.
+primary: seq_per_token_nll        # lower is better
+primary_aggregate: median_over_structures
+
+# Guardrail: the checkpoint must not buy sequence quality by degrading
+# packing. A candidate is INELIGIBLE if its side-chain loss is worse than the
+# same arm's step-500 checkpoint by more than this, regardless of how good
+# its sequence number is.
+guardrail:
+  metric: sc_loss
+  aggregate: median_over_structures
+  max_relative_regression: 0.05    # 5% worse than that arm's own step 500
+  rationale: >-
+    The smoke run at lambda_seq=1.0 showed the SC loss RISING while the
+    sequence loss fell. That is the failure mode this guardrail exists for,
+    and it is the reason lambda_seq was calibrated to 0.0051 rather than
+    left at the nominal 1.0.
+
+# Tie-break, only among eligible checkpoints within 1% of the best primary:
+# prefer the EARLIER step. Later is not better by default, and an earlier
+# checkpoint that matches a later one is the less overfit of the two.
+tie_break: earlier_step
+tie_band_relative: 0.01
+
+# ------------------------------------------------------------- comparisons
+#
+# Selection happens PER ARM and per seed. The arms are then compared at their
+# selected checkpoints, paired per structure.
+comparisons:
+  primary: J03 - S03      # sequence supervision, routing held fixed
+  secondary:
+    - J03 - U03           # total benefit of the joint adapter
+    - S03 - U03           # whether the side-chain objective alone did anything
+  pairing: per_structure_then_aggregate
+  note: >-
+    A difference of medians is not the median difference. Differences are
+    computed per structure and then aggregated, with the fraction of
+    structures favouring the candidate reported alongside, so a median
+    resting on a few structures is visible.
+
+# Two seeds per arm. A result that does not hold in both is reported as
+# seed-dependent, not averaged into looking stable.
+seeds: [0, 1]
+seed_policy: report_both_and_agreement
+
+# What this criterion CANNOT decide: designability. That needs iterative
+# generation on shared de novo backbones and complex AF2-IG in the official
+# runtime environment. Reconstruction NLL is a statement about the objective.
+out_of_scope: [designability, binder_success, interface_quality]

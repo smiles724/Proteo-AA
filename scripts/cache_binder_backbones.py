@@ -224,6 +224,12 @@ def main() -> None:
     (out / "yaml").mkdir(parents=True, exist_ok=True)
 
     from pxf import provenance
+    from pxf.official.require import require_official_protenix
+
+    # Before anything expensive. Without this the failure is an ImportError
+    # four frames inside PXDesign's data pipeline that says nothing about why.
+    require_official_protenix("cache_binder_backbones")
+
     from pxf.official.runtime import build_runner
 
     manifest: dict[str, Any] = {

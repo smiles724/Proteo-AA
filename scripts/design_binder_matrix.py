@@ -56,10 +56,21 @@ ROW_COLUMNS = (
 )
 
 
-def parse_arm(spec: str) -> tuple[str, str | None]:
-    """``LABEL`` (uncoupled) or ``LABEL=/path/to/checkpoint.pt`` (coupled)."""
-    label, sep, path = spec.partition("=")
-    return label, (path if sep else None)
+def parse_arm(spec: str) -> tuple[str, str, str | None]:
+    """``(label, arm_id, checkpoint)`` from one --arm value.
+
+        U03                     uncoupled, arm_id U03
+        J03=ckpt.pt             coupled, arm_id J03
+        J03_s1:J03=ckpt.pt      coupled, arm_id J03, reported as J03_s1
+
+    The alias form exists because the seed policy in
+    `configs/bs_seq_sc/selection.yaml` is `report_both_and_agreement`: both
+    seeds of an arm are separate ROWS but the same arms.yaml DEFINITION, and
+    inventing a second definition per seed would let the two drift apart.
+    """
+    head, sep, path = spec.partition("=")
+    label, _, arm_id = head.partition(":")
+    return label, (arm_id or label), (path if sep else None)
 
 
 def load_adapters(path, *, c_token, node_dim, device, fampnn_sha256, weights):
@@ -184,15 +195,16 @@ def main() -> None:
     # ---- resolve the arms -------------------------------------------------
     arms = []
     for spec in args.arm:
-        label, ckpt = parse_arm(spec)
-        cfg = by_id.get(label)
+        label, arm_id, ckpt = parse_arm(spec)
+        cfg = by_id.get(arm_id)
         if cfg is None:
-            raise SystemExit(f"{label}: not an arm in {args.arms_config}")
+            raise SystemExit(f"{arm_id}: not an arm in {args.arms_config}")
         context = cfg.get("context", "complex_sc")
         wants_residual = cfg.get("residual_source", "none") != "none"
         if wants_residual and ckpt is None:
             raise SystemExit(
-                f"{label} declares residual_source={cfg['residual_source']!r} "
+                f"{label} ({arm_id}) declares "
+                f"residual_source={cfg['residual_source']!r} "
                 "but no checkpoint was given: --arm "
                 f"{label}=/path/to/checkpoint.pt"
             )
@@ -201,8 +213,9 @@ def main() -> None:
                 f"{label} declares residual_source: none but a checkpoint was "
                 "given. The uncoupled arm runs the uncoupled path."
             )
-        arms.append({"label": label, "context": context, "checkpoint": ckpt,
-                     "cfg": cfg, "adapters": None, "identity": None})
+        arms.append({"label": label, "arm_id": arm_id, "context": context,
+                     "checkpoint": ckpt, "cfg": cfg, "adapters": None,
+                     "identity": None})
 
     if not arms:
         raise SystemExit("no --arm given")
@@ -328,7 +341,8 @@ def main() -> None:
         "fampnn_sha256": fampnn_sha256,
         "weights": args.weights,
         "seed": args.seed,
-        "arms": [{"label": a["label"], "context": a["context"],
+        "arms": [{"label": a["label"], "arm_id": a["arm_id"],
+                  "context": a["context"],
                   "checkpoint": a["checkpoint"], "identity": a["identity"]}
                  for a in arms],
         "shared": shared,

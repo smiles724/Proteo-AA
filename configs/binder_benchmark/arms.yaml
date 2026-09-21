@@ -147,6 +147,26 @@ arms:
       adapters: different donor (0.3 vs 0.0), different application_mode
       (shared_prelogit vs packing_only) and different training task.
 
+  - id: S03
+    context: complex_sc
+    residual_source: matched
+    fampnn_variant: "0.3"
+    application_mode: shared_prelogit
+    pair: U03
+    weights: ema
+    seeds: [0, 1]
+    note: >-
+      The side-chain-ONLY arm of the same joint training run (lambda_seq 0.0,
+      lambda_sc 1.0). Registered because stage 1's PRIMARY comparison was
+      J03 - S03, not J03 - U03: it isolates the sequence objective with the
+      routing, the donor and the training data all held fixed.
+
+      Without it the benchmark would carry over only the stage-1 comparison
+      that came out null (J03 - U03) and omit the one that came out positive
+      (J03 - S03, -0.0155/-0.0128 nats per token, both seeds). That would
+      answer a question stage 1 had already answered and leave the
+      interesting one unmeasured.
+
   - id: R0
     designer: proteinmpnn
     context: complex
@@ -189,6 +209,7 @@ comparisons:
   primary: C3 - R3
   secondary: [C2 - R2, C1 - R1]
   new_main_family: J03 - U03
+  new_main_family_primary: J03 - S03   # mirrors selection.yaml's stage-1 primary
   new_main_family_note: >-
     The 0.3 family's own on/off pair, reported separately from the legacy
     0.0 family rather than pooled with it. Two seeds, reported per

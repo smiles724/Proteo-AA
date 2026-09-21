@@ -421,6 +421,22 @@ def merge_rows(existing, incoming):
     return list(merged.values())
 
 
+def _fmt(value):
+    """Fixed point where it reads well, scientific where it would round to zero.
+
+    A real 1.08e-05 improvement printed as "+0.0000" is indistinguishable from
+    exactly zero, and a degenerate-looking interval invites the reader to
+    assume the arms are identical when they are not.
+    """
+    if value is None:
+        return "-"
+    if value == 0:
+        return "0"
+    if abs(value) < 5e-4:
+        return f"{value:+.3e}"
+    return f"{value:+.4f}"
+
+
 def render_markdown(summary):
     """A readable report that states its own gaps."""
     lines = ["# Joint refinement evaluation", ""]
@@ -457,7 +473,7 @@ def render_markdown(summary):
                 continue
             lines.append(
                 f"| {c['candidate']} | {c['reference']} | {c['metric']} "
-                f"| {c['mean']:+.4f} | [{c['ci_low']:+.4f}, {c['ci_high']:+.4f}] "
+                f"| {_fmt(c['mean'])} | [{_fmt(c['ci_low'])}, {_fmt(c['ci_high'])}] "
                 f"| {c['n_targets']} |"
             )
         lines.append("")

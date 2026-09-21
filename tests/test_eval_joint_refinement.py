@@ -401,3 +401,34 @@ def test_load_order_does_not_leak_weights_between_checkpoints(tmp_path):
     live = dict(model.named_parameters())
     for name, value in same.items():
         assert torch.equal(live[name].detach().cpu(), value), name
+
+
+class TestReportNumberFormatting:
+    """A real effect must not print as an exactly-zero-looking one.
+
+    The report's fixed-point column rounds 1.08e-05 to "+0.0000", which reads
+    as "no difference" and makes a narrow interval look degenerate. Scientific
+    notation below the rounding floor is the difference between "too small to
+    matter" and "too small for this column".
+    """
+
+    def test_ordinary_magnitudes_stay_fixed_point(self):
+        assert R._fmt(0.1234) == "+0.1234"
+        assert R._fmt(-0.5) == "-0.5000"
+
+    def test_below_the_rounding_floor_goes_scientific(self):
+        assert R._fmt(1.08e-05) == "+1.080e-05"
+        assert R._fmt(-2e-06) == "-2.000e-06"
+
+    def test_exact_zero_is_not_dressed_up(self):
+        """Nothing to distinguish from zero: it *is* zero."""
+        assert R._fmt(0) == "0"
+        assert R._fmt(0.0) == "0"
+
+    def test_missing_is_a_dash_not_a_number(self):
+        assert R._fmt(None) == "-"
+
+    def test_the_boundary_is_where_rounding_would_lose_the_sign(self):
+        """5e-4 still survives four decimals; below it the digits are gone."""
+        assert R._fmt(5e-4) == "+0.0005"
+        assert R._fmt(4.9e-4).endswith("e-04")

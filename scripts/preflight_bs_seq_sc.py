@@ -305,7 +305,22 @@ def finite_difference_check(example, ctx, args, *, device_note="") -> dict[str, 
     from pxf.train.bs_seq_sc import joint_loss
 
     adapters = ctx["adapters"]
-    parameter = next(p for p in adapters.parameters() if p.requires_grad and p.numel() > 1)
+    # The OUTPUT PROJECTION, not merely the first parameter with more than one
+    # element. An earlier version took the latter and got bb_to_sc.norm.weight,
+    # whose gradient is legitimately zero while project_out is zero -- so the
+    # check compared 0 against 0 and passed vacuously. That is the same
+    # zero-init property check 1 is written around, and it makes any parameter
+    # upstream of project_out useless as a probe at initialisation.
+    parameter = None
+    for name, candidate in adapters.named_parameters():
+        if candidate.requires_grad and candidate.numel() > 1 and "project_out.weight" in name:
+            parameter = candidate
+            break
+    if parameter is None:
+        raise SystemExit(
+            "no bb_to_sc project_out.weight to probe; the finite-difference "
+            "check has no parameter with a live gradient at initialisation"
+        )
     index = (0,) * (parameter.dim() - 1) + (0,)
 
     def sequence_loss():
@@ -338,7 +353,13 @@ def finite_difference_check(example, ctx, args, *, device_note="") -> dict[str, 
     denom = max(abs(numerical), abs(analytical), 1e-8)
     rel = abs(numerical - analytical) / denom
     return {
-        "pass": bool(rel < args.fd_tolerance or abs(numerical - analytical) < 1e-7),
+        # A vacuous pass is a failure: if both are ~0 the probe is telling us
+        # nothing, and at initialisation that means the wrong parameter.
+        "pass": bool(
+            abs(analytical) > 1e-9
+            and (rel < args.fd_tolerance or abs(numerical - analytical) < 1e-7)
+        ),
+        "vacuous": bool(abs(analytical) <= 1e-9),
         "numerical": numerical, "analytical": analytical,
         "relative_error": rel, "eps": eps, "tolerance": args.fd_tolerance,
         "note": "one scalar, central differences; narrow on purpose -- an "

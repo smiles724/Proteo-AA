@@ -1,32 +1,46 @@
 # Phase 0 development complexes: held out, protein-only, and SCREENED.
 #
-# Four two-chain complexes from the recentPDB low-homology eval index
+# Two-chain complexes from the recentPDB low-homology eval index
 # (protenix_data/indices/recentPDB_low_homology_maxtoken1536.csv), the split
 # this repo already treats as held out. None is an AlphaProteo target, so
 # exercising the harness on them cannot contaminate the benchmark.
 #
-# "Screened" is the operative word, and it cost a round. The first selection
-# filtered on chain composition and three of four then failed at
-# featurization:
+# Regenerate with `python scripts/screen_dev_complexes.py --limit 6`, which is
+# where the selection rules live and why. Two of them were learned the hard
+# way and are worth stating here as well:
 #
-#   7bca  IndexError: index -100 is out of bounds ...  -- protein/DNA complex;
-#         the chain filter counted only its two protein chains
-#   7pz2  same                                          -- Cl- and SO4 present
-#   7qii  InferenceSafeBinder: strict token count 257 != native 287
+#   1. A deposition carrying anything that is not an amino acid cannot be
+#      featurized. `aa_clean` marks the token -100 and a 21-way lookup then
+#      indexes with it. This is why 7bca (protein/DNA) and 7pz2 (Cl-, SO4)
+#      were dropped; it also hits eight of the ten benchmark targets, which
+#      carry glycans or ions. See scripts/validate_binder_targets.py.
 #
-# `aa_clean` marks any non-amino-acid token -100 and a 21-way lookup then
-# indexes with it. So the entries below were chosen by ACTUALLY FEATURIZING
-# them, not by inspecting the file: of 27 protein-only two-chain candidates in
-# the mirror, these four survive `CifFileProvider -> DesignSourceDataset`.
-# `tokens` and `design_tokens` are the featurizer's own numbers.
+#   2. `binder_chain` below is a **label_asym_id**, which is what
+#      `CifFileProvider` matches. `binder_chain_author` is what the
+#      deposition, gemmi and a PDB page call the same chain. For 7ozt these
+#      differ -- author AAA/BBB, label A/B -- and an earlier selection that
+#      passed the author id was rejected by the featurizer for it. When they
+#      differ silently instead, as in 6m0j, the run designs the wrong
+#      molecule and still succeeds. See pxf/backbone/chain_ids.py.
 #
-# The same failure hits eight of the ten benchmark targets, which carry
-# glycans, ions or ligands; see scripts/validate_binder_targets.py. They need
-# cropping to amino acids before the backbone driver sees them.
+# 7p0s was in the previous revision of this file and is gone: it is a
+# four-chain deposition (author A, U, B, C) that an earlier filter recorded
+# as a dimer because it ignored chains under 50 residues, and the author id
+# "B" it carried selected label B -- a 24-residue peptide -- yielding a
+# 26-token design region that passed every Phase 0 check while testing the
+# wrong thing.
+#
+# `featurizer_tokens` and `featurizer_design_tokens` are the featurizer's own
+# numbers at crop_size 512, recorded when the entry was screened and checked
+# on every run by scripts/phase0_pack_hook_check.py. They are not decoration:
+# comparing against them is the only way a silently changed split is caught.
+# They exceed the resolved residue counts because the featurizer tokenizes
+# from entity_poly, so unobserved residues count too.
 #
 # Chain roles are a harness assignment (smaller chain is the binder), not a
-# claim that either chain is a designed binder. The authoritative split at run
-# time is the featurizer's `design_token_mask`, which ChainRoles is built from.
+# claim that either chain is a designed binder. The authoritative split at
+# run time is the featurizer's `design_token_mask`, which ChainRoles is built
+# from.
 #
 # The gen_stress val set (configs/gen_stress_prepared.parquet, 31 dimers with
 # roles already assigned) would be richer, but its prepared CIFs live only
@@ -34,26 +48,62 @@
 
 mmcif_dir: /scratch/m000137-pm06/Proteo-AA/pxf/protenix_data/mmcif
 source_index: recentPDB_low_homology_maxtoken1536.csv
-selection: protein-only two-chain entries that featurize; screened, not assumed
+selection: >-
+  protein-only two-chain entries whose featurized design region is the chain
+  it names; screened by scripts/screen_dev_complexes.py, not assumed
 
 complexes:
   - id: 7f7p
-    target_chain: A
     binder_chain: B
+    binder_chain_author: B
+    target_chain: A
+    target_chain_author: A
+    binder_res: 90
+    target_res: 96
     featurizer_tokens: 192
     featurizer_design_tokens: 96
   - id: 7f91
-    target_chain: A
     binder_chain: B
+    binder_chain_author: B
+    target_chain: A
+    target_chain_author: A
+    binder_res: 130
+    target_res: 131
     featurizer_tokens: 280
     featurizer_design_tokens: 140
-  - id: 7p0s
-    target_chain: A
-    binder_chain: B
-    featurizer_tokens: 348
-    featurizer_design_tokens: 26
+  - id: 7ozt
+    binder_chain: A
+    binder_chain_author: AAA
+    target_chain: B
+    target_chain_author: BBB
+    binder_res: 122
+    target_res: 125
+    featurizer_tokens: 307
+    featurizer_design_tokens: 132
   - id: 7ppb
-    target_chain: A
     binder_chain: B
+    binder_chain_author: B
+    target_chain: A
+    target_chain_author: A
+    binder_res: 95
+    target_res: 104
     featurizer_tokens: 466
     featurizer_design_tokens: 125
+  - id: 7tdq
+    binder_chain: A
+    binder_chain_author: A
+    target_chain: B
+    target_chain_author: B
+    binder_res: 85
+    target_res: 85
+    featurizer_tokens: 176
+    featurizer_design_tokens: 88
+  - id: 7uxr
+    binder_chain: B
+    binder_chain_author: B
+    target_chain: A
+    target_chain_author: A
+    binder_res: 138
+    target_res: 139
+    featurizer_tokens: 354
+    featurizer_design_tokens: 177

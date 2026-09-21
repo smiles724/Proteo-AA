@@ -9,8 +9,15 @@ job is submitted, because the failure it catches is silent: a crop range that
 selects nothing, or a hotspot that does not resolve, produces a perfectly
 well-formed design against an epitope nobody chose.
 
-Three things are verified per target:
+Four things are verified per target:
 
+  * every configured chain is resolved to the id the **featurizer** uses.
+    `CifFileProvider(binder_chain_ids=...)` matches `label_asym_id`; this
+    config, Table S1 and gemmi all speak author ids. They differ for three of
+    the ten -- SC2RBD auth E is label B, TrkA auth X is label C, VEGFA auth
+    V/W are labels C/D -- and 6m0j is the dangerous one, because label E
+    exists there as a glycan on ACE2, so the unconverted id selects something
+    instead of failing. See `pxf/backbone/chain_ids.py`;
   * every crop range selects at least one residue, and the per-chain residue
     count is reported so a range that quietly clipped against unobserved
     density is visible rather than assumed;
@@ -52,6 +59,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401,E402
 
 import yaml  # noqa: E402
+
+from pxf.backbone.chain_ids import ChainIdError, featurizer_chain_id  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "binder_benchmark" / "targets.yaml"
@@ -166,6 +175,12 @@ def check_target(entry: dict[str, Any], mmcif_dir: Path) -> dict[str, Any]:
         selected = _selected(model, chain_id, spec["crop"])
         total += len(selected)
         result["chains"][chain_id] = {"crop": spec["crop"], "n_residues": len(selected)}
+        try:
+            label = featurizer_chain_id(path, chain_id)
+        except ChainIdError as error:
+            label = None
+            result["problems"].append(f"chain {chain_id}: {error}")
+        result["chains"][chain_id]["featurizer_chain"] = label
         if not selected:
             result["problems"].append(
                 f"chain {chain_id} crop {spec['crop']} selected NO residues"
@@ -271,6 +286,15 @@ def main() -> None:
                 shown = "n/a" if distance is None else f"{distance:.2f} A"
                 print(f"       {hotspot['chain']}{hotspot['resid']:<4} "
                       f"{hotspot['res_name']:<4} nearest non-crop atom {shown}")
+            relabelled = {
+                c: d["featurizer_chain"] for c, d in result["chains"].items()
+                if d.get("featurizer_chain") and d["featurizer_chain"] != c
+            }
+            if relabelled:
+                shown = ", ".join(f"author {c} -> label {l}"
+                                  for c, l in relabelled.items())
+                print(f"       featurizer chain id differs: {shown}"
+                      f"  -- pass the label id to binder_chain_ids")
             for problem in result["problems"]:
                 print(f"       PROBLEM: {problem}")
             hetero = result.get("non_amino_acid_tokens") or {}

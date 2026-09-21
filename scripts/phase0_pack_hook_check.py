@@ -242,6 +242,38 @@ def _design(designer, inputs, delta_h, seed, counter=None):
     return out["designs"][0], stats
 
 
+def _assert_expected_split(entry, structure, out) -> None:
+    """The featurizer's split must be the one the config was screened on.
+
+    Selecting the wrong chain does not raise -- it returns a smaller, valid
+    design region -- so the only way to notice is to compare against a number
+    recorded when the entry was chosen. A crop-size change, a parser update or
+    an edited chain id all land here instead of quietly changing what the run
+    measures.
+    """
+    observed = {
+        "tokens": int(structure.topology.num_tokens),
+        "design_tokens": int(structure.design_mask.sum()),
+    }
+    out["featurizer"] = observed
+    expected = {
+        "tokens": entry.get("featurizer_tokens"),
+        "design_tokens": entry.get("featurizer_design_tokens"),
+    }
+    disagree = {
+        k: (expected[k], observed[k])
+        for k in observed if expected[k] is not None and expected[k] != observed[k]
+    }
+    if disagree:
+        detail = ", ".join(f"{k}: config {a}, featurizer {b}"
+                           for k, (a, b) in disagree.items())
+        raise SystemExit(
+            f"{entry['id']}: the featurized split is not the screened one "
+            f"({detail}). Re-run scripts/screen_dev_complexes.py rather than "
+            "editing the expected numbers."
+        )
+
+
 def run_complex(entry, ctx, args) -> dict[str, Any]:
     from pxf.couple.binder_residual import (
         ChainRoles, binder_masked_residual, describe_residual,
@@ -253,7 +285,11 @@ def run_complex(entry, ctx, args) -> dict[str, Any]:
     cif = Path(args.mmcif_dir or entry["_mmcif_dir"]) / f"{entry['id']}.cif"
 
     out: dict[str, Any] = {"id": entry["id"], "cif": str(cif), "checks": {}}
+    # `binder_chain` is a label_asym_id, not the author id the deposition
+    # shows -- that is what the featurizer matches. The dev config records
+    # both; see pxf/backbone/chain_ids.py for why they are not the same thing.
     structure = featurize(cif, entry["binder_chain"], args.crop_size).to(device)
+    _assert_expected_split(entry, structure, out)
 
     roles = ChainRoles(binder=structure.design_mask.reshape(-1).bool().cpu())
     out["roles"] = roles.identity()

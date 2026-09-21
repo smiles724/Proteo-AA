@@ -31,6 +31,13 @@
 #   OUT=/scratch/m000137-pm06/Proteo-AA/pxf/runs/pxf_phase0/run1 \
 #       sbatch scripts/slurm/marlowe/phase0_pack_hook.sh
 #
+# --device is passed as "cuda", not "auto": pxf.device.select_device treats any
+# non-empty string as an explicit request and hands it to torch.device, which
+# rejects "auto" outright. Explicit is also the right semantics for a job that
+# asked SLURM for a GPU -- if CUDA is unusable this should fail loudly rather
+# than quietly spend two hours on CPU. (The check script's own --device default
+# is still "auto" and will fail the same way if run without this wrapper.)
+#
 # PHASE0_EXTRA_ARGS is a separate variable from EXTRA_ARGS on purpose:
 # marlowe_env.sh exports EXTRA_ARGS="--mmcif-dir ..." for a different script
 # and argparse would exit 2 on it here.
@@ -76,7 +83,7 @@ python scripts/phase0_pack_hook_check.py \
     --seq-steps "$SEQ_STEPS" \
     --sigma-b "$SIGMA_B" \
     --gate "$GATE" \
-    --device auto \
+    --device "${DEVICE:-cuda}" \
     ${PHASE0_EXTRA_ARGS:-}
 
 echo "done: $OUT/phase0_report.json"

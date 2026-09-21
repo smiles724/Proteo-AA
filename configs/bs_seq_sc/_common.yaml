@@ -1,0 +1,63 @@
+# Shared settings for bs_seq_sc_v1. S03 and J03 differ in ONE number.
+#
+# S03 and J03 must be identical in examples, masks, backbone noise, SC noise,
+# effective batch size, optimizer schedule, update count and evaluation
+# settings, so that J03 - S03 isolates sequence supervision with the routing
+# held fixed. Keeping the shared half in one file is how that stays true when
+# someone edits one arm.
+
+task: bs_seq_sc_v1
+application_mode: shared_prelogit
+
+donor:
+  fampnn_variant: "0.3"
+  # Pinned by CONTENT, so copying the weights to another cluster stays valid
+  # and a same-label different-bytes donor is refused at startup.
+  fampnn_sha256: "8969b3f1f3c941178076c7800952595a18b56fd3828d15bb993d3ef537938a05"
+  pxdesign: /scratch/m000137-pm06/Proteo-AA/pxf/component_donors/pxdesign_v0.1.0.pt
+
+adapter:
+  init: fresh
+  zero_initialized: true
+  note: >-
+    Only the residual adapter trains. PXDesign and FaMPNN 0.3 stay frozen and
+    in eval mode. The existing 0.0 adapter is never loaded on top of 0.3:
+    identical widths and a clean load establish nothing about feature
+    distributions.
+
+noise:
+  # Backbone diffusion noise the a_token is read at. NOT FaMPNN's
+  # sequence-unmasking time and NOT side-chain diffusion time -- "0.3" in the
+  # donor name is a donor label, not an instruction to set any sigma to 0.3.
+  sigma_b: 0.429
+  # No inherited low-noise gate for the first shared-path comparison. The old
+  # gate was fitted to the SC-only objective and is not automatically right
+  # for sequence design.
+  gate: null
+
+masking:
+  mask_fraction: 0.5
+  # A binder side chain is a near-perfect readout of the residue the sequence
+  # head is being asked to predict, so every one is hidden.
+  binder_sidechain_dropout: 1.0
+  # Matches the complex_sc evaluation arm.
+  target_sidechain_dropout: 0.0
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  warmup_steps: 200
+  max_grad_norm: 1.0
+
+ema:
+  relative_length: 0.25
+
+data:
+  split: train
+  train_manifest: null   # supply with --train-manifest
+
+run:
+  max_steps: 2000
+  checkpoint_steps: [500, 1000, 2000]
+  seed: 0

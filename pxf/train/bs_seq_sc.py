@@ -258,3 +258,105 @@ def suggest_lambda_seq(
             "clamping is a decision, not a fix"
         )
     return out
+
+
+# --------------------------------------------------------------- example prep
+
+
+def prepare_example(
+    cif_path,
+    binder_chain_author: str,
+    *,
+    packer,
+    driver,
+    device,
+    sigma_b: float,
+    mask_fraction: float,
+    crop_size: int = 768,
+    binder_sidechain_dropout: float = 1.0,
+    target_sidechain_dropout: float = 0.0,
+    seed: int = 0,
+):
+    """One manifest row -> everything :func:`joint_loss` needs.
+
+    Shared by the preflight and the trainer on purpose. A second copy of this
+    is how a train/inference skew gets in: the masking policy, which
+    identities reach the encoder, and which reach the side-chain branch are
+    all decided here, and they have to be decided once.
+
+    ``binder_chain_author`` is converted to the label id the featurizer
+    matches. Passing the author id straight through silently selects the
+    wrong chain on any file where the two differ.
+    """
+    from pxf.backbone.chain_ids import featurizer_chain_id
+    from pxf.backbone.driver import featurize_structures, to_featurized
+    from pxf.couple.binder_masks import build_masks
+    from pxf.couple.binder_residual import ChainRoles
+    from pxf.couple.converter import PXFaRepresentationConverter
+    from pxf.couple.fampnn_iface import encode
+
+    label = featurizer_chain_id(cif_path, binder_chain_author)
+    sample_id, dataset = featurize_structures(
+        [str(cif_path)], crop_size=crop_size,
+        binder_chain_ids=[label], parser_dataset="Distillation",
+    )[0]
+    structure = to_featurized(sample_id, dataset[0]).to(device)
+    roles = ChainRoles(binder=structure.design_mask.reshape(-1).bool().cpu())
+
+    generator = torch.Generator().manual_seed(int(seed))
+    masks = build_masks(
+        roles, structure.aatype.reshape(1, -1).cpu(),
+        mask_fraction=mask_fraction,
+        binder_sidechain_dropout=binder_sidechain_dropout,
+        target_sidechain_dropout=target_sidechain_dropout,
+        generator=generator,
+    )
+    masks = BinderMaskSet(
+        roles=masks.roles,
+        seq_mask=masks.seq_mask.to(device),
+        seq_mlm_mask=masks.seq_mlm_mask.to(device),
+        sidechain_visible=masks.sidechain_visible.to(device),
+        aatype_encoder=masks.aatype_encoder.to(device),
+        aatype_true=masks.aatype_true.to(device),
+    )
+
+    converter = PXFaRepresentationConverter()
+    topology = structure.topology
+    inputs = converter.px_backbone_to_fampnn(
+        structure.backbone_target, topology.atom_names,
+        topology.atom_to_token_idx, topology.num_tokens,
+        res_names=topology.res_names, residue_index=topology.residue_index,
+        chain_index=topology.chain_index, aatype=structure.aatype,
+    ).to(device)
+
+    # ENCODER: masked identities. SC branch: ground truth, via
+    # batch_from_inputs. The asymmetry is the objective, not an oversight.
+    with torch.no_grad():
+        _logits, _h_v, features = encode(
+            packer.model, inputs.coords_af2, masks.aatype_encoder,
+            seq_mask=inputs.seq_mask,
+            missing_atom_mask=inputs.missing_atom_mask,
+            residue_index=inputs.residue_index,
+            chain_index=inputs.chain_index,
+            sidechain_visible=masks.sidechain_visible,
+        )
+    batch = batch_from_inputs(inputs, masks.aatype_true)
+
+    sigma = torch.full((1,), float(sigma_b), device=device)
+    bound = driver.bind(driver.conditioning(structure.feature_dict))
+    with torch.no_grad():
+        target = structure.backbone_target.float()
+        noise = torch.randn(
+            target.shape, generator=torch.Generator().manual_seed(int(seed))
+        ).to(device)
+        _bb0, a_token = bound((target + noise * float(sigma_b))[None], sigma)
+    if a_token is None:
+        raise RuntimeError(f"{cif_path}: the driver returned no a_token")
+    if a_token.dim() == 2:
+        a_token = a_token[None]
+
+    return {
+        "roles": roles, "masks": masks, "features": features, "batch": batch,
+        "a_token": a_token, "sigma": sigma,
+        "tokens": int(topology.num_tokens),
+    }

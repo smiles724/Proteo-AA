@@ -1,0 +1,55 @@
+# J03: Sequence + side chains -- the main method.
+#
+# lambda_seq is 'auto' DELIBERATELY. Section 7 requires it calibrated on a
+# training-only batch, and the trainer refuses to start until --lambda-seq
+# is supplied. Measured on val the balancing ratio is ~1e-3: the sequence
+# term is two to three orders of magnitude larger than the side-chain one,
+# and at 1.0 the SC loss rises while the sequence loss falls. A default of
+# 1.0 would be actively wrong, so it is not reachable by omission.
+#
+# Everything else is _common.yaml verbatim and MUST stay identical
+# between the two arms.
+
+task: bs_seq_sc_v1
+application_mode: shared_prelogit
+donor:
+  fampnn_variant: '0.3'
+  fampnn_sha256: 8969b3f1f3c941178076c7800952595a18b56fd3828d15bb993d3ef537938a05
+  pxdesign: /scratch/m000137-pm06/Proteo-AA/pxf/component_donors/pxdesign_v0.1.0.pt
+adapter:
+  init: fresh
+  zero_initialized: true
+  note: 'Only the residual adapter trains. PXDesign and FaMPNN 0.3 stay frozen and
+    in eval mode. The existing 0.0 adapter is never loaded on top of 0.3: identical
+    widths and a clean load establish nothing about feature distributions.'
+noise:
+  sigma_b: 0.429
+  gate: null
+masking:
+  mask_fraction: 0.5
+  binder_sidechain_dropout: 1.0
+  target_sidechain_dropout: 0.0
+optimizer:
+  lr: 0.0001
+  weight_decay: 0.0
+  betas:
+  - 0.9
+  - 0.999
+  warmup_steps: 200
+  max_grad_norm: 1.0
+ema:
+  relative_length: 0.25
+data:
+  split: train
+  train_manifest: null
+run:
+  max_steps: 2000
+  checkpoint_steps:
+  - 500
+  - 1000
+  - 2000
+  seed: 0
+  arm: J03
+objective:
+  lambda_seq: auto
+  lambda_sc: 1.0

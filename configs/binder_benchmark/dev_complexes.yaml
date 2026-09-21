@@ -1,0 +1,58 @@
+# Phase 0 development complexes: held out, and NOT the benchmark ten.
+#
+# Four small two-chain complexes drawn from the recentPDB low-homology eval
+# index (protenix_data/indices/recentPDB_low_homology_maxtoken1536.csv), which
+# is the split this repo already treats as held out. None of them is an
+# AlphaProteo target, so exercising the harness on them cannot contaminate the
+# benchmark.
+#
+# They are chosen small (186-197 tokens) because Phase 0 measures plumbing, not
+# biology: every check here is about whether the hook fires, whether the
+# residual lands on the intended rows, and whether the uncoupled path is
+# reproduced exactly. None of it needs a large or interesting interface, and a
+# small complex makes the checks cheap enough to re-run on every change.
+#
+# `binder` is the smaller chain, following the same rule
+# scripts/prepare_dimer_targets.py uses. It is a role assignment for the
+# harness, not a claim that this chain is a designed binder.
+#
+# The residue counts below come from a raw gemmi read of the deposited file and
+# are ADVISORY. The authoritative split is the featurizer's
+# `design_token_mask`, which is what ChainRoles is built from at run time: the
+# WeightedPDB parser expands the bioassembly, so its token count can differ.
+# On 7f7p the file reads 96 + 90 = 186 and the featurizer produces 96 + 96 =
+# 192. Phase 0 reports the featurizer's numbers, and they are the ones that
+# matter.
+#
+# The gen_stress dev set (configs/gen_stress_prepared.parquet, 31 val dimers)
+# would be the richer choice, but its prepared CIFs live only under /hai and
+# were not transferred; these come from a mirror that is present.
+
+mmcif_dir: /scratch/m000137-pm06/Proteo-AA/pxf/protenix_data/mmcif
+source_index: recentPDB_low_homology_maxtoken1536.csv
+
+complexes:
+  - id: 7f7p
+    target_chain: A
+    binder_chain: B
+    target_residues: 96
+    binder_residues: 90
+    total_residues: 186
+  - id: 7qii
+    target_chain: A
+    binder_chain: B
+    target_residues: 110
+    binder_residues: 76
+    total_residues: 186
+  - id: 7bca
+    target_chain: A
+    binder_chain: B
+    target_residues: 96
+    binder_residues: 93
+    total_residues: 189
+  - id: 7pz2
+    target_chain: B
+    binder_chain: A
+    target_residues: 100
+    binder_residues: 97
+    total_residues: 197

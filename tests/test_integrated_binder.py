@@ -154,8 +154,25 @@ class _StubDenoiser:
 
 def _canned_products(n_tokens=4, n_atom=12, c_h_V=6):
     from pxf.couple.integrated_event import EventProducts
+    from pxf.couple.visibility import PackedStructure, Visibility
 
     binder = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
+    vis = Visibility(
+        available=torch.zeros(1, n_tokens, 37),
+        missing_atom_mask=torch.ones(1, n_tokens, 37),
+        frame_valid=torch.ones(1, n_tokens, dtype=torch.bool),
+        sidechain_visible=torch.zeros(1, n_tokens),
+        exists=torch.zeros(1, n_tokens, 37),
+        stats={},
+    )
+    packed = PackedStructure(
+        h_packed=torch.ones(1, n_tokens, c_h_V),
+        coords37=torch.zeros(1, n_tokens, 37, 3),
+        aatype=torch.zeros(1, n_tokens, dtype=torch.long),
+        seq_mask=torch.ones(1, n_tokens),
+        visibility=vis,
+        psce=torch.zeros(1, n_tokens, 33),
+    )
     return EventProducts(
         bb0=torch.zeros(1, n_atom, 3),
         a_token=torch.zeros(1, n_tokens, 8),
@@ -168,6 +185,7 @@ def _canned_products(n_tokens=4, n_atom=12, c_h_V=6):
         availability=torch.zeros(1, n_tokens, 37),
         h_base=None,
         h_packed=torch.ones(1, n_tokens, c_h_V),
+        packed=packed,
         psce=torch.zeros(1, n_tokens, 33),
         binder_mask=binder,
         sigma=4.0,

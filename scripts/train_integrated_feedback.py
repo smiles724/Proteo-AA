@@ -76,6 +76,14 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--conditioning-cache", default=None,
+                        help="shared directory for memoised conditioning. "
+                             "Default is <out>/conditioning, i.e. per-run, "
+                             "which makes all four pilot runs recompute the "
+                             "same ~8s-per-complex tensors -- about 1.3 "
+                             "GPU-hours of duplicated work. Point every run "
+                             "at one path to share it; writes are atomic so "
+                             "concurrent runs are safe.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--verify-only", action="store_true",
                         help="build everything, check the gradient contract, "
@@ -132,7 +140,8 @@ def main() -> None:
     device = select_device(args.device)
     out = Path(args.out)
     (out / "checkpoints").mkdir(parents=True, exist_ok=True)
-    (out / "conditioning").mkdir(parents=True, exist_ok=True)
+    conditioning_dir = Path(args.conditioning_cache or (out / "conditioning"))
+    conditioning_dir.mkdir(parents=True, exist_ok=True)
 
     cache = json.loads((Path(args.train_cache) / "cache.json").read_text())
     identity = cache["identity"]
@@ -248,7 +257,7 @@ def main() -> None:
         key = record["sha256"][:32]
         if key in conditioning_cache:
             return conditioning_cache[key]
-        path = out / "conditioning" / f"{key}.pt"
+        path = conditioning_dir / f"{key}.pt"
         if path.is_file():
             blob = torch.load(str(path), map_location=device, weights_only=False)
         else:
@@ -262,7 +271,14 @@ def main() -> None:
                 "s_inputs": cond.s_inputs, "s_trunk": cond.s_trunk,
                 "z_trunk": cond.z_trunk,
             }
-            torch.save({k: _cpu(v) for k, v in blob.items()}, str(path))
+            # Atomic: write to a unique temporary then rename, so four
+            # concurrent runs sharing this directory cannot read a partially
+            # written file.
+            import os
+
+            temporary = path.with_suffix(f".{os.getpid()}.tmp")
+            torch.save({k: _cpu(v) for k, v in blob.items()}, str(temporary))
+            temporary.replace(path)
         from pxf.couple.pxdesign_iface import Conditioning
 
         cond = Conditioning(**{k: _to(v, device) for k, v in blob.items()})
@@ -465,7 +481,7 @@ def _save(path, conditioner, optimizer, ema, step, arm, policy, cache_identity,
             "cache_key": cache["cache_key"],
             "cache_identity": cache_identity,
             "n_cached_events": len(cache["events"]),
-            "cache_schema": identity.get("cache_schema"),
+            "cache_schema": cache_identity.get("cache_schema"),
             "initial_weight_digest": init_digest,
         },
     }, str(path))

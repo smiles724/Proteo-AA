@@ -74,13 +74,28 @@ step "deepspeed 0.15.4 LAST (audit section 6: resolver otherwise picks 0.19.x,"
 echo "  which needs torch>=2.4 and kills ANY protenix import via find_spec)"
 $PIP install -q --no-cache-dir "deepspeed==0.15.4" 2>&1 | tail -5
 
+step "FaMPNN runtime deps, with --no-deps where they would move torch"
+# The integrated path runs FaMPNN inside the official runtime, so its imports
+# must resolve here too. THE TRAP: torch_geometric and timm both declare a
+# torch dependency, and a plain `pip install` of them pulled torch 2.14.0 over
+# the pinned 2.3.1 -- pip warned, and the environment's positive control and
+# local-vs-official equivalence were invalidated by it. Install them with
+# --no-deps, and pin torchvision to the 0.18.1 that pairs with torch 2.3.1
+# (timm imports torchvision, so it cannot simply be omitted).
+$PIP install -q --no-cache-dir omegaconf hydra-core torchtyping gemmi joblib \
+  natsort dm-tree 2>&1 | tail -3
+$PIP install -q --no-cache-dir --no-deps torch_geometric timm 2>&1 | tail -3
+$PIP install -q --no-cache-dir "torchvision==0.18.1" \
+  --index-url https://download.pytorch.org/whl/cu121 2>&1 | tail -3
+
 step "numpy 1.26.3 LAST (torch/protenix both tolerate it; 2.x breaks biotite)"
 $PIP install -q --no-cache-dir "numpy==1.26.3" 2>&1 | tail -3
 
 step "VERSIONS"
 $P - <<'PY'
 import importlib.metadata as md
-for p in ("torch","protenix","deepspeed","numpy","pxdbench","pxdesign","biotite"):
+for p in ("torch","torchvision","protenix","deepspeed","numpy","pxdbench",
+          "pxdesign","biotite","omegaconf","timm","torch_geometric"):
     try: print(f"  {p:12s} {md.version(p)}")
     except Exception as e: print(f"  {p:12s} MISSING ({type(e).__name__})")
 PY

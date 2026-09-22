@@ -49,40 +49,7 @@ wastes the run, so it fails loudly instead. See
 
 ---
 
-## 2. Smoke first
-
-Six steps at a small crop, ~90 seconds. Run it before every 24h slot, and
-re-run it at your intended `CROP_SIZE` — the refinement pass runs the backbone
-twice, so peak memory is ~2× Stage II at the same crop.
-
-```bash
-R=/hai/scratch/yfsun/proteo_aa_runs
-SMOKE=1 CROP_SIZE=512 \
-LOAD_CHECKPOINT=$R/protenix_monomer_sidechain_warmup/fixed_global_decay_from_50k/checkpoints/step52500.pt \
-AA_HEAD_CHECKPOINT=$R/protenix_monomer_aa_head_on_stage2/from_stage2_65000/checkpoints/step9000.pt \
-sbatch scripts/training/slurm_stage3_coevolution_binder.sh
-```
-
-A healthy smoke log shows all four:
-
-```
-Model has 262.05M parameters (262.05M trainable)
-Alternating training: 116.56M side-chain params, 145.49M backbone-group params
-Loaded .../step52500.pt (missing=21, unexpected=0)
-Overlaid 10 AA head tensor(s) from .../step9000.pt
-step=1 ... sc_local=4.097 ... bb_post=41.64
-```
-
-`missing=21` is expected — the co-evolution modules (`a_token_fusion_pre`,
-`q_atom_fusion`, `hres_injector`, `refinement_pass_embedding`) do not exist in a
-Stage II checkpoint and are created fresh here. **`unexpected=0` is the one to
-watch**: anything else means the model you built is not the one the checkpoint
-was trained as. A non-zero `bb_post` confirms the refinement pass is actually
-running.
-
----
-
-## 3. Full run
+## 2. Full run
 
 Drop `SMOKE=1`:
 
@@ -125,20 +92,9 @@ source tied to the 491-protein validation set.
 
 **The ratio is a starting point, not an optimum.** There is no ablation over it.
 
-### Common overrides
-
-```bash
-CROP_SIZE=384                    # first thing to drop if you OOM
-MAX_STEPS=50000
-LR=2e-5
-COMPLEX_PROVIDER=pinder          # or protenix; default both
-STAGE2_END_MONOMER_FRAC=0.10     # more aggressively binder-focused
-RUN_ROOT=$RUNS_ROOT/my_named_run
-```
-
 ---
 
-## 4. Selecting a checkpoint
+## 3. Selecting a checkpoint
 
 **The `val_*` lines in the training log measure monomers, not binders.**
 `build_eval_dataloader` pins the validation set to monomers
@@ -164,7 +120,7 @@ aa_head_on_stage2` for a Stage III-config head).
 
 ---
 
-## 5. Known limitations
+## 4. Known limitations
 
 **PINDER train is cluster-redundant and sampled uniformly over rows.**
 1,437,458 rows over 40,231 clusters, largest cluster 82,272 rows. Effective
@@ -189,15 +145,3 @@ against GT backbone frames and 5.82 Å² against predicted ones. Stage III is
 where that gap has to close; do not expect the Stage II packing number here.
 
 ---
-
-## 6. Troubleshooting
-
-| Symptom | Cause |
-|---|---|
-| `mkdir: cannot create directory '/var/lib/slurm/logs'` | `REPO_ROOT` resolved to the sbatch spool copy. Submit from the repo root or pass `REPO_ROOT=`. Current script probes for the checkout, so this should not recur. |
-| `ERROR: could not locate the Proteo-AA checkout` | none of the script's dir, `SLURM_SUBMIT_DIR`, `$PWD` is a checkout. Pass `REPO_ROOT=`. |
-| `Permission denied` writing a `.cif` under `cif_cache` | using the shared PINDER tree read-only. Set `PINDER_ROOT` and `PINDER_CIF_CACHE` to your own scratch. |
-| `ERROR: missing directory .../protenix_data` | `PROTEOAA_DATA_ROOT` wrong. |
-| `AttributeError: 'Namespace' object has no attribute '<flag>'` | an eval script's parser is missing a flag `build_configs`/`build_components` reads. Call `fill_missing_args(args)` after its `parse_args()`. |
-| `unexpected=N` (N>0) on load | model built differs from the checkpoint. For an already-fitted model, reconcile with `adopt_feedback_channels_from_checkpoint`. |
-| OOM early in training | lower `CROP_SIZE` (512 → 384). The refinement pass doubles the backbone's activation memory. |

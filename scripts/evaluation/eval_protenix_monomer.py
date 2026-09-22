@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-aa-loss", action="store_true")
 
     p.add_argument("--disable-sidechain", action="store_true")
+    # Leakage-safe default, declared here so it shows in this script's --help.
+    p.add_argument(
+        "--allow-binder-sidechain-leakage", action="store_true",
+        help="LEAKAGE ABLATION ONLY; leave off.",
+    )
     p.add_argument("--enable-coevolution", action="store_true")
     p.add_argument(
         "--predicted-frame", action=argparse.BooleanOptionalAction, default=True
@@ -99,8 +104,12 @@ def main() -> None:
         build_components,
         build_configs,
         build_monomer_index,
+        fill_missing_args,
     )
 
+    # Flags `build_configs`/`build_components` read but this parser omits; filled
+    # from the training parser's defaults (see `fill_missing_args`).
+    fill_missing_args(args)
     apply_training_stage_args(args)
     repo_root = _bootstrap_paths(args)
     os.environ.setdefault("PROTENIX_ROOT_DIR", str(Path(args.data_root).resolve()))
@@ -184,6 +193,24 @@ def main() -> None:
     )
 
     configs = build_configs(args, device)
+    # Honour the layout the checkpoint was trained with, whatever --training-stage
+    # was asked for. Without this you cannot evaluate a current-contract checkpoint
+    # under `sidechain_warmup` at all: the stage leaves centre_coord_input at its
+    # config default (False), the checkpoint records True, and
+    # `_check_sidechain_arch` aborts the load. The checkpoint records the layout
+    # precisely so a consumer can honour it -- and an additive key that disagreed
+    # would not abort, it would silently evaluate a channel that has no weights.
+    try:
+        from train_protenix_monomer import adopt_sidechain_arch_from_checkpoint
+    except ImportError:
+        adopt_sidechain_arch_from_checkpoint = None
+    if adopt_sidechain_arch_from_checkpoint is not None:
+        import copy as _copy
+
+        shim = _copy.copy(args)
+        shim.load_checkpoint = str(args.checkpoint)   # the helper reads this name
+        adopt_sidechain_arch_from_checkpoint(configs, shim)
+
     trainer = PXDesignTrainer(
         configs=configs,
         components=eval_components,

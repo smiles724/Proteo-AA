@@ -88,46 +88,80 @@ def load_payload(path) -> dict[str, Any]:
     return torch.load(str(path), map_location="cpu", weights_only=False)
 
 
-def _checked_design_mask(payload: dict[str, Any]) -> np.ndarray:
-    """Per-token design mask, with the three independent markers cross-checked.
+def check_design_mask(
+    mask: np.ndarray,
+    *,
+    res_names: np.ndarray,
+    atom_to_token: np.ndarray,
+    n_tokens: int,
+    conditional_label: Optional[np.ndarray] = None,
+    binder_length: Optional[int] = None,
+    what: str = "payload",
+) -> np.ndarray:
+    """Cross-check the design mask against every other marker available.
 
     ``design_mask`` alone would be enough to *run*. It is not enough to trust:
-    if the payload were ever regenerated with a different token ordering, a
-    stale mask would silently designate target rows as binder and every arm
-    would agree with every other arm about the wrong thing. ``res_name`` and
-    ``conditional_label`` come from different parts of the featurizer, so
-    requiring all three to coincide is a real check.
-    """
-    topology = payload["topology"]
-    ann = topology["annotations"]
-    a2t = np.asarray(topology["atom_to_token_idx"])
-    n_tokens = int(topology["n_tokens"])
+    a stale or mis-ordered mask would designate target rows as binder and every
+    arm would agree with every other arm about the wrong thing. ``res_name ==
+    'xpb'`` and ``conditional_label`` come from different parts of the
+    featurizer, so requiring them to coincide is a real check.
 
-    mask = np.asarray(topology["design_mask"]).astype(bool)
+    The cached payloads carry all three. The live official path carries
+    ``res_name`` but no ``conditional_label``, so the check runs on what exists
+    and REFUSES if fewer than two independent markers are available -- one
+    marker agreeing with itself is not evidence.
+    """
+    mask = np.asarray(mask).astype(bool)
+    checked = ["design_mask"]
 
     by_resname = np.zeros(n_tokens, dtype=bool)
-    is_xpb = np.asarray(ann["res_name"]) == DESIGN_RES_NAME
-    by_resname[a2t[is_xpb]] = True
-
-    by_label = np.zeros(n_tokens, dtype=bool)
-    not_cond = ~np.asarray(ann["conditional_label"]).astype(bool)
-    by_label[a2t[not_cond]] = True
-
-    if not (np.array_equal(mask, by_resname) and np.array_equal(mask, by_label)):
+    is_xpb = np.asarray(res_names) == DESIGN_RES_NAME
+    by_resname[atom_to_token[is_xpb]] = True
+    if not np.array_equal(mask, by_resname):
         raise ValueError(
-            f"{payload.get('design_id')}: the payload's three markers of the "
-            f"design region disagree -- design_mask sums to {int(mask.sum())}, "
-            f"res_name=='{DESIGN_RES_NAME}' to {int(by_resname.sum())}, "
-            f"conditional_label==False to {int(by_label.sum())}. Refusing to "
-            "guess which one names the binder."
+            f"{what}: design_mask selects {int(mask.sum())} token(s) but "
+            f"res_name=='{DESIGN_RES_NAME}' selects {int(by_resname.sum())}. "
+            "Refusing to guess which one names the binder."
         )
-    expected = int(payload["binder_length"])
-    if int(mask.sum()) != expected:
+    checked.append("res_name")
+
+    if conditional_label is not None:
+        by_label = np.zeros(n_tokens, dtype=bool)
+        not_cond = ~np.asarray(conditional_label).astype(bool)
+        by_label[atom_to_token[not_cond]] = True
+        if not np.array_equal(mask, by_label):
+            raise ValueError(
+                f"{what}: design_mask and conditional_label==False disagree "
+                f"({int(mask.sum())} vs {int(by_label.sum())} tokens)"
+            )
+        checked.append("conditional_label")
+
+    if len(checked) < 2:
         raise ValueError(
-            f"{payload.get('design_id')}: design mask selects {int(mask.sum())} "
-            f"tokens but binder_length is {expected}"
+            f"{what}: only {checked} available to identify the design region; "
+            "at least two independent markers are required"
+        )
+    if binder_length is not None and int(mask.sum()) != int(binder_length):
+        raise ValueError(
+            f"{what}: design mask selects {int(mask.sum())} tokens but "
+            f"binder_length is {binder_length}"
         )
     return mask
+
+
+def _checked_design_mask(payload: dict[str, Any]) -> np.ndarray:
+    """The cached-payload entry point: all three markers present."""
+    topology = payload["topology"]
+    ann = topology["annotations"]
+    return check_design_mask(
+        topology["design_mask"],
+        res_names=np.asarray(ann["res_name"]),
+        atom_to_token=np.asarray(topology["atom_to_token_idx"]).astype(int),
+        n_tokens=int(topology["n_tokens"]),
+        conditional_label=np.asarray(ann["conditional_label"]),
+        binder_length=int(payload["binder_length"]),
+        what=str(payload.get("design_id")),
+    )
 
 
 def to_design_inputs(
@@ -146,15 +180,61 @@ def to_design_inputs(
 
     topology = payload["topology"]
     ann = topology["annotations"]
-    n_tokens = int(topology["n_tokens"])
-    a2t = np.asarray(topology["atom_to_token_idx"]).astype(int)
-    x0 = payload["x0"].reshape(-1, 3).float()
+    return build_design_inputs(
+        x0=payload["x0"],
+        a_token=payload["a_token"],
+        sigma=float(payload["actual_sigma"]),
+        atom_names=np.asarray(ann["atom_name"]),
+        res_names=np.asarray(ann["res_name"]),
+        atom_to_token=np.asarray(topology["atom_to_token_idx"]).astype(int),
+        n_tokens=int(topology["n_tokens"]),
+        design=_checked_design_mask(payload),
+        residue_index=topology["residue_index"],
+        asym_id=topology["asym_id"],
+        design_id=str(payload["design_id"]),
+        target=str(payload["target"]),
+        binder_length=int(payload["binder_length"]),
+        context=context,
+        device=device,
+    )
+
+
+def build_design_inputs(
+    *,
+    x0,
+    a_token,
+    sigma: float,
+    atom_names,
+    res_names,
+    atom_to_token,
+    n_tokens: int,
+    design,
+    residue_index,
+    asym_id,
+    design_id: str,
+    target: str,
+    binder_length: int,
+    context: str,
+    device=None,
+) -> DesignInputs:
+    """The mapping itself, on explicit arrays.
+
+    Two callers share it and must: the cached-backbone matrix
+    (:func:`to_design_inputs`) and the integrated sampler, which has a live
+    ``x0`` and no cached payload. A second implementation of "which rows are
+    the binder and where do their atoms go" is how the two protocols would
+    drift into answering different questions.
+    """
+    if context not in CONTEXTS:
+        raise ValueError(f"unknown context {context!r}; choose from {CONTEXTS}")
+    a2t = np.asarray(atom_to_token).astype(int)
+    x0 = x0.reshape(-1, 3).float()
     if x0.shape[0] != a2t.shape[0]:
         raise ValueError(
             f"x0 has {x0.shape[0]} atoms but atom_to_token_idx has {a2t.shape[0]}"
         )
-
-    design = _checked_design_mask(payload)
+    design = np.asarray(design).astype(bool)
+    ann = {"atom_name": atom_names, "res_name": res_names}
 
     # ---- scatter atoms into atom37 ----------------------------------------
     coords = torch.zeros(n_tokens, atom37.NUM_ATOM37, 3, dtype=torch.float32)
@@ -188,9 +268,9 @@ def to_design_inputs(
     # A target row can only be held fixed if it actually has an identity.
     fixed = (~binder) & (aatype != atom37.UNKNOWN_AA_INDEX)
 
-    residue_index = topology["residue_index"].long().clone()
-    chain_index = topology["asym_id"].long().clone()
-    a_token = payload["a_token"].reshape(n_tokens, -1).float()
+    residue_index = torch.as_tensor(residue_index).reshape(-1).long().clone()
+    chain_index = torch.as_tensor(asym_id).reshape(-1).long().clone()
+    a_token = a_token.reshape(n_tokens, -1).float()
 
     # ---- context level -----------------------------------------------------
     if context == "binder_only":
@@ -239,10 +319,10 @@ def to_design_inputs(
         # The tapped event's sigma INCLUDING churn. The scheduled value is
         # exactly half of it (churn factor 2.0) and conditioning A_BS on that
         # would query the adapter at half the noise the denoiser saw.
-        sigma=float(payload["actual_sigma"]),
-        design_id=str(payload["design_id"]),
-        target=str(payload["target"]),
-        binder_length=int(payload["binder_length"]),
+        sigma=float(sigma),
+        design_id=design_id,
+        target=target,
+        binder_length=int(binder_length),
         context=context,
     )
 

@@ -96,7 +96,7 @@ def test_disagreeing_markers_are_refused():
     mask = np.asarray(payload["topology"]["design_mask"]).copy()
     mask[0] = ~mask[0]
     payload["topology"]["design_mask"] = torch.from_numpy(mask)
-    with pytest.raises(ValueError, match="markers of the|design mask selects"):
+    with pytest.raises(ValueError, match="Refusing to guess|design mask selects"):
         _checked_design_mask(payload)
 
 

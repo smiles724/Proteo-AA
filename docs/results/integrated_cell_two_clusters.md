@@ -62,10 +62,16 @@ cells. The existing 480-design comparison on the cached-backbone path is the
 only powered estimate available and it is null: J03 26.9% vs U03 26.5%,
 +0.42 pp, p = 0.86.
 
-**Not a feedback result.** The feedback arms contributed zero distinct
-sequences in either cell. Their ipTM differs from their matching J03 arm by
-0.002-0.006, which is the AF2 run-to-run floor, not a measurement of the
-intervention.
+**Not a feedback result, and not capable of being one.** The feedback arms
+contributed zero distinct sequences in either cell, and that is **enforced by
+the protocol**: the three arms in an A_BS seed share one event decode, and
+`_finalise` repacks that fixed event sequence onto each arm's backbone. No
+sequence-design step runs after the feedback. Their ipTM differs from the
+matching J03 arm by 0.002-0.006 -- the AF2 run-to-run floor -- because they
+are folding the same sequence on a backbone that moved 0.005 Å. This
+comparison isolates the geometric contribution of feedback by design; it
+cannot measure a sequence effect, and the sequence equality says nothing
+about the intervention's magnitude.
 
 ## Consequence for sizing
 

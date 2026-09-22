@@ -1,75 +1,108 @@
-# Before the smoke: size the feedback, then re-aim it
+# Before the smoke: measure the correction, not the sequence
 
-Decision taken 2026-09-22. The 28-design smoke is **on hold**. Two cheap
-measurements come first, in this order.
+Revised 2026-09-22 after review. **The previous version of this document was
+wrong on its central point** and is superseded. What it got wrong is recorded
+below, because the error is instructive.
 
-## Why
+## The correction
 
-Your own numbers bound the effect. Event-to-final displacement is
-**0.198-0.201 Å** -- that is the entire remaining trajectory after the event.
-The feedback moves the backbone 0.005-0.006 Å, ~3% of all the motion left.
+Identical sequences across the feedback arms are **enforced by the
+protocol**, not produced by a perturbation too small to flip an argmax.
 
-So this is not a discretisation problem and not an inert intervention. It is
-an **injection point** problem: the feedback fires once, at
-`--event-sigma 0.429`, late in the ladder where there is almost no trajectory
-left to amplify it. The ceiling is structural, and it is set by a flag. Even
-a perfect residual could not move the backbone more than ~0.2 Å from there.
+The three arms within one A_BS seed share **one event decode**
+(`_one_cell`, the `shared` variable), and `_finalise` repacks *that* event
+sequence onto each arm's final backbone -- its docstring says so, and it
+reads `products.binder_sequence` and `products.aatype` from the shared
+pre-feedback event products. **There is no sequence-design step after the
+feedback.** The feedback changes the backbone; nothing re-decodes.
 
-## Measurement 1: the logit margin (your proposal -- do it)
+So a much larger backbone correction would still produce identical
+sequences under this implementation. The fixed-sequence comparison is
+deliberate -- it isolates the *geometric* contribution of feedback -- and
+sequence equality is therefore not evidence of anything about the
+intervention's size.
 
-On the existing cell, no new generation.
+**What was wrong before.** This document claimed an "injection point
+problem": that the feedback fires too late for a residual to express itself,
+with 0.2 Å of event-to-final displacement as the ceiling. Two errors.
+First, the sequence-equality observation it was built to explain has a
+structural cause and needed no dynamical explanation at all. Second, 0.2 Å
+is the displacement of the *observed, unintervened* trajectory. It is a
+useful scale, not a bound: an intervened trajectory can differ in direction
+and magnitude, and whether a correction is preserved or suppressed is a
+measurement, not an inference.
 
-At each decode position, report the margin between the top-1 logit and the
-runner-up, and the change in that margin induced by the feedback residual.
-What the sizing decision needs:
+## Sigma direction
 
-- the distribution of |margin| over positions, not just its mean;
-- the number of positions within the feedback-induced shift of flipping;
-- the ratio (typical margin) / (feedback-induced shift), which is the factor
-  by which the intervention is under-powered.
+Sigma **decreases** along the trajectory. The Marlowe run confirms the
+geometry: `event step 350: requested 0.4290 -> actual 0.4453`, i.e. step 350
+of 400 at sigma 0.429.
 
-If that ratio is orders of magnitude, the feedback arms are duplicates at any
-scale and the smoke should not run them. Say so in those terms.
+| change | consequence |
+|---|---|
+| **lower** than 0.429 | later, cleaner event; fewer remaining steps |
+| **higher** than 0.429 | earlier, noisier event; more remaining steps |
 
-## Measurement 2: where does the trajectory still have room?
+An earlier event needs a **higher** sigma. Anything in the previous version
+implying otherwise is wrong.
 
-The quantity that bounds the intervention is the remaining trajectory length,
-so measure it directly rather than reasoning about the ladder.
+## The measurements, in order
 
-1. Dump the schedule with both sigmas, since only the churned one is
-   selected on:
-   ```
-   schedule = denoiser.schedule(400)
-   # for each step: scheduled c_tau, churned t_hat, and select_event's choice
-   ```
-   Record it as an artifact -- `docs/` has no copy of this ladder and the
-   scheduled/churned 2x factor has already caused one misreading.
-2. Run **U03 alone** (cheapest arm, no adapter, no feedback) at four event
-   sigmas spanning the ladder, one cell each, and record `ev->fin` for each.
-   That is ~4 x 20 s of arm time.
-3. Report `ev->fin` as a function of event sigma.
+Keep `--event-sigma 0.429` for the existing matched experiment. It is A_BS's
+training noise, and both A_BS and the feedback adapter need support
+appropriate to any new event distribution.
 
-Pick the event sigma where `ev->fin` is on the order of **2-5 Å** -- enough
-remaining trajectory that a residual can express itself -- and note what that
-costs in the other direction: an earlier event means the packed side chains
-the feedback reads are further from the final structure, so the readout it
-was trained against degrades. That trade is the actual experimental design
-question, and it should be stated with both numbers in hand.
+**1. Is the immediate correction meaningful?**
+Compare the provisional `bb0` against the corrected `bb1` at the *identical*
+noisy state and sigma. This is the intervention's own magnitude, before the
+trajectory has a chance to do anything to it.
 
-## Constraint: the adapters were trained at sigma 0.429
+**2. Does the remaining trajectory preserve or suppress it?**
+Compare feedback and no-feedback final backbones. Report binder-only and
+interface geometry **alongside** whole-complex RMSD -- a whole-complex number
+is dominated by the target, which does not move.
 
-`--event-sigma 0.429` is J03's training noise. Moving the event changes the
-distribution the feedback adapter sees at inference from the one it was
-trained on. Report any re-aimed cell as **off-distribution for the adapter**,
-and do not quietly present it as the same arm. If re-aiming looks promising,
-the honest follow-up is retraining the feedback at the new sigma, not
-reusing these checkpoints at it.
+**3. Would the corrected geometry change sequence preferences?**
+Evaluate FaMPNN logits on the two geometries under identical sequence masks,
+context, adapter policy, and randomness. This is a **new diagnostic**:
+current inference never makes this comparison, because the sequence is fixed
+at the event.
 
-## What not to conclude from the scored cell
+Report *distributions* of logit changes and margins, and the change in
+sampling probability. Do **not** report a single "margin / shift"
+amplification factor -- the shift has to favour the specific competing
+residue, not merely be large, and FaMPNN's decoder is iterative and
+stochastic over 101 steps, so a per-position static margin does not compose
+into a flip probability.
 
-J03_bs0's ipTM 0.774 against U03's 0.322 on a bit-identical backbone is a
-genuinely clean contrast, and you were right to say so. It is also **one
-sequence per arm**, and there is already a 480-design null on exactly this
-comparison from the cached-backbone path: J03 26.9% vs U03 26.5%, +0.42 pp,
-p = 0.86. One cell does not overturn n = 480. Carry that prior into the
-write-up so the number is not read as an effect.
+**4. Would an earlier intervention help?**
+Record states at several actual sigmas -- an illustrative grid is
+**0.429, 1, 2, 4** mapped onto the actual schedule -- and examine how the
+correction propagates, plus the chemistry at each. Record all four points on
+**one unadapted trajectory** rather than running four independent
+trajectories: cheaper, and it removes between-trajectory variance from the
+comparison.
+
+Do not select a sigma because displacement reaches some target value.
+Displacement alone cannot rank injection points.
+
+## If the objective is for feedback to change the sequence
+
+Moving the event cannot achieve that while the sequence stays fixed. It
+requires a controlled **sequence re-decode after the corrective backbone
+call, within the same trajectory** -- a protocol change, not a parameter
+change. That is a design decision, not a diagnostic, and it should be taken
+deliberately.
+
+## Priors to carry
+
+The 480-design cached-backbone null on J03 - U03 (+0.42 pp, p = 0.86) is
+relevant prior evidence, but it ran a **different inference protocol**: that
+path selects the event by *scheduled* sigma (0.4355, actual 0.8711 after
+churn) while the integrated path selects by *actual* churned sigma (0.429).
+Cite it as a prior, not as a directly comparable measurement.
+
+And matched backbones alone do not isolate a sequence effect: different
+sequences imply different side-chain packing, so a "bit-identical backbone"
+contrast still confounds sequence with packing and with anything
+sequence-dependent in scoring.

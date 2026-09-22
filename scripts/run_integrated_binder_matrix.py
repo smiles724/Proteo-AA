@@ -207,7 +207,11 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     import torch
 
     print(f"\n=== {name} L{length} seed {gen_seed} ===")
-    runner = api["build_runner"](
+    # build_runner returns (runner, configs). Binding the tuple to `runner`
+    # is the same defect the earlier handoff recorded for
+    # cache_binder_backbones.py; it surfaces as
+    # `'tuple' object has no attribute 'design_test_dl'`.
+    runner, _configs = api["build_runner"](
         str(prepared), str(out / "pxdesign" / f"{name}_L{length}_s{gen_seed}"),
         load_checkpoint_dir=args.checkpoint_dir, n_step=args.n_step,
         n_sample=1, use_msa=args.use_msa, dtype=args.dtype,
@@ -506,18 +510,17 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
 
 
 def _single_length_yaml(source, length, out):
-    """One YAML per (target, length), via cache_binder_backbones' own helper."""
-    import importlib.util as ilu
+    """One YAML per (target, length), via the side-effect-free helper.
 
-    spec = ilu.spec_from_file_location(
-        "_cache_bb", str(REPO_ROOT / "scripts" / "cache_binder_backbones.py")
-    )
-    module = ilu.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    directory = Path(out) / "yaml"
-    directory.mkdir(parents=True, exist_ok=True)
-    return module._write_single_length_yaml(
-        Path(source), int(length), directory / f"{Path(source).stem}_L{length}.yaml"
+    NOT by exec'ing cache_binder_backbones.py: that module fronts the repo's
+    vendored PXDesign on sys.path at import, which under the official runtime
+    shadows the pristine checkout and produces KeyError: 'd_lm'.
+    """
+    from pxf.bench.target_yaml import write_single_length_yaml
+
+    return write_single_length_yaml(
+        source, length,
+        Path(out) / "yaml" / f"{Path(source).stem}_L{length}.yaml",
     )
 
 

@@ -137,7 +137,7 @@ def main() -> None:
     (out / "designs").mkdir(parents=True, exist_ok=True)
     (out / "diagnostics").mkdir(parents=True, exist_ok=True)
 
-    runner = build_runner(
+    runner, _configs = build_runner(
         args.input, str(out / "pxdesign"),
         load_checkpoint_dir=args.checkpoint_dir,
         n_step=args.n_step, n_sample=1, use_msa=args.use_msa, dtype=args.dtype,

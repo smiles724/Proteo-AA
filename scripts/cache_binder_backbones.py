@@ -132,13 +132,10 @@ def official_sources(checkpoint_dir: str) -> dict[str, Any]:
 
 
 def _write_single_length_yaml(target_config: Path, length: int, out: Path) -> Path:
-    """PXDesign takes one binder length per run; the prepared config has the grid."""
-    payload = yaml.safe_load(target_config.read_text())
-    payload = dict(payload)
-    payload.pop("binder_lengths", None)
-    payload["binder_length"] = int(length)
-    out.write_text(yaml.safe_dump(payload, sort_keys=False))
-    return out
+    """Delegates to pxf.bench.target_yaml, which has no import side effects."""
+    from pxf.bench.target_yaml import write_single_length_yaml
+
+    return write_single_length_yaml(target_config, length, out)
 
 
 def pick_event(schedule: torch.Tensor, sigma_b: float) -> int:

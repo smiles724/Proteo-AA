@@ -117,6 +117,24 @@ def mcnemar(b: int, c: int) -> float:
     return min(1.0, 2 * tail)
 
 
+def _kind(a: str, b: str) -> str:
+    """What a given pair is allowed to conclude."""
+    base = lambda x: x.split("_")[0]
+    if "R0" in (a, b):
+        return ("designer comparison: designer AND context differ, and R0's "
+                "initial guess is backbone-only")
+    if {base(a), base(b)} == {"J03", "S03"}:
+        return ("stage-1 PRIMARY: the sequence objective, with routing, donor "
+                "and data held fixed")
+    if {base(a), base(b)} == {"J03", "U03"}:
+        return "adapter effect: same donor, same context, residual on/off"
+    if {base(a), base(b)} == {"S03", "U03"}:
+        return "side-chain objective alone, against the unadapted donor"
+    if base(a) == base(b):
+        return "SEED PAIR: same arm, different seed -- a noise floor, not an effect"
+    return "mixed"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -191,7 +209,11 @@ def main() -> None:
 
     # ---- paired comparisons ----------------------------------------------
     comparisons = []
-    pairs = [("J03", "U03"), ("J03", "R0"), ("U03", "R0")]
+    # Every ordered pair, because with both seeds present the interesting set
+    # is no longer three fixed names: the stage-1 primary is J03 - S03 per
+    # seed, and seed agreement is only checkable if each seed's own
+    # comparison is computed rather than the seeds being pooled first.
+    pairs = [(a, b) for i, a in enumerate(arms) for b in arms[i + 1:]]
     for a, b in pairs:
         if a not in arms or b not in arms:
             continue
@@ -207,10 +229,7 @@ def main() -> None:
             "discordant": only_a + only_b,
             "mcnemar_p": mcnemar(only_a, only_b),
             "paired_n": len(complete),
-            "kind": ("adapter effect: same donor, same context, residual on/off"
-                     if {a, b} == {"J03", "U03"} else
-                     "designer comparison: designer AND context differ, and R0's "
-                     "initial guess is backbone-only"),
+            "kind": _kind(a, b),
         })
 
     out = Path(args.out)

@@ -95,6 +95,90 @@ def verdict(ok, *, incomplete=False):
     return "INCOMPLETE" if incomplete else ("PASS" if ok else "FAIL")
 
 
+def assert_identity(ctx, base, label=""):
+    """Every check runs against the SAME example, topology and conditioning.
+
+    An earlier version set ctx["structure"] on each loop iteration, so the
+    later checks paired the first example's event with the last example's
+    topology. This makes that class of mistake a refusal.
+    """
+    structure = ctx.get("structure")
+    if structure is None:
+        raise AssertionError(f"{label}: no structure bound to the context")
+    tokens = int(structure.num_tokens)
+    a_tokens = int(base["products"].a_token.reshape(tokens, -1).shape[0]) \
+        if base["products"].a_token.numel() % tokens == 0 else -1
+    if a_tokens != tokens:
+        raise AssertionError(
+            f"{label}: a_token has {base['products'].a_token.numel()} values "
+            f"but the bound topology has {tokens} tokens -- the event and the "
+            "structure are from different examples"
+        )
+    if int(base["binder_mask"].reshape(-1).shape[0]) != tokens:
+        raise AssertionError(
+            f"{label}: binder mask length "
+            f"{int(base['binder_mask'].reshape(-1).shape[0])} != {tokens}"
+        )
+    return {
+        "example_id": base["example_id"],
+        "n_tokens": tokens,
+        "event_digest": tensor_digest(base["packed"])[:16],
+        "conditioning_digest": tensor_digest({
+            "s_inputs": base["conditioning"].s_inputs,
+            "s_trunk": base["conditioning"].s_trunk,
+            "z_trunk": base["conditioning"].z_trunk,
+        })[:16],
+        "topology_digest": tensor_digest({
+            "a2t": structure.topology.atom_to_token_idx,
+            "residue_index": structure.topology.residue_index,
+            "chain_index": structure.topology.chain_index,
+            "design_mask": structure.design_mask,
+        })[:16],
+    }
+
+
+def guarded(name, report, function, *args, **kwargs):
+    """Run one check; record an exception as a FAIL instead of losing the report.
+
+    The first run of this gate crashed in check 6 and took the whole
+    acceptance.json with it, so five completed checks had to be re-derived
+    from stdout. A gate whose output depends on every check succeeding is not
+    much of a gate.
+    """
+    import traceback
+
+    try:
+        report["checks"][name] = function(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - a failing check is the point
+        # ERROR, distinct from FAIL: the check could not reach a verdict. Both
+        # are blocking, but conflating them hides whether the implementation
+        # is wrong or the harness is.
+        report["checks"][name] = {
+            "verdict": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc().splitlines()[-12:],
+        }
+        print(f"   {name}: ERROR ({type(exc).__name__}: {str(exc)[:110]})")
+    finally:
+        _flush(report)
+    return report["checks"][name]
+
+
+#: Written atomically after every check, so a later crash cannot cost the
+#: earlier results. The first run of this gate lost five completed checks to a
+#: traceback in the sixth.
+_REPORT_PATH = {"path": None, "args": None}
+
+
+def _flush(report):
+    path = _REPORT_PATH["path"]
+    if path is None:
+        return
+    temporary = Path(str(path) + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, default=str))
+    temporary.replace(path)
+
+
 # ============================================================ stage: fixture
 
 
@@ -111,10 +195,22 @@ def build_fixture(args, ctx, row, *, perturb=None, seed=None):
     from pxf import atom37
     from pxf.couple.integrated_event import prepare_event
 
+    from pxf.bench.native_event_inputs import prepare
+
     module = ctx["cache_module"]
     seed = args.seed if seed is None else seed
-    structure = module.featurize_native(
+
+    # The binder is reduced to N/CA/C/O BEFORE featurization, so it is
+    # represented the way a generated binder is. Its native side chains are
+    # then neither an input nor a target, which is the fix for the leak the
+    # gate found: they were entering x_noisy at the event's noise level, i.e.
+    # their deposited geometry with 0.43 A of jitter on it.
+    prepared = prepare(
         row["cif_path"], row["converted_binder_chain"],
+        Path(args.out) / "prepared", perturb=(perturb or "none"),
+    )
+    structure = module.featurize_native(
+        prepared["path"], row["converted_binder_chain"],
         crop_size=args.crop_size, device=ctx["device"],
     )
 
@@ -122,14 +218,6 @@ def build_fixture(args, ctx, row, *, perturb=None, seed=None):
     binder_tokens = structure.design_mask.reshape(-1).bool().to(ctx["device"])
     binder_atoms = binder_tokens[a2t]
     native_bb = structure.backbone_target.float().reshape(1, -1, 3).to(ctx["device"])
-
-    if perturb:
-        # The forbidden labels, corrupted. The binder BACKBONE and the target
-        # context are preserved exactly, so anything that moves downstream
-        # moved because of an identity or a side chain.
-        native_bb, structure = _perturb_labels(
-            perturb, native_bb, structure, binder_atoms, binder_tokens, a2t, ctx
-        )
 
     names = np.asarray(structure.topology.atom_names)
     slot_of = {n: i for i, n in enumerate(atom37.ATOM37)}
@@ -147,6 +235,18 @@ def build_fixture(args, ctx, row, *, perturb=None, seed=None):
     noise = torch.randn(native_bb.shape, generator=generator).to(ctx["device"])
     sigma = float(args.event_sigma)
     x_noisy = native_bb + sigma * noise * binder_atoms.reshape(1, -1, 1).float()
+
+    # The fix, verified on every fixture rather than trusted: the binder
+    # contributes exactly the backbone slots and nothing else.
+    binder_sidechain_atoms = int(
+        (binder_atoms & ~backbone_slot).sum()
+    )
+    if binder_sidechain_atoms:
+        raise AssertionError(
+            f"{row['example_id']}: the binder still carries "
+            f"{binder_sidechain_atoms} side-chain atom(s) after preparation, "
+            "so its native side chains would enter x_noisy"
+        )
 
     raw_features = {k: v for k, v in structure.feature_dict.items()}
     conditioning = ctx["driver"].conditioning(structure.feature_dict)
@@ -168,6 +268,7 @@ def build_fixture(args, ctx, row, *, perturb=None, seed=None):
     return {
         "example_id": str(row["example_id"]),
         "schema": SCHEMA,
+        "prepared": prepared,
         "sigma": sigma,
         "x_noisy": x_noisy,
         "native_bb": native_bb,
@@ -182,33 +283,6 @@ def build_fixture(args, ctx, row, *, perturb=None, seed=None):
         "rng": {"cpu_before": rng_before, "cpu_after": torch.get_rng_state()},
         "perturbed": perturb,
     }
-
-
-def _perturb_labels(kind, native_bb, structure, binder_atoms, binder_tokens,
-                    a2t, ctx):
-    """Corrupt a forbidden label while preserving everything allowed."""
-    import torch
-
-    from pxf import atom37
-
-    native_bb = native_bb.clone()
-    if kind in ("aatype", "both"):
-        # Rotate every binder identity. The binder's backbone is untouched.
-        aatype = structure.aatype.clone()
-        rows = binder_tokens.to(aatype.device)
-        aatype[rows] = (aatype[rows] + 7) % atom37.UNKNOWN_AA_INDEX
-        structure.aatype = aatype
-    if kind in ("sidechain", "both"):
-        # Move every binder SIDE-CHAIN coordinate. Backbone slots untouched,
-        # so the allowed noisy input is unchanged.
-        names = structure.topology.atom_names
-        sidechain = torch.tensor(
-            [str(n) not in ("N", "CA", "C", "O") for n in names],
-            device=native_bb.device,
-        )
-        mask = (binder_atoms & sidechain).reshape(1, -1, 1)
-        native_bb = native_bb + mask.float() * 17.0
-    return native_bb, structure
 
 
 # ============================================================= check 2
@@ -560,27 +634,67 @@ def check_finite_difference_cpu(args, ctx, base, conditioner) -> dict:
         return {"verdict": "FAIL", "analytic": analytic,
                 "reason": "analytic gradient ~0: the comparison would be "
                           "vacuous (0 vs 0 agrees for the wrong reason)"}
+    # REPEATABILITY of the unchanged loss first: the central difference is a
+    # difference of two numbers, so if the loss is not reproducible to well
+    # below grad*eps the estimator has no signal to find. Reported rather than
+    # assumed, and the RNG is restored around every probe so the packing and
+    # any dropout draw identically.
+    rng = torch.random.get_rng_state()
+    base_repeats = []
+    for _ in range(3):
+        torch.random.set_rng_state(rng)
+        base_repeats.append(float(value(require_grad=False).total))
+    loss_spread = max(base_repeats) - min(base_repeats)
+
     sweep = []
     with torch.no_grad():
         original = parameter.reshape(-1)[index].item()
         for eps in FD_EPS:
+            torch.random.set_rng_state(rng)
             parameter.reshape(-1)[index] = original + eps
             plus = float(value(require_grad=False).total)
+            torch.random.set_rng_state(rng)
             parameter.reshape(-1)[index] = original - eps
             minus = float(value(require_grad=False).total)
-            parameter.reshape(-1)[index] = original
+            parameter.reshape(-1)[index] = original   # restored every probe
             numeric = (plus - minus) / (2 * eps)
-            sweep.append({"eps": eps, "numeric": numeric,
-                          "relative_error": abs(numeric - analytic)
-                          / max(abs(analytic), 1e-12)})
+            sweep.append({
+                "eps": eps, "plus": plus, "minus": minus, "numeric": numeric,
+                "absolute_error": abs(numeric - analytic),
+                "relative_error": abs(numeric - analytic)
+                / max(abs(analytic), 1e-12),
+                # The signal the difference has to clear.
+                "signal_to_loss_noise": (
+                    abs(plus - minus) / loss_spread if loss_spread else
+                    float("inf")
+                ),
+            })
     best = min(sweep, key=lambda s: s["relative_error"])
-    converged = abs(sweep[-1]["numeric"] - sweep[-2]["numeric"]) <= (
-        FD_TOLERANCE * max(abs(sweep[-1]["numeric"]), 1e-12)
-    )
+    # A STABLE RANGE, not the best epsilon: at least two consecutive epsilons
+    # must both agree with the analytic value. Passing on one lucky epsilon is
+    # how a wrong derivative slips through.
+    stable = [
+        (a, b) for a, b in zip(sweep, sweep[1:])
+        if a["relative_error"] <= FD_TOLERANCE
+        and b["relative_error"] <= FD_TOLERANCE
+    ]
+    converged = bool(stable)
     return {
-        "verdict": verdict(converged and best["relative_error"] <= FD_TOLERANCE),
-        "device": "cpu", "analytic": analytic, "probed_index": index,
-        "sweep": sweep, "best": best, "estimator_converged": converged,
+        "verdict": verdict(converged),
+        "device": "cpu",
+        "dtype": str(parameter.dtype),
+        "analytic": analytic, "probed_index": index,
+        "max_abs_gradient": float(flat.abs().max()),
+        "unchanged_loss_repeats": base_repeats,
+        "unchanged_loss_spread": loss_spread,
+        "sweep": sweep, "best": best,
+        "stable_epsilon_pairs": [
+            [a["eps"], b["eps"]] for a, b in stable
+        ],
+        "estimator_converged": converged,
+        "criterion": f"at least two CONSECUTIVE epsilons within "
+                     f"{FD_TOLERANCE:.0%} of the analytic value; the best "
+                     "single epsilon is not sufficient",
     }
 
 
@@ -635,6 +749,78 @@ def check_paired_initialisation(args, ctx, base) -> dict:
     }
 
 
+def check_rng_state_mechanics(args, ctx) -> dict:
+    """Verify the RNG bookkeeping DIRECTLY, not by its effect on coordinates.
+
+    The coordinate comparison is limited by CUDA reduction noise: on this
+    model repeated identical resumes differ by ~6e-4, which is larger than the
+    effect of extra decoder draws. So 2.9e-4 vs 6.2e-4 is not evidence of
+    isolation -- it is evidence the coordinate test cannot resolve it.
+
+    This checks the mechanism instead: is the CUDA state captured, is it
+    restored, and is it unchanged across the protected callback? Those are
+    exact byte comparisons with no numerical tolerance at all.
+    """
+    import torch
+
+    from pxf.couple.replay import RngStream
+
+    if not torch.cuda.is_available():
+        return {"verdict": "INCOMPLETE", "reason": "no CUDA device"}
+    device = ctx["device"]
+    stream = RngStream("mechanics", args.seed, device=device)
+
+    captured = stream._cuda is not None
+    observed = {}
+    with stream.active():
+        before_cpu = torch.random.get_rng_state().clone()
+        before_cuda = torch.cuda.get_rng_state(device).clone()
+        with stream.protected():
+            # Stand in for the event decoder: ~101 encoder calls plus a
+            # packing rollout, all drawing on both devices.
+            torch.randn(8192)
+            torch.randn(8192, device=device)
+            inside_cuda = torch.cuda.get_rng_state(device).clone()
+        after_cpu = torch.random.get_rng_state().clone()
+        after_cuda = torch.cuda.get_rng_state(device).clone()
+        observed = {
+            "cpu_unchanged_across_protected": bool(
+                torch.equal(before_cpu, after_cpu)
+            ),
+            "cuda_unchanged_across_protected": bool(
+                torch.equal(before_cuda, after_cuda)
+            ),
+            "cuda_did_advance_inside_protected": not bool(
+                torch.equal(before_cuda, inside_cuda)
+            ),
+        }
+
+    # And a capture/restore round trip.
+    state = stream.capture()
+    torch.randn(1024, device=device)
+    stream.restore(state, live=True)
+    restored = bool(torch.equal(
+        torch.cuda.get_rng_state(device), state.get("cuda")
+        if isinstance(state, dict) and state.get("cuda") is not None
+        else torch.cuda.get_rng_state(device)
+    ))
+
+    ok = (
+        captured
+        and observed["cpu_unchanged_across_protected"]
+        and observed["cuda_unchanged_across_protected"]
+        and observed["cuda_did_advance_inside_protected"]
+    )
+    return {
+        "verdict": verdict(ok),
+        "cuda_state_captured": captured,
+        **observed,
+        "capture_restore_round_trip": restored,
+        "criterion": "exact byte equality of RNG states; no numerical "
+                     "tolerance is involved, unlike the coordinate test",
+    }
+
+
 def check_gpu_replay(args, ctx, base) -> dict:
     """On CUDA: repeated no-feedback resumes agree, and decoder draws are inert."""
     import torch
@@ -671,21 +857,48 @@ def check_gpu_replay(args, ctx, base) -> dict:
             )
         return x
 
-    first, second = trajectory(False), trajectory(False)
-    with_draws = trajectory(True)
-    repeat_delta = _max_abs(first, second)
-    draw_delta = _max_abs(first, with_draws)
+    # RULE DECLARED BEFORE THE NUMBERS (and before this rerun): collect
+    # `replay_repeats` UNPERTURBED control differences, take their maximum as
+    # the numerical resolution of this comparison, and require every
+    # extra-draw difference to fall inside it. A single control versus a
+    # single effect cannot distinguish the two, which is why the previous
+    # 2.9e-4-vs-6.2e-4 result is reported here as inconclusive rather than as
+    # a pass or a failure.
+    controls = [
+        _max_abs(trajectory(False), trajectory(False))
+        for _ in range(args.replay_repeats)
+    ]
+    effects = [
+        _max_abs(trajectory(False), trajectory(True))
+        for _ in range(args.replay_repeats)
+    ]
+    floor = max(controls)
+    draw_delta = max(effects)
+    resolved = floor > 0 and draw_delta > 10 * floor
+    isolated = draw_delta <= max(floor, EQUIVALENCE_ATOL)
     return {
-        "verdict": verdict(
-            repeat_delta <= EQUIVALENCE_ATOL and draw_delta <= EQUIVALENCE_ATOL
-        ),
-        "repeated_resume_max_abs_difference": repeat_delta,
+        # A coordinate test that cannot resolve the effect is INCONCLUSIVE,
+        # not a pass. check_rng_state_mechanics is the one with teeth.
+        "verdict": verdict(isolated) if resolved or not isolated else "INCOMPLETE",
+        "resolution_limited": not resolved,
+        "unperturbed_controls": controls,
+        "extra_draw_effects": effects,
+        "cuda_noise_floor_max_abs": floor,
         "extra_decoder_draws_max_abs_difference": draw_delta,
-        "tolerance": EQUIVALENCE_ATOL,
+        "ratio_to_floor": draw_delta / floor if floor else float("inf"),
+        "declared_atol": EQUIVALENCE_ATOL,
+        "criterion": "declared before the rerun: max over "
+                     f"{args.replay_repeats} unperturbed controls defines the "
+                     "resolution; every extra-draw difference must fall "
+                     "inside it. If the effect is not >10x the floor the "
+                     "comparison is reported as resolution-limited and the "
+                     "RNG-state mechanics check carries the verdict.",
+        "repeats": args.replay_repeats,
         "device": str(device),
-        "note": "the stream is bound to the CUDA device, so replay captures "
-                "and restores the CUDA generator; without that these would "
-                "differ for RNG bookkeeping rather than for feedback",
+        "note": "the stream binds the CUDA device, so replay captures and "
+                "restores the CUDA generator. Without that the extra draws "
+                "would shift every later step and the effect would exceed "
+                "the floor by orders of magnitude, not sit inside it.",
     }
 
 
@@ -746,6 +959,8 @@ def stage_fixture(args) -> None:
 
     out = Path(args.out)
     (out / "fixture").mkdir(parents=True, exist_ok=True)
+    _REPORT_PATH["path"] = out / "acceptance.json"
+    _REPORT_PATH["args"] = args
     device = select_device(args.device)
 
     frame = pd.read_parquet(args.manifest)
@@ -781,6 +996,21 @@ def stage_fixture(args) -> None:
     ctx = {"device": device, "driver": driver, "designer": designer,
            "adapters": adapters, "cache_module": cache_module}
 
+    # A SECOND copy of the backbone donor on the CPU. The finite-difference
+    # estimator needs it (the signal on this objective sits a few float32 ULPs
+    # above the loss, and CUDA reduction order is the noise), and the
+    # CPU-vs-GPU gradient comparison needs the same model on both devices.
+    # Without it both checks report INCOMPLETE rather than running on CUDA
+    # while being described as CPU work.
+    if args.cpu_driver:
+        print("building a CPU copy of the backbone donor for the "
+              "finite-difference and CPU-vs-GPU checks ...")
+        cpu_model, _cc, _cr = load_backbone_model(
+            args.pxdesign_donor, device=torch.device("cpu")
+        )
+        cpu_model.requires_grad_(False)
+        ctx["cpu_driver"] = PXDesignBackboneDriver(cpu_model)
+
     hashes = {
         "pxdesign_donor": sha256_file(args.pxdesign_donor),
         "fampnn_checkpoint": fampnn_sha,
@@ -810,9 +1040,10 @@ def stage_fixture(args) -> None:
     # ---- 1. the authoritative fixture ---------------------------------
     print("\n1. schema-v2 event fixture")
     fixtures = {}
+    primary = primary_row = primary_structure = None
     for row in rows:
         base = build_fixture(args, ctx, row)
-        ctx["structure"] = cache_module.featurize_native(
+        structure = cache_module.featurize_native(
             row["cif_path"], row["converted_binder_chain"],
             crop_size=args.crop_size, device=device,
         )
@@ -854,8 +1085,19 @@ def stage_fixture(args) -> None:
         }
         print(f"   {base['example_id']}: {fixtures[base['example_id']]['sha256'][:16]} "
               f"({fixtures[base['example_id']]['supervised_atoms']} supervised atoms)")
-        if row is rows[0]:
-            primary, primary_row = base, row
+        if primary is None:
+            # The PRIMARY example and ITS structure, captured together. An
+            # earlier version set ctx["structure"] on every iteration, so the
+            # later checks paired the first example's event with the last
+            # example's topology -- a 250-token a_token reshaped to 442 rows.
+            primary, primary_row, primary_structure = base, row, structure
+    ctx["structure"] = primary_structure
+    report["identity"] = assert_identity(ctx, primary, label="primary")
+    print(f"   bound identity: {report['identity']['example_id']} "
+          f"({report['identity']['n_tokens']} tokens) event "
+          f"{report['identity']['event_digest']} conditioning "
+          f"{report['identity']['conditioning_digest']} topology "
+          f"{report['identity']['topology_digest']}")
     report["fixture"] = fixtures
     report["checks"]["fixture"] = {
         "verdict": verdict(len(fixtures) == len(rows)),
@@ -866,27 +1108,49 @@ def stage_fixture(args) -> None:
 
     # ---- 2. upstream leakage ------------------------------------------
     print("\n2. upstream leakage (perturbed before featurization)")
-    report["checks"]["upstream_leakage"] = check_upstream_leakage(
+    assert_identity(ctx, primary, label="before leakage")
+    guarded("upstream_leakage", report, check_upstream_leakage, 
         args, ctx, primary_row, primary
     )
     c = report["checks"]["upstream_leakage"]
-    print(f"   worst forbidden delta {c['worst_forbidden_delta']:.3e} "
-          f"(tol {c['tolerance']:.0e}) -> {c['verdict']}")
+    if "worst_forbidden_delta" in c:
+        print(f"   worst forbidden delta {c['worst_forbidden_delta']:.3e} "
+              f"(tol {c['tolerance']:.0e}) -> {c['verdict']}")
+        for kind, detail in c["per_perturbation"].items():
+            worst = max((k, v) for k, v in detail["deltas"].items()
+                        if k != "x_noisy_allowed_input")
+            ranked = sorted(detail["deltas"].items(), key=lambda kv: -kv[1])
+            print(f"     {kind}: " + ", ".join(
+                f"{k}={v:.2e}" for k, v in ranked[:4]
+            ))
+            print(f"       sequence changed: "
+                  f"{detail['designed_sequence_changed']}")
+
+    if ctx.get("cpu_driver") is not None:
+        ctx["conditioning_cpu"] = ctx["cpu_driver"].conditioning(
+            {k: (v.cpu() if torch.is_tensor(v) else v)
+             for k, v in primary["raw_features"].items()}
+        )
 
     # ---- 4. gradients and freezing -------------------------------------
     print("\n4. gradients and freezing")
-    report["checks"]["gradients"] = check_gradients(args, ctx, primary, conditioner)
+    guarded("gradients", report, check_gradients, args, ctx, primary, conditioner)
     g = report["checks"]["gradients"]
-    print(f"   projection at init {g['output_projection_at_init']['weight']:.3e}; "
-          f"{g['internal_nonzero_after_one_update']}/{g['internal_tensors']} "
-          f"internal live after one update; donors unchanged "
-          f"{g['donor_weights_unchanged']} -> {g['verdict']}")
-    report["checks"]["finite_difference_cpu"] = check_finite_difference_cpu(
+    if "output_projection_at_init" in g:
+        print(f"   projection at init {g['output_projection_at_init']['weight']:.3e}; "
+              f"{g['internal_nonzero_after_one_update']}/{g['internal_tensors']} "
+              f"internal live after one update; donors unchanged "
+              f"{g['donor_weights_unchanged']} -> {g['verdict']}")
+    guarded("finite_difference_cpu", report, check_finite_difference_cpu, 
         args, ctx, primary, conditioner
     )
-    print(f"   CPU finite difference -> "
-          f"{report['checks']['finite_difference_cpu']['verdict']}")
-    report["checks"]["cpu_vs_gpu_gradient"] = check_cpu_vs_gpu_gradient(
+    fd = report["checks"]["finite_difference_cpu"]
+    print(f"   CPU finite difference -> {fd['verdict']}"
+          + (f"  ({fd.get('reason') or ''})" if fd.get("reason") else "")
+          + (f"  analytic={fd['analytic']:.3e} best_rel="
+             f"{fd['best']['relative_error']:.2e} converged="
+             f"{fd['estimator_converged']}" if "best" in fd else ""))
+    guarded("cpu_vs_gpu_gradient", report, check_cpu_vs_gpu_gradient, 
         args, ctx, primary, conditioner
     )
     print(f"   CPU-vs-GPU gradient -> "
@@ -894,20 +1158,28 @@ def stage_fixture(args) -> None:
 
     # ---- 5. paired init and GPU replay ---------------------------------
     print("\n5. paired initialisation and GPU replay")
-    report["checks"]["paired_initialisation"] = check_paired_initialisation(
+    guarded("paired_initialisation", report, check_paired_initialisation, 
         args, ctx, primary
     )
     p = report["checks"]["paired_initialisation"]
-    print(f"   arm digests identical: {p['identical']} -> {p['verdict']}")
-    report["checks"]["gpu_replay"] = check_gpu_replay(args, ctx, primary)
+    print(f"   arm digests identical: {p.get('identical')} -> {p['verdict']}")
+    guarded("rng_state_mechanics", report, check_rng_state_mechanics, args, ctx)
+    m = report["checks"]["rng_state_mechanics"]
+    print(f"   RNG state: captured={m.get('cuda_state_captured')} "
+          f"cpu_unchanged={m.get('cpu_unchanged_across_protected')} "
+          f"cuda_unchanged={m.get('cuda_unchanged_across_protected')} "
+          f"advanced_inside={m.get('cuda_did_advance_inside_protected')} "
+          f"-> {m['verdict']}")
+    guarded("gpu_replay", report, check_gpu_replay, args, ctx, primary)
     r = report["checks"]["gpu_replay"]
-    print(f"   repeated resume {r.get('repeated_resume_max_abs_difference')}, "
-          f"extra draws {r.get('extra_decoder_draws_max_abs_difference')} -> "
-          f"{r['verdict']}")
+    print(f"   CUDA noise floor {r.get('cuda_noise_floor_max_abs')}, extra "
+          f"draws {r.get('extra_decoder_draws_max_abs_difference')} "
+          f"(ratio {r.get('ratio_to_floor')}) -> {r['verdict']}")
 
     # ---- 6. side-chain chemistry ---------------------------------------
     print("\n6. side-chain chemistry on the corrected backbone")
-    report["checks"]["sidechain_chemistry"] = check_sidechain_chemistry(
+    assert_identity(ctx, primary, label="before sidechain chemistry")
+    guarded("sidechain_chemistry", report, check_sidechain_chemistry, 
         args, ctx, primary, conditioner
     )
     print(f"   -> {report['checks']['sidechain_chemistry']['verdict']}")
@@ -1042,6 +1314,22 @@ def _cpu(value):
     return value
 
 
+#: Every check that must PASS before the full cache build. `gpu_replay` is
+#: NOT required: its coordinate comparison is resolution-limited on CUDA, and
+#: `rng_state_mechanics` -- which is exact -- carries that verdict instead.
+REQUIRED_CHECKS = (
+    "fixture",
+    "upstream_leakage",
+    "gradients",
+    "finite_difference_cpu",
+    "cpu_vs_gpu_gradient",
+    "paired_initialisation",
+    "rng_state_mechanics",
+    "sidechain_chemistry",
+    "local_vs_official",
+)
+
+
 def _write(out, report, args):
     incomplete = [
         name for name, check in report["checks"].items()
@@ -1049,13 +1337,21 @@ def _write(out, report, args):
     ]
     failed = [
         name for name, check in report["checks"].items()
-        if check.get("verdict") == "FAIL"
+        if check.get("verdict") in ("FAIL", "ERROR")
     ]
+    missing = [n for n in REQUIRED_CHECKS if n not in report["checks"]]
+    not_passed = sorted(
+        {n for n in REQUIRED_CHECKS
+         if report["checks"].get(n, {}).get("verdict") != "PASS"}
+    )
     report["summary"] = {
         "passed": [n for n, c in report["checks"].items()
                    if c.get("verdict") == "PASS"],
         "failed": failed, "incomplete": incomplete,
-        "ready_for_full_cache": not failed and not incomplete,
+        "required": list(REQUIRED_CHECKS),
+        "required_not_passed": not_passed,
+        "required_missing": missing,
+        "ready_for_full_cache": not not_passed and not missing,
     }
     report["commands"] = {
         "fixture": f"python scripts/accept_integrated_feedback.py --stage "
@@ -1074,12 +1370,15 @@ def _write(out, report, args):
     path = Path(out) / "acceptance.json"
     path.write_text(json.dumps(report, indent=2, default=str))
     print(f"\nwrote {path}")
-    print(f"  PASS       {report['summary']['passed']}")
-    print(f"  FAIL       {failed}")
-    print(f"  INCOMPLETE {incomplete}")
+    print(f"  PASS                 {report['summary']['passed']}")
+    print(f"  FAIL/ERROR           {failed}")
+    print(f"  INCOMPLETE           {incomplete}")
+    print(f"  required not passed  {not_passed}")
+    print(f"  required missing     {missing}")
     print(f"  ready_for_full_cache = {report['summary']['ready_for_full_cache']}")
     if args.require_complete and not report["summary"]["ready_for_full_cache"]:
-        print("\n--require-complete: the gate is not satisfied")
+        print("\n--require-complete: the gate is not satisfied; every "
+              "required check must report PASS")
         raise SystemExit(1)
 
 
@@ -1262,6 +1561,9 @@ def main() -> None:
                              "which the CPU finite-difference and CPU-vs-GPU "
                              "checks require")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--replay-repeats", type=int, default=3,
+                        help="how many identical resume pairs to measure the "
+                             "CUDA noise floor over")
     parser.add_argument("--require-complete", action="store_true")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()

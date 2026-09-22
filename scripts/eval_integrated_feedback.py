@@ -197,6 +197,9 @@ def main() -> None:
     parser.add_argument("--context", default="complex_sc")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--pack-seed", type=int, default=7,
+                        help="paired across arms, so a rotamer draw cannot "
+                             "masquerade as a chemistry difference")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -293,7 +296,7 @@ def main() -> None:
                 crop_size=args.crop_size, device=device,
             )
             events[(seed, row.example_id)] = {
-                "record": record, "pool": row.pool,
+                "record": record, "pool": row.pool, "structure": structure,
                 "cond": driver.conditioning(structure.feature_dict),
             }
             if (index + 1) % 10 == 0:
@@ -347,6 +350,7 @@ def main() -> None:
             per_complex = _score(
                 conditioner, events, seed, driver, device, mask_feedback,
                 backbone_denoising_loss, BackboneTap,
+                designer=designer, args=args,
             )
             results.setdefault(f"{arm}_s{seed}", []).append({
                 "step": step, "checkpoint": str(checkpoint),
@@ -363,6 +367,7 @@ def main() -> None:
         baseline[seed] = _score(
             None, events, seed, driver, device, mask_feedback,
             backbone_denoising_loss, BackboneTap,
+            designer=designer, args=args,
         )
         print(f"  no_feedback_s{seed}: median "
               f"{_aggregate(baseline[seed])['resolved_binder_bb_rmsd']:.4f} A")
@@ -425,9 +430,21 @@ def main() -> None:
 
 
 def _score(conditioner, events, seed, driver, device, mask_feedback,
-           backbone_denoising_loss, BackboneTap):
-    """Per-complex resolved-binder backbone RMSD after the correction."""
+           backbone_denoising_loss, BackboneTap, *, designer=None, args=None):
+    """Per-complex RMSD AND both chemistry guardrails on the corrected backbone.
+
+    The side-chain metric requires repacking: the event's sequence is held
+    fixed and packed onto THIS arm's corrected backbone, with the same packing
+    seed for every arm so a rotamer draw cannot look like a chemistry
+    difference. Without it `selection.yaml`'s second guardrail has no value
+    and the selector refuses every checkpoint -- which is correct, but blocks.
+    """
+    import numpy as np
     import torch
+
+    from pxf.bench.backbone_inputs import build_design_inputs, check_design_mask
+    from pxf.bench.chemistry import backbone_chemistry, sidechain_chemistry
+    from pxf.bench.integrated import _packed_coords, _packed_mask
 
     out = {}
     for (event_seed, example_id), entry in events.items():
@@ -451,50 +468,69 @@ def _score(conditioner, events, seed, driver, device, mask_feedback,
                     bb, blob["native_bb"], sigma=sigma,
                     atom_mask=blob["supervised"],
                 )
+
         dense = _dense(bb, blob)
-        chemistry = (
-            None if dense is None else backbone_chemistry_failures(
-                dense, blob["supervised"], None, blob["binder_mask"]
+        chem_bb = (None if dense is None else
+                   backbone_chemistry(dense, blob["binder_mask"]))
+        chem_sc = None
+        if designer is not None and dense is not None:
+            structure = entry["structure"]
+            topology = structure.topology
+            a2t = np.asarray(topology.atom_to_token_idx.cpu()).astype(int)
+            design = check_design_mask(
+                np.asarray(structure.design_mask.cpu()),
+                res_names=np.asarray(topology.res_names), atom_to_token=a2t,
+                n_tokens=int(structure.num_tokens), what=example_id,
+                mode="native",
+                chain_index=np.asarray(topology.chain_index.cpu()),
             )
-        )
+            inputs = build_design_inputs(
+                x0=bb.reshape(-1, 3),
+                a_token=torch.zeros(
+                    int(structure.num_tokens), 1, device=device
+                ),
+                sigma=float(blob["sigma"]),
+                atom_names=np.asarray(topology.atom_names),
+                res_names=np.asarray(topology.res_names), atom_to_token=a2t,
+                n_tokens=int(structure.num_tokens), design=design,
+                residue_index=topology.residue_index,
+                asym_id=topology.chain_index, design_id=example_id,
+                target=example_id, binder_length=int(design.sum()),
+                context=args.context, device=device,
+            )
+            with torch.no_grad():
+                packed = designer(
+                    coords_af2=inputs.coords_af2,
+                    aatype=blob["packed"].aatype,
+                    atom_mask=inputs.atom_mask, seq_mask=inputs.seq_mask,
+                    residue_index=inputs.residue_index,
+                    chain_index=inputs.chain_index,
+                    scn_context_mask=inputs.sidechain_context_mask,
+                    # PAIRED across arms.
+                    seed=args.pack_seed,
+                )
+            chem_sc = sidechain_chemistry(
+                _packed_coords(packed),
+                _packed_mask(packed, inputs.atom_mask),
+                blob["binder_mask"],
+            )
+
         out[example_id] = {
             "pool": entry["pool"],
             "resolved_binder_bb_rmsd": float(
                 coupled.stats["backbone_rmsd_angstrom"]
             ),
             "loss": float(coupled.total),
-            "backbone_chemistry": chemistry,
+            "backbone_chemistry": chem_bb,
             "backbone_chemistry_failed": (
-                None if chemistry is None else chemistry["failed"]
+                None if chem_bb is None else chem_bb["failed"]
+            ),
+            "sidechain_chemistry": chem_sc,
+            "sidechain_chemistry_failed": (
+                None if chem_sc is None else chem_sc["failed"]
             ),
         }
     return out
-
-
-def _dense(flat, blob):
-    """Flat atom axis -> [L, 37, 3], for the chemistry check.
-
-    The corrective call returns PXDesign's flat atom axis; the chemistry
-    metric is per residue, so the atoms are scattered back through the
-    topology the cache recorded.
-    """
-    import torch
-
-    from pxf import atom37
-
-    a2t = blob.get("atom_to_token_idx")
-    slots = blob.get("atom37_slot")
-    n_tokens = int(blob["binder_mask"].reshape(-1).shape[0])
-    dense = torch.zeros(
-        n_tokens, atom37.NUM_ATOM37, 3, device=flat.device, dtype=flat.dtype
-    )
-    if a2t is None or slots is None:
-        # The cache predates the per-atom index being stored; the chemistry
-        # metric is then unevaluable, which the selector treats as a refusal
-        # rather than a pass.
-        return None
-    dense[a2t.to(flat.device), slots.to(flat.device)] = flat.reshape(-1, 3)
-    return dense
 
 
 def _aggregate(per_complex, *, primary_pool="pdb"):
@@ -509,14 +545,17 @@ def _aggregate(per_complex, *, primary_pool="pdb"):
     for pool in {v["pool"] for v in per_complex.values()}:
         subset = [v["resolved_binder_bb_rmsd"] for v in per_complex.values()
                   if v["pool"] == pool]
-        chem = [v["backbone_chemistry_failed"] for v in per_complex.values()
-                if v["pool"] == pool and v["backbone_chemistry_failed"] is not None]
+        def rate(field):
+            values = [v[field] for v in per_complex.values()
+                      if v["pool"] == pool and v[field] is not None]
+            return (sum(1 for c in values if c) / len(values)
+                    if values else None)
+
         by_pool[pool] = {
             "n": len(subset),
             "median": statistics.median(subset) if subset else None,
-            "backbone_chemistry_failure_rate": (
-                sum(1 for c in chem if c) / len(chem) if chem else None
-            ),
+            "backbone_chemistry_failure_rate": rate("backbone_chemistry_failed"),
+            "sidechain_chemistry_failure_rate": rate("sidechain_chemistry_failed"),
         }
     primary = by_pool.get(primary_pool, {})
     pooled = [v["resolved_binder_bb_rmsd"] for v in per_complex.values()]
@@ -534,16 +573,8 @@ def _aggregate(per_complex, *, primary_pool="pdb"):
         "backbone_chemistry_failure_rate": primary.get(
             "backbone_chemistry_failure_rate"
         ),
-        # NOT IMPLEMENTED, and therefore not passable: evaluating side-chain
-        # chemistry on the corrected backbone requires repacking the event
-        # sequence onto bb1, which this script does not do. The selector
-        # refuses a checkpoint whose required guardrail metric is missing, so
-        # this blocks selection rather than silently waving it through.
-        "sidechain_chemistry_failure_rate": None,
-        "sidechain_chemistry_note": (
-            "not implemented: requires repacking the event sequence on the "
-            "corrected backbone. Selection refuses on a missing required "
-            "guardrail rather than treating it as a pass."
+        "sidechain_chemistry_failure_rate": primary.get(
+            "sidechain_chemistry_failure_rate"
         ),
         "n_chemistry_evaluated": len(chem_all),
     }

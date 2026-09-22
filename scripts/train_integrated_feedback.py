@@ -357,7 +357,8 @@ def main() -> None:
                   optimizer, ema, step + 1, arm, policy, identity, frozen,
                   config, cache, args, init_digest)
     _save(out / "checkpoints" / "final.pt", conditioner, optimizer, ema,
-          max_steps, arm, policy, identity, frozen, config, cache, args)
+          max_steps, arm, policy, identity, frozen, config, cache, args,
+          init_digest)
     (out / "history.json").write_text(json.dumps(history, indent=2, default=str))
     print(f"done: {max_steps} step(s) in {(time.time() - started) / 60:.1f} min")
 
@@ -458,7 +459,7 @@ def _save(path, conditioner, optimizer, ema, step, arm, policy, cache_identity,
     import torch
 
     from pxf.bench.integrated_checkpoints import TASK
-    from pxf.couple.conditioning import feature_schema
+    from pxf.couple.conditioning import ARMS, feature_schema
 
     torch.save({
         "conditioner": conditioner.state_dict(),
@@ -471,6 +472,13 @@ def _save(path, conditioner, optimizer, ema, step, arm, policy, cache_identity,
         "integrated_policy": policy,
         "identity": {
             "task": TASK, "arm": arm,
+            # The ARCHITECTURE TRIPLE, which is what arm_for() reads back.
+            # feature_schema emits widths and neighbourhood settings but not
+            # (arch, variant, pair), so recorded_triple fell through to its
+            # default ('late', None, False) and check_is_a_known_arm refused
+            # every checkpoint at load. The arm name was recorded correctly
+            # all along; the canonical form was not.
+            **{k: ARMS[arm][k] for k in ("arch", "variant", "pair")},
             **feature_schema({"arm": arm}),
             "seed": args.seed,
             "max_steps": int(config["max_steps"]),

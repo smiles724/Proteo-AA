@@ -197,6 +197,10 @@ def main() -> None:
     parser.add_argument("--context", default="complex_sc")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--reuse-events", action="store_true",
+                        help="reuse event files already under <out>/events "
+                             "instead of rebuilding them, which costs ~13 "
+                             "minutes for 31 complexes x 2 seeds")
     parser.add_argument("--pack-seed", type=int, default=7,
                         help="paired across arms, so a rotamer draw cannot "
                              "masquerade as a chemistry difference")
@@ -273,6 +277,23 @@ def main() -> None:
                 crop_size = args.crop_size
                 context = args.context
 
+            namespace = f"bs{seed}_{file_sha256(bs_path)[:12]}"
+            existing = out / "events" / f"{namespace}__{row.example_id}_e0.pt"
+            if args.reuse_events and existing.is_file():
+                structure = cache_module.featurize_native(
+                    str(out / "prepared" /
+                        f"{Path(row.cif_path).stem}__none.cif"),
+                    row.converted_binder_chain,
+                    crop_size=args.crop_size, device=device,
+                )
+                events[(seed, row.example_id)] = {
+                    "record": {"path": str(existing),
+                               "cif_path": row.cif_path,
+                               "binder_chain": row.converted_binder_chain},
+                    "pool": row.pool, "structure": structure,
+                    "cond": driver.conditioning(structure.feature_dict),
+                }
+                continue
             try:
                 # NAMESPACED by the A_BS identity. Both seeds previously
                 # wrote events/<example_id>_e0.pt, so the second overwrote
@@ -531,6 +552,31 @@ def _score(conditioner, events, seed, driver, device, mask_feedback,
             ),
         }
     return out
+
+
+def _dense(flat, blob):
+    """Flat atom axis -> [L, 37, 3], for the per-residue chemistry metrics.
+
+    The corrective call returns PXDesign's flat atom axis; the chemistry
+    metrics are per residue, so the atoms are scattered back through the
+    topology the cache recorded. A cache predating those fields makes the
+    metric unevaluable, which the selector treats as a refusal -- never as a
+    pass.
+    """
+    import torch
+
+    from pxf import atom37
+
+    a2t = blob.get("atom_to_token_idx")
+    slots = blob.get("atom37_slot")
+    if a2t is None or slots is None:
+        return None
+    n_tokens = int(blob["binder_mask"].reshape(-1).shape[0])
+    dense = torch.zeros(
+        n_tokens, atom37.NUM_ATOM37, 3, device=flat.device, dtype=flat.dtype
+    )
+    dense[a2t.to(flat.device), slots.to(flat.device)] = flat.reshape(-1, 3)
+    return dense
 
 
 def _aggregate(per_complex, *, primary_pool="pdb"):

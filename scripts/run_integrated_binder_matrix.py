@@ -266,15 +266,26 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     print(f"  recorded the event state; {len(records)} record(s)")
 
     rows = []
-    for bs_seed, bs_path in sorted(bs_by_seed.items()) or [(None, None)]:
-        adapters = None
-        if bs_path:
-            adapters = _load_adapters(bs_path, designer, denoiser, api)
-        # The J03 arms share ONE event decode; only the feedback differs.
+    # U03 FIRST, exactly once per cell: the unadapted donor, its own event
+    # decode, no A_BS and no feedback. It is not part of any A_BS seed's
+    # group -- an earlier version only emitted it when the J03 mapping was
+    # empty, so supplying both seeds silently dropped the baseline, and my
+    # first correction removed that branch without adding the arm, which
+    # dropped it entirely. With two A_BS seeds a cell is SEVEN outputs:
+    # U03, plus {no-feedback, E1-BB-only, E1-full} for each seed.
+    rows.append(_one_arm(
+        arm_label="U03", feedback_path=None, conditioner_arm=None,
+        shared=None, adapters=None, recorded=recorded, denoiser=denoiser,
+        structure=structure, designer=designer, schedule=schedule,
+        choice=choice, prefix_id=prefix_id, name=name, length=length,
+        gen_seed=gen_seed, bs_seed=None, args=args, out=out, api=api,
+    ))
+    rows[-1].pop("_shared", None)
+
+    for bs_seed, bs_path in sorted(bs_by_seed.items()):
+        adapters = _load_adapters(bs_path, designer, denoiser, api)
+        # The three J03 arms share ONE event decode; only the feedback differs.
         shared = None
-        # R7.4: U03 is ALWAYS included, not only when the J03 mapping is
-        # empty. It is the unadapted baseline and omitting it whenever both
-        # A_BS seeds are supplied removed the very row the comparison needs.
         arms = [("J03", None, None)]
         for label, pick in sorted(feedback_selection.items()):
             # R7.2: read the arm and seed as STRUCTURED fields. Parsing

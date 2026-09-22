@@ -119,7 +119,7 @@ donor, its own event decode, no A_BS and no feedback) plus
 export OUTROOT=/hai/scratch/yfsun/pxf_runs/integrated_feedback_v1
 python scripts/run_integrated_binder_matrix.py \
   --targets-config   $BUNDLE/targets/configs_binder_benchmark/targets.yaml \
-  --prepared-dir     $BUNDLE/targets/binder_bench_targets/configs \
+  --prepared-dir     $BUNDLE/targets/binder_bench_targets/configs.resolved \
   --checkpoint-dir   $BUNDLE/checkpoints/donors \
   --checkpoint-selection $BUNDLE/selection/selected_checkpoints.json \
   --bs-checkpoint 0=$BUNDLE/checkpoints/bs_seq_sc/J03_seed0_step00000500.pt \
@@ -150,17 +150,44 @@ emits designability **only if** the AF2-IG metrics are present.
 
 **3c. AF2-IG scoring.**
 
-Driver is `scripts/evaluation/fold_af2ig.py` in the *Proteo-AA* repo (a
-separate checkout from this one). It needs AF2 params; on Marlowe those are
-at `/users/yfsun/af2_params` — find or stage the HAI equivalent and set
-`AF2_PARAMS_DIR`.
+The driver is `scripts/evaluation/fold_af2ig.py` in the **Proteo-AA** repo,
+branch **`binder-design-training`**, at `c0c1732` or later. It was untracked
+until 2026-09-22 — an earlier version of this handoff named it without it
+existing in any ref, which was wrong. It is pushed now, along with
+`pxdesign_train/benchmarks/af2ig.py`, `score_af2ig_designability.py`,
+`slurm_fold_af2ig.sh`, `bootstrap_af2ig.sh`, and `tests/test_af2ig_scoring.py`.
+
+It is **not** the `origin/sjm/alphaproteo10_eval` path
+(`slurm_score_alphaproteo_designability.sh` et al.). That scorer is a
+different harness with different weight requirements — do not mix them.
+
+*Environment.* Scoring runs in its own venv, and must: AF2 is JAX, this
+project is torch+Protenix, and PXDesign's scoring stack pins Protenix
+v0.5.0+pxd against the training repo's v2.0.0. They cannot share an
+interpreter. Build it with `bash scripts/utilities/bootstrap_af2ig.sh`
+(read the header first — ColabDesign installs `--no-deps` on purpose).
+
+*Weights — your existing files are correct.* The harness reads **exactly
+two** AlphaFold parameter files: `params_model_1_ptm.npz` (complex pass,
+needs the template stack) and `params_model_3_ptm.npz` (unbound pass, does
+not). `/hai/scratch/yfsun/af2_params/params` already holds both, so pass
+`--data-dir /hai/scratch/yfsun/af2_params` — the flag wants the directory
+*containing* `params/`, not `params/` itself.
+
+**No ProteinMPNN download is needed.** ColabDesign ships the original
+`v_48_020` weights inside the wheel at `colabdesign/mpnn/weights/`; the code
+calls `mk_mpnn_model(weights="original")` and never reads
+`tool_weights/mpnn/vanilla_model_weights`. And MPNN is only touched by
+`--variants pmpnn` at all — the §3c default `co_design` does not use it.
+The non-ptm `params_model_1.npz` requirement you found belongs to the
+alphaproteo10_eval scorer, not this one.
 
 ```bash
 python <proteo-aa>/scripts/evaluation/fold_af2ig.py \
   --designs-csv $OUTROOT/generation_cell/designs.csv \
   --designs-dir $OUTROOT/generation_cell/designs \
   --metrics-csv $OUTROOT/generation_cell/metrics/af2ig.csv \
-  --data-dir    $AF2_PARAMS_DIR \
+  --data-dir    /hai/scratch/yfsun/af2_params \
   --variants co_design --targets PDL1
 ```
 

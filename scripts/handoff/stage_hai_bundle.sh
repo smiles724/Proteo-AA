@@ -110,6 +110,34 @@ copy "$IFB/evaluation/selected_checkpoints.json" selection/selected_checkpoints.
 echo "== prepared targets =="
 copy "$DATA/runs/binder_bench/targets" targets/binder_bench_targets
 copy "$ROOT/configs/binder_benchmark" targets/configs_binder_benchmark
+# Each prepared YAML carries `target.file:` as a Marlowe absolute pointing at
+# targets/structures/<name>.cif. The structures travel in the bundle, so the
+# path is templated exactly like the selection artifact -- otherwise the
+# matrix reads --prepared-dir successfully and then fails to open the
+# structure, which reads as a featurisation bug rather than a transfer one.
+python3 - "$OUT/targets/binder_bench_targets" <<'RETARGET'
+import re, sys
+from pathlib import Path
+base = Path(sys.argv[1])
+structures = base / "structures"
+rewritten = unresolved = 0
+for yaml_path in sorted((base / "configs").glob("*.yaml")):
+    text = yaml_path.read_text()
+    def repl(match):
+        global rewritten, unresolved
+        name = Path(match.group(2)).name
+        if not (structures / name).is_file():
+            print(f"  NOT IN BUNDLE: {yaml_path.name} -> {name}")
+            unresolved += 1
+            return match.group(0)
+        rewritten += 1
+        return f"{match.group(1)}@BUNDLE@/targets/binder_bench_targets/structures/{name}"
+    text = re.sub(r"(^\s*file:\s*)(\S+)", repl, text, flags=re.M)
+    yaml_path.write_text(text)
+print(f"  {rewritten} target.file path(s) templated")
+if unresolved:
+    raise SystemExit(f"{unresolved} prepared YAML(s) point outside the bundle")
+RETARGET
 
 echo "== provenance =="
 copy "$IFB/acceptance/acceptance.json" reports/acceptance.json

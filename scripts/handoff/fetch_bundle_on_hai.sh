@@ -88,6 +88,29 @@ if [ "$GOT" != "b075867bae942dc0" ]; then
 fi
 echo "== donor verified: $DONOR =="
 
+# ------------------------------------------- 3a. prepared target YAMLs
+# Rendered into a sibling directory rather than in place, so a re-pull does
+# not have to fight rsync over a file it already rewrote. --prepared-dir
+# points HERE, not at configs/.
+PREPARED="$BUNDLE/targets/binder_bench_targets/configs.resolved"
+rm -rf "$PREPARED"; mkdir -p "$PREPARED"
+for y in "$BUNDLE/targets/binder_bench_targets/configs"/*.yaml; do
+  sed "s|@BUNDLE@|$BUNDLE|g" "$y" > "$PREPARED/$(basename "$y")"
+done
+python3 - "$PREPARED" <<'CHECK'
+import re, sys
+from pathlib import Path
+bad = []
+for y in sorted(Path(sys.argv[1]).glob("*.yaml")):
+    for m in re.finditer(r"^\s*file:\s*(\S+)", y.read_text(), flags=re.M):
+        path = m.group(1)
+        if path.startswith("@") or not Path(path).is_file():
+            bad.append(f"{y.name}: {path}")
+if bad:
+    raise SystemExit("unresolvable target structure(s):\n  " + "\n  ".join(bad))
+print(f"  {len(list(Path(sys.argv[1]).glob('*.yaml')))} prepared YAML(s) resolved")
+CHECK
+
 # ----------------------------------------------------- 3b. FaMPNN 0.3
 FAMPNN="${FAMPNN_03:-}"
 if [ -z "$FAMPNN" ]; then
@@ -123,7 +146,7 @@ bundle ready: $BUNDLE
   selection : $BUNDLE/selection/selected_checkpoints.json
   A_BS s0   : $BUNDLE/checkpoints/bs_seq_sc/J03_seed0_step00000500.pt
   A_BS s1   : $BUNDLE/checkpoints/bs_seq_sc/J03_seed1_step00000500.pt
-  targets   : $BUNDLE/targets/binder_bench_targets
+  prepared  : $PREPARED        <-- pass this to --prepared-dir
   config    : $BUNDLE/targets/configs_binder_benchmark/targets.yaml
 
 next: read $BUNDLE/RUN_HERE.md

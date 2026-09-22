@@ -89,6 +89,13 @@ def main() -> None:
     parser.add_argument("--use-msa", action="store_true")
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--allow-feedback-policy-transfer", action="store_true")
+    parser.add_argument("--dump-logits", default=None, metavar="DIR",
+                        help="save the sequence head's per-step logits for "
+                             "every arm. Sizing instrument: the feedback moves "
+                             "the backbone ~0.005 A and the decode is an "
+                             "argmax, so what decides whether an arm can ever "
+                             "differ is the margin between the top two logits "
+                             "against the shift the residual induces.")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -486,6 +493,17 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
         binder_length=int(design.sum()), context=args.context,
         device=x0.device,
     )
+    # Sizing instrument, off unless --dump-logits. The hook reads the
+    # pretrained head through the same accessor the shared pre-logit path
+    # uses, so it observes exactly the tensor the decode argmaxes over.
+    captured, handle = [], None
+    if args.dump_logits:
+        from pxf.couple.shared_prelogit import sequence_head
+
+        handle = sequence_head(designer.model.denoiser.seq_design_module) \
+            .register_forward_hook(
+                lambda _m, _i, output: captured.append(
+                    output.detach().float().cpu()))
     with conditioned(designer.model, products.residual):
         packed = designer(
             coords_af2=final_inputs.coords_af2, aatype=products.aatype,
@@ -495,6 +513,21 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
             scn_context_mask=final_inputs.sidechain_context_mask,
             seed=pack_seed,
         )
+    if handle is not None:
+        handle.remove()
+        logit_dir = Path(args.dump_logits)
+        logit_dir.mkdir(parents=True, exist_ok=True)
+        # `design` arrives as a numpy array and `products.aatype` as a
+        # tensor; normalise both rather than assuming either.
+        def _cpu(value):
+            return (value.detach().cpu() if hasattr(value, "detach")
+                    else torch.as_tensor(value))
+
+        torch.save({"logits": torch.stack(captured) if captured else None,
+                    "n_calls": len(captured),
+                    "design_mask": _cpu(design),
+                    "aatype": _cpu(products.aatype)},
+                   logit_dir / f"{sample_id}.logits.pt")
     coords = _packed_coords(packed)
     mask = _packed_mask(packed, final_inputs.atom_mask)
     path = out / "designs" / f"{sample_id}.pdb"

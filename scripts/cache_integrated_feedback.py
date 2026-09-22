@@ -138,13 +138,16 @@ def main() -> None:
     identity = {
         "task": "integrated_feedback_v1",
         # SCHEMA VERSION. Bumped whenever the CONTENT of an event file
-        # changes, not just its metadata. v2 fixes two things a metadata flag
-        # could not express: h_base is now the matched side-chain ablation
-        # (same sequence and coordinates as h_packed, side chains hidden --
-        # v1 also varied the sequence and the coordinates), and the target's
-        # observed side-chain occupancy is preserved instead of being
-        # overwritten by generated availability. A v1 cache is not usable.
-        "cache_schema": 2,
+        # changes, not just its metadata.
+        #   v2: h_base became the matched side-chain ablation (same sequence
+        #       and coordinates as h_packed, side chains hidden); the target's
+        #       observed side-chain occupancy is preserved.
+        #   v3: the BINDER IS REDUCED TO N/CA/C/O before featurization. In v1
+        #       and v2 x_noisy carried the binder's deposited side chains with
+        #       only sigma=0.429 of noise on them -- its native geometry with
+        #       0.43 A of jitter, which the acceptance gate identified as a
+        #       leak. Earlier caches are not usable.
+        "cache_schema": 3,
         "pxdesign_sha256": sha256_file(args.pxdesign_donor),
         "fampnn_sha256": fampnn_sha,
         "fampnn_variant": args.fampnn_variant,
@@ -289,9 +292,18 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
 
     from pxf.couple.pxdesign_iface import BackboneTap
 
+    from pxf.bench.native_event_inputs import prepare
+
     started = time.time()
-    structure = featurize_native(
+    # The binder is reduced to backbone atoms BEFORE featurization, so it is
+    # represented as a generated binder is and its native side chains are
+    # neither an input nor a target. Without this step x_noisy carries them.
+    prepared = prepare(
         row.cif_path, row.converted_binder_chain,
+        out / "prepared", perturb="none",
+    )
+    structure = featurize_native(
+        prepared["path"], row.converted_binder_chain,
         crop_size=args.crop_size, device=device,
     )
     native_bb = structure.backbone_target.float().reshape(1, -1, 3).to(device)
@@ -322,6 +334,12 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
         structure.backbone_target.float().reshape(-1, 3).to(device)
     ).all(-1)
     supervised = (binder_atoms.bool() & backbone_slot & finite).float()
+    stray = int((binder_atoms.bool() & ~backbone_slot).sum())
+    if stray:
+        raise AssertionError(
+            f"{row.example_id}: {stray} binder side-chain atom(s) survived "
+            "preparation, so they would enter x_noisy"
+        )
 
     # The noisy state: deposited backbone corrupted to the event sigma on
     # BINDER atoms only. The target stays clean -- that is what "target
@@ -385,7 +403,10 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
         "path": str(path), "sigma": sigma,
         # Recorded per event so the trainer never re-derives them from a
         # manifest that may since have changed.
-        "cif_path": str(row.cif_path),
+        "cif_path": str(prepared["path"]),
+        "source_cif_path": str(row.cif_path),
+        "prepared_sha256": prepared["sha256"],
+        "sidechain_atoms_removed": prepared["sidechain_atoms_removed"],
         "binder_chain": str(row.converted_binder_chain),
         "namespace": namespace,
         "sha256": sha256_file(path),

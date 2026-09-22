@@ -152,13 +152,13 @@ def main() -> None:
                 "different upstream trains a correction for a distribution "
                 "that no longer exists."
             )
-    if int(identity.get("cache_schema", 1)) != 2:
+    if int(identity.get("cache_schema", 1)) != 3:
         raise SystemExit(
             f"cache reports schema {identity.get('cache_schema', 1)}; this "
-            "trainer requires 2. A v1 cache encoded h_base from a different "
-            "sequence AND different coordinates, so its bb_only arm was not "
-            "a matched ablation, and it overwrote the target's observed "
-            "side-chain occupancy. Rebuild it."
+            "trainer requires 3. v1/v2 caches carried the binder's deposited "
+            "side chains in x_noisy at only sigma=0.429 of noise, which the "
+            "acceptance gate identified as a leak, and v1 also encoded "
+            "h_base from a different sequence and coordinates. Rebuild it."
         )
     if not identity.get("stores_h_base"):
         raise SystemExit(

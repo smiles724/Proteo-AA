@@ -141,11 +141,16 @@ def main() -> None:
         name = target.get("name")
         if wanted and name not in wanted:
             continue
-        prepared = Path(args.prepared_dir) / f"{name}.yaml"
-        if not prepared.is_file():
-            print(f"SKIP {name}: no prepared YAML at {prepared}")
+        source = Path(args.prepared_dir) / f"{name}.yaml"
+        if not source.is_file():
+            print(f"SKIP {name}: no prepared YAML at {source}")
             continue
         for length in args.lengths:
+            # The prepared YAMLs carry `binder_lengths: [...]`; PXDesign's CLI
+            # wants a scalar `binder_length`. Reusing the helper
+            # cache_binder_backbones.py already has, rather than writing a
+            # second one that could disagree about the conversion.
+            prepared = _single_length_yaml(source, length, out)
             for gen_seed in args.seeds:
                 rows.extend(_one_cell(
                     name=name, length=length, gen_seed=gen_seed,
@@ -487,6 +492,22 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
         "psce": products.psce.cpu(),
     }, [str(path)])
     return path, coords
+
+
+def _single_length_yaml(source, length, out):
+    """One YAML per (target, length), via cache_binder_backbones' own helper."""
+    import importlib.util as ilu
+
+    spec = ilu.spec_from_file_location(
+        "_cache_bb", str(REPO_ROOT / "scripts" / "cache_binder_backbones.py")
+    )
+    module = ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    directory = Path(out) / "yaml"
+    directory.mkdir(parents=True, exist_ok=True)
+    return module._write_single_length_yaml(
+        Path(source), int(length), directory / f"{Path(source).stem}_L{length}.yaml"
+    )
 
 
 def _donor_file(checkpoint_dir):

@@ -73,6 +73,9 @@ ROW_COLUMNS = (
     "delta_h_norm", "feedback_norm",
     "event_to_final_aligned_rmsd", "event_to_final_raw_rmsd",
     "seconds",
+    "sequence_policy", "event_sequence", "output_sequence", "redecode_calls",
+    "sequence_decode_passes", "redecode_seed", "sequence_changed_positions",
+    "sequence_changed_fraction",
 )
 
 
@@ -103,6 +106,8 @@ def main() -> None:
                              "permits a donor mismatch.")
     parser.add_argument("--event-sigma", type=float, default=0.429,
                         help="the CHURNED sigma to place the event at")
+    parser.add_argument("--sequence-policy", default="event_fixed",
+                        choices=("event_fixed", "post_feedback_redesign"))
     parser.add_argument("--n-step", type=int, default=400)
     parser.add_argument("--step-scale-eta", type=float, default=2.5)
     parser.add_argument("--context", default="complex_sc",
@@ -154,7 +159,7 @@ def main() -> None:
 
     designer = FaMPNNFullAtomDesigner(
         args.fampnn_checkpoint, variant=args.fampnn_variant,
-        seq_steps=args.seq_steps, temperature=args.temperature,
+        seq_steps=args.seq_steps, num_steps=args.pack_steps, temperature=args.temperature,
         psce_threshold=args.psce_threshold, repack_last=True,
     ).to(denoiser.device).eval()
     designer.model.requires_grad_(False)
@@ -210,12 +215,15 @@ def main() -> None:
     for index in range(args.n_samples):
         seed = args.seed + index
         sample_id = f"{args.target}_L{args.binder_length}_s{seed}__{arm}"
+        if args.sequence_policy != "event_fixed":
+            sample_id += f"__{args.sequence_policy}"
         sample = run_integrated(
             denoiser=denoiser, structure=structure, designer=designer,
             adapters=adapters, conditioner=conditioner,
             event_sigma=args.event_sigma, n_step=args.n_step,
             step_scale_eta=args.step_scale_eta, context=args.context,
             seed=seed, design_id=sample_id, target=args.target,
+            sequence_policy=args.sequence_policy,
         )
         pdb = _write_pdb(out / "designs" / f"{sample_id}.pdb", sample, structure)
         (out / "diagnostics" / f"{sample_id}.json").write_text(
@@ -236,6 +244,11 @@ def main() -> None:
             "target_chains": ",".join(target_chains),
             "arm": arm, "feedback_arm": (args.feedback_arm if conditioner else ""),
             "coupled": int(adapters is not None), "seed": seed,
+            **{k: d[k] for k in (
+                "sequence_policy", "event_sequence", "output_sequence",
+                "redecode_calls", "sequence_decode_passes", "redecode_seed",
+                "sequence_changed_positions", "sequence_changed_fraction",
+            )},
             **{k: d.get(k) for k in (
                 "requested_sigma", "actual_sigma", "scheduled_sigma",
                 "sigma_churn_ratio", "event_step", "n_step", "step_scale_eta",
@@ -258,6 +271,7 @@ def main() -> None:
     (out / "provenance.json").write_text(json.dumps({
         "arm": arm,
         "protocol": "integrated_single_event",
+        "sequence_policy": args.sequence_policy,
         "event": choice.record(),
         "bs_checkpoint": args.bs_checkpoint,
         "bs_checkpoint_sha256": (

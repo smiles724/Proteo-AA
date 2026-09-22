@@ -47,7 +47,13 @@ PROTEO_AA = Path(os.environ.get("PROTEOAA_ROOT", "/users/yfsun/Proteo-AA"))
 
 def load_rows(path):
     with open(path, newline="") as handle:
-        return list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle))
+    policies = {r.get("sequence_policy") or "event_fixed" for r in rows}
+    if len(policies) > 1:
+        raise ValueError(
+            f"mixed sequence policies {sorted(policies)}; report each policy separately"
+        )
+    return rows
 
 
 def number(value):
@@ -166,6 +172,7 @@ def main() -> None:
 
     report = {
         "n_designs": len(rows), "arms": arms,
+        "sequence_policy": (rows[0].get("sequence_policy") or "event_fixed") if rows else None,
         "plumbing": plumbing, "chemistry": chemistry,
         "comparisons": comparisons,
         "designability": None,

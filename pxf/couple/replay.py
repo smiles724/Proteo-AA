@@ -310,6 +310,7 @@ def run_trajectory(
     resume=None,
     event=None,
     feedback=None,
+    after_event=None,
     fixed_target=None,
     identity=None,
 ):
@@ -323,7 +324,10 @@ def run_trajectory(
     installed, its ``x_noisy``/``sigma`` are denoised directly, and the loop then
     continues from the following step. ``event`` is a ``(step, substage)`` key;
     when it matches, ``feedback(state)`` supplies the residual for that single
-    invocation and no other.
+    invocation and no other. Optional ``after_event(state, x_denoised)``
+    observes that invocation's result before the solver advances. It runs
+    under RNG protection, including when the event has no feedback. Its
+    return value does not change the solver estimate.
     """
     schedule = schedule.to(device=device, dtype=torch.float32)
     record_steps = {int(s) for s in record_steps}
@@ -355,7 +359,11 @@ def run_trajectory(
             if residual is not None:
                 stats["injections"] += 1
         stats["calls"] += 1
-        return denoise(x_noisy, sigma, feedback=residual)
+        x_denoised = denoise(x_noisy, sigma, feedback=residual)
+        if after_event is not None and event is not None and state.key == tuple(event):
+            with stream.protected():
+                after_event(state, x_denoised)
+        return x_denoised
 
     with stream.active():
         if resume is None:

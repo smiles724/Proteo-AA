@@ -19,8 +19,9 @@ RNG as well as the coordinates.
 ### What is shared and what is not
 
 For a fixed A_BS seed, the three J03 arms -- no-feedback, E1-BB-only, E1-full
--- share the prefix AND the event's designed sequence and packing. Only the
-feedback payload differs, so the comparison isolates it exactly.
+-- share the prefix AND the first event decode's sequence and packing.
+With ``post_feedback_redesign``, each arm then decodes its own corrected
+estimate, using matched decode seeds. Output sequences may therefore differ.
 
 U03 shares the prefix but runs its OWN unadapted event decode. Its different
 sequence is part of the method contrast, not a confound: U03 is the claim that
@@ -56,6 +57,10 @@ ROW_COLUMNS = (
     "event_to_final_aligned_rmsd", "min_bb_bb_distance", "interface_clashes",
     "min_bb_only_distance", "interface_clashes_bb_only",
     "seconds",
+    "sequence_policy", "event_sequence", "output_sequence", "redecode_calls",
+    "sequence_decode_passes", "redecode_seed", "sequence_changed_positions",
+    "sequence_changed_fraction", "redecode_hook_calls", "redecode_abs_source",
+    "final_pack_residual_source", "immediate_event_coordinate_rmsd",
 )
 
 
@@ -79,6 +84,10 @@ def main() -> None:
     parser.add_argument("--lengths", nargs="*", type=int, default=[100])
     parser.add_argument("--seeds", nargs="*", type=int, default=[101, 102])
     parser.add_argument("--event-sigma", type=float, default=0.429)
+    parser.add_argument("--sequence-policy", default="event_fixed",
+                        choices=("event_fixed", "post_feedback_redesign"),
+                        help="post_feedback_redesign re-decodes every arm, including "
+                             "controls, on its corrected event backbone")
     parser.add_argument("--n-step", type=int, default=400)
     parser.add_argument("--step-scale-eta", type=float, default=2.5)
     parser.add_argument("--context", default="complex_sc")
@@ -90,12 +99,8 @@ def main() -> None:
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--allow-feedback-policy-transfer", action="store_true")
     parser.add_argument("--dump-logits", default=None, metavar="DIR",
-                        help="save the sequence head's per-step logits for "
-                             "every arm. Sizing instrument: the feedback moves "
-                             "the backbone ~0.005 A and the decode is an "
-                             "argmax, so what decides whether an arm can ever "
-                             "differ is the margin between the top two logits "
-                             "against the shift the residual induces.")
+                        help="save head outputs during final fixed-sequence packing; "
+                             "these are not the sequence-redesign decisions")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -198,6 +203,7 @@ def main() -> None:
                            for k, v in bs_by_seed.items()},
         "feedback_selection": feedback_selection,
         "event_sigma_requested": args.event_sigma,
+        "sequence_policy": args.sequence_policy,
         "n_step": args.n_step, "step_scale_eta": args.step_scale_eta,
         "decoder": {"seq_steps": args.seq_steps, "pack_steps": args.pack_steps,
                     "temperature": args.temperature,
@@ -235,7 +241,7 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     )
     designer = api["FaMPNNFullAtomDesigner"](
         args.fampnn_checkpoint, variant=args.fampnn_variant,
-        seq_steps=args.seq_steps, temperature=args.temperature,
+        seq_steps=args.seq_steps, num_steps=args.pack_steps, temperature=args.temperature,
         psce_threshold=args.psce_threshold, repack_last=True,
     ).to(denoiser.device).eval()
     designer.model.requires_grad_(False)
@@ -329,8 +335,14 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
              gen_seed, bs_seed, args, out, api):
     """Resume from the recorded event and finish this arm's trajectory."""
     import torch
+    from pxf.bench.integrated_redecode import (
+        REDECODE_SEED_OFFSET, check_sequence_policy, redecode_after_feedback,
+        sequence_diagnostics,
+    )
 
     started = time.time()
+    policy = check_sequence_policy(args.sequence_policy)
+    redecode_seed = int(gen_seed) + REDECODE_SEED_OFFSET
     conditioner = None
     if feedback_path:
         c_s, c_z = api["conditioning_widths"](denoiser.model)
@@ -362,7 +374,7 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             allow_transfer=args.allow_feedback_policy_transfer,
         )
 
-    state = {"products": shared, "feedback_norm": 0.0}
+    state = {"products": shared, "output_products": None, "feedback_norm": 0.0}
 
     with api["BackboneTap"](denoiser.model.diffusion_module) as tap:
 
@@ -383,6 +395,7 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                     want_h_base=True,
                 )
             products = state["products"]
+            state["tap_before_correction"] = tap.calls
             if conditioner is None:
                 return None
             raw, _stats = conditioner(
@@ -401,6 +414,17 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                 )
             return delta
 
+        def after_event(sampler_state, corrected_bb):
+            if tap.calls != state["tap_before_correction"] + 1:
+                raise RuntimeError("re-decoding requires exactly one fresh corrected a_token capture")
+            state["output_products"] = redecode_after_feedback(
+                initial=state["products"], corrected_bb=corrected_bb,
+                corrected_a_token=tap.a_token, sigma=sampler_state.sigma,
+                structure=structure, designer=designer, adapters=adapters,
+                seed=redecode_seed, context=args.context,
+                design_id=prefix_id, target=name,
+            )
+
         stream = api["RngStream"](
             "integrated", gen_seed, device=_cuda(denoiser.device)
         )
@@ -412,13 +436,19 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             device=denoiser.device, n_sample=1,
             step_scale_eta=args.step_scale_eta, stream=stream,
             resume=recorded, event=choice.key, feedback=feedback,
+            after_event=after_event if policy == "post_feedback_redesign" else None,
         )
         conditioning_injections = tap.conditioning_injections
 
-    products = state["products"]
+    initial = state["products"]
+    if policy == "post_feedback_redesign" and state["output_products"] is None:
+        raise RuntimeError("post-feedback sequence decode did not run")
+    products = state["output_products"] or initial
     sample_id = f"{prefix_id}__{arm_label}" + (
         f"_bs{bs_seed}" if bs_seed is not None else ""
     )
+    if policy != "event_fixed":
+        sample_id += f"__{policy}"
     # R7.5: repack the event's sequence on THIS arm's final backbone and write
     # the PDB. Returning design_pdb="" meant the matrix could not feed AF2-IG
     # at all, which is the whole point of generating.
@@ -431,6 +461,7 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
     row = {
         "sample_id": sample_id, "target": name, "binder_length": length,
         "sequence": products.binder_sequence,
+        **sequence_diagnostics(initial, products, policy=policy, seed=redecode_seed),
         "design_pdb": str(pdb), "binder_chain": geometry["binder_chain"],
         "target_chains": ",".join(geometry["target_chains"]),
         "arm": arm_label, "feedback_arm": (arm_label if conditioner else ""),
@@ -440,16 +471,16 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
         "actual_sigma": choice.actual_sigma, "event_step": choice.step,
         "solver_calls": int(stats["calls"]),
         "conditioning_injections": int(conditioning_injections),
-        "decode_hook_calls": products.provenance.get("decode_hook_calls"),
-        "delta_h_norm": products.provenance.get("delta_h_norm"),
+        "decode_hook_calls": initial.provenance.get("decode_hook_calls"),
+        "delta_h_norm": initial.provenance.get("delta_h_norm"),
         "feedback_norm": state["feedback_norm"],
-        "event_to_final_aligned_rmsd": _aligned(products.bb0, x0),
+        "event_to_final_aligned_rmsd": _aligned(initial.bb0, x0),
         "min_bb_bb_distance": geometry["min_bb_bb"],
         "interface_clashes": geometry["clashes"],
         "min_bb_only_distance": geometry["min_bb_only"],
         "interface_clashes_bb_only": geometry["clashes_bb_only"],
         "seconds": round(time.time() - started, 2),
-        "_shared": products,
+        "_shared": initial,
     }
     print(f"  {arm_label}: injections={row['conditioning_injections']} "
           f"calls={row['solver_calls']} "
@@ -459,6 +490,18 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
           f"{geometry['clashes_bb_only']}")
     torch.save({"x0": x0.detach().cpu()},
                out / "diagnostics" / f"{sample_id}.backbone.pt")
+    (out / "diagnostics" / f"{sample_id}.json").write_text(json.dumps(
+        {k: v for k, v in row.items() if k != "_shared"}, indent=2,
+    ))
+    if policy == "post_feedback_redesign":
+        torch.save({
+            "event_aatype": initial.aatype.detach().cpu(),
+            "output_aatype": products.aatype.detach().cpu(),
+            "binder_mask": products.binder_mask.detach().cpu(),
+            "bb0": initial.bb0.detach().cpu(),
+            "bb1": products.bb0.detach().cpu(),
+            "sigma": products.sigma, "redecode_seed": redecode_seed,
+        }, out / "diagnostics" / f"{sample_id}.redecode.pt")
     return row
 
 
@@ -471,7 +514,7 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
     from pxf import atom37
     from pxf.bench.backbone_inputs import build_design_inputs, check_design_mask
     from pxf.bench.coupled_design import conditioned
-    from pxf.bench.integrated import _packed_coords, _packed_mask
+    from pxf.bench.integrated import _packed_coords, _packed_mask, _packed_psce
     from fampnn.model.sd_model import SeqDenoiser
 
     topology = structure.topology
@@ -495,7 +538,7 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
     )
     # Sizing instrument, off unless --dump-logits. The hook reads the
     # pretrained head through the same accessor the shared pre-logit path
-    # uses, so it observes exactly the tensor the decode argmaxes over.
+    # uses. This is FINAL FIXED-SEQUENCE PACKING, not the redesign logits.
     captured, handle = [], None
     if args.dump_logits:
         from pxf.couple.shared_prelogit import sequence_head
@@ -504,17 +547,20 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
             .register_forward_hook(
                 lambda _m, _i, output: captured.append(
                     output.detach().float().cpu()))
-    with conditioned(designer.model, products.residual):
-        packed = designer(
-            coords_af2=final_inputs.coords_af2, aatype=products.aatype,
-            atom_mask=final_inputs.atom_mask, seq_mask=final_inputs.seq_mask,
-            residue_index=final_inputs.residue_index,
-            chain_index=final_inputs.chain_index,
-            scn_context_mask=final_inputs.sidechain_context_mask,
-            seed=pack_seed,
-        )
+    try:
+        with conditioned(designer.model, products.residual):
+            packed = designer(
+                coords_af2=final_inputs.coords_af2, aatype=products.aatype,
+                atom_mask=final_inputs.atom_mask, seq_mask=final_inputs.seq_mask,
+                residue_index=final_inputs.residue_index,
+                chain_index=final_inputs.chain_index,
+                scn_context_mask=final_inputs.sidechain_context_mask,
+                seed=pack_seed,
+            )
+    finally:
+        if handle is not None:
+            handle.remove()
     if handle is not None:
-        handle.remove()
         logit_dir = Path(args.dump_logits)
         logit_dir.mkdir(parents=True, exist_ok=True)
         # `design` arrives as a numpy array and `products.aatype` as a
@@ -523,7 +569,8 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
             return (value.detach().cpu() if hasattr(value, "detach")
                     else torch.as_tensor(value))
 
-        torch.save({"logits": torch.stack(captured) if captured else None,
+        torch.save({"stage": "final_fixed_sequence_packing",
+                    "logits": torch.stack(captured) if captured else None,
                     "n_calls": len(captured),
                     "design_mask": _cpu(design),
                     "aatype": _cpu(products.aatype)},
@@ -548,7 +595,7 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
         "residue_index": topology.residue_index.reshape(1, -1).cpu().long(),
         "chain_index": topology.chain_index.reshape(1, -1).cpu().long(),
         "pred_aatype": products.aatype.cpu().long(),
-        "psce": products.psce.cpu(),
+        "psce": _packed_psce(packed, products).cpu(),
     }, [str(path)])
     return path, coords
 

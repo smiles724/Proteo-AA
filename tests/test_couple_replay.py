@@ -255,3 +255,27 @@ def test_the_denoiser_reads_the_target_at_its_reference():
         f"the denoiser saw the target displaced by up to {worst:.3f} A; the "
         "churn is noising the fixed atoms before the model reads them"
     )
+
+
+def test_after_event_observes_corrected_estimate_once_and_preserves_rng():
+    import numpy as np
+
+    event = (3, 0)
+    payload = torch.ones(1, 2, 3) * .1
+    plain, _, plain_stats = mine(91, event=event, feedback=lambda _: payload)
+    seen = []
+
+    def after(state, estimate):
+        seen.append(state.key)
+        expected = stub_denoise()(state.x_noisy, state.sigma, feedback=payload)
+        assert torch.equal(estimate, expected)
+        torch.manual_seed(123456)
+        np.random.seed(123456)
+        torch.rand(1000)
+        np.random.rand(1000)
+        return torch.zeros_like(estimate)  # observational callback only
+
+    got, _, stats = mine(91, event=event, feedback=lambda _: payload, after_event=after)
+    assert seen == [event]
+    assert torch.equal(got, plain)
+    assert stats['calls'] == plain_stats['calls']

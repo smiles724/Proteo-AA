@@ -11,14 +11,18 @@ what the designer produced, so backbone and sequence co-determine each other:
                        seq, sc      = FaMPNN_iter(bb0; A_BS)    100 steps
                        delta        = E1(h_packed, sigma)       feedback
                        bb1          = D(x_noisy, sigma, delta)  SAME state
+                       optional: seq1, sc1 = FaMPNN_iter(bb1; A_BS(a1))
                        advance the solver once, using bb1
     steps E+1 .. N     stock PXDesign
-    finally            repack the event's sequence on the final backbone
+    finally            repack the selected sequence on the final backbone
 
 With the shipped 400 steps that is **401 denoiser evaluations**: 400 solver
 calls plus the one provisional call at the event. No complete baseline
 trajectory runs first, and FaMPNN runs its configured decoder once at the
-event plus one final packing rollout.
+event plus one final packing rollout. ``post_feedback_redesign`` adds one
+sequence decode after correction, using fresh corrected a_token at the same
+sigma. No-feedback controls receive that extra decode too; there is no second
+feedback injection or extra PXDesign evaluation.
 
 ### Why the solver is reused rather than rewritten
 
@@ -149,7 +153,7 @@ class IntegratedSample:
     """One finished integrated design."""
 
     x0: torch.Tensor                  # [1, n_atom, 3] the final backbone
-    aatype: torch.Tensor              # [1, L] the event's sequence, held
+    aatype: torch.Tensor              # [1, L] the selected output sequence, held
     sequence: str
     binder_sequence: str
     coords_af2: torch.Tensor          # [1, L, 37, 3] repacked on the final bb
@@ -198,6 +202,7 @@ def run_integrated(
     design_id: str = "integrated",
     target: str = "target",
     pack_seed: Optional[int] = None,
+    sequence_policy: str = "event_fixed",
     device=None,
 ) -> IntegratedSample:
     """One integrated trajectory. ``conditioner`` None = the A_BS-only control."""
@@ -207,15 +212,22 @@ def run_integrated(
                                              mask_feedback, prepare_event)
     from pxf.couple.pxdesign_iface import BackboneTap
     from pxf.couple.replay import RngStream, run_trajectory
+    from pxf.bench.integrated_redecode import (
+        REDECODE_SEED_OFFSET, check_sequence_policy, redecode_after_feedback,
+        sequence_diagnostics,
+    )
 
     import numpy as np
 
     device = device or denoiser.device
     schedule = denoiser.schedule(n_step)
     choice = select_event(schedule, event_sigma)
+    check_sequence_policy(sequence_policy)
+    redecode_seed = int(seed) + REDECODE_SEED_OFFSET
 
     stats: dict[str, Any] = {
         "event_products": None,
+        "output_products": None,
         "feedback_norm": 0.0,
         "feedback_installed": conditioner is not None,
         "provisional_calls": 0,
@@ -246,10 +258,11 @@ def run_integrated(
                 design_id=design_id,
                 target=target,
                 tap=tap,
-                want_h_base=False,
+                want_h_base=conditioner is not None,
             )
             stats["event_products"] = products
             stats["provisional_calls"] += 1
+            stats["tap_before_correction"] = tap.calls
             if conditioner is None:
                 return None  # the A_BS-only control: no correction at all
             # POSITIONAL PackedStructure, and it returns a PAIR. Passing
@@ -271,6 +284,17 @@ def run_integrated(
                 stats["feedback_norm"] = _payload_norm(delta)
             return delta
 
+        def after_event(state, corrected_bb):
+            if tap.calls != stats["tap_before_correction"] + 1:
+                raise RuntimeError("re-decoding requires exactly one fresh corrected a_token capture")
+            stats["output_products"] = redecode_after_feedback(
+                initial=stats["event_products"], corrected_bb=corrected_bb,
+                corrected_a_token=tap.a_token, sigma=state.sigma,
+                structure=structure, designer=designer, adapters=adapters,
+                seed=redecode_seed, context=context, design_id=design_id,
+                target=target,
+            )
+
         # `device=` is REQUIRED on CUDA: without it RngStream records
         # cuda=None and never captures or restores the CUDA generator, so
         # sharing coordinates and the CPU stream does not give paired GPU
@@ -287,6 +311,7 @@ def run_integrated(
             stream=stream,
             event=choice.key,
             feedback=feedback,
+            after_event=after_event if sequence_policy == "post_feedback_redesign" else None,
             fixed_target=None,  # audit section 9: never in the generation path
             identity={"design_id": design_id, "target": target},
         )
@@ -294,14 +319,17 @@ def run_integrated(
         conditioning_injections = tap.conditioning_injections
         late_injections = tap.injections
 
-    products = stats["event_products"]
-    if products is None:
+    initial = stats["event_products"]
+    if initial is None:
         raise RuntimeError(
             f"the event at step {choice.step} never fired; the trajectory ran "
-            "{solver_stats['calls']} call(s) and no sequence was designed"
+            f"{solver_stats['calls']} call(s) and no sequence was designed"
         )
+    if sequence_policy == "post_feedback_redesign" and stats["output_products"] is None:
+        raise RuntimeError("post-feedback sequence decode did not run")
+    products = stats["output_products"] or initial
 
-    # ---- final packing: the EVENT's sequence, on the FINAL backbone --------
+    # ---- final packing: the selected sequence, on the FINAL backbone -------
     # Not the event's side-chain coordinates: those were packed for bb0, which
     # this backbone has since moved away from. The A_BS residual IS reused,
     # with the event's actual sigma, rather than re-queried at some arbitrary
@@ -341,10 +369,11 @@ def run_integrated(
         )
 
     binder = products.binder_mask.reshape(-1).bool()
-    event_bb = products.bb0.reshape(-1, 3)
+    event_bb = initial.bb0.reshape(-1, 3)
     diagnostics = {
         **choice.record(),
-        **products.provenance,
+        **initial.provenance,
+        **sequence_diagnostics(initial, products, policy=sequence_policy, seed=redecode_seed),
         "solver_calls": int(solver_stats["calls"]),
         "solver_injections": int(solver_stats["injections"]),
         "augmentations": int(solver_stats["augmentations"]),

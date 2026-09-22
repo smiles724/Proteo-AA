@@ -68,7 +68,7 @@ class EventProducts:
     atom_mask_af2: torch.Tensor       # [1, L, 37] what the designer produced
     availability: torch.Tensor        # [1, L, 37] generated-atom availability
                                       #   (Visibility.available, not the input mask)
-    h_base: Optional[torch.Tensor]    # encoder features of bb0, sequence masked
+    h_base: Optional[torch.Tensor]    # same designed sequence, SC masked
     h_packed: torch.Tensor            # encoder features of the REALIZED state
     packed: Any                       # pxf.couple.visibility.PackedStructure --
                                       #   what the feedback readout is ALLOWED
@@ -184,18 +184,9 @@ def prepare_event(
     injection counters would double-count and a later residual would be added
     twice. Passing it in is how that is avoided rather than hoped for.
     """
-    from pxf.bench.backbone_inputs import build_design_inputs, check_design_mask
-    from pxf.bench.coupled_design import build_residual, conditioned
-    from pxf.couple.fampnn_iface import encode
     from pxf.couple.pxdesign_iface import BackboneTap
-    from pxf.couple.visibility import (PackedStructure,
-                                       predicted_availability)
-
-    import numpy as np
 
     device = x_noisy.device
-    topology = structure.topology
-    n_tokens = int(structure.num_tokens)
     sigma_t = torch.full((1,), float(sigma), device=device, dtype=torch.float32)
 
     # ---- 1. the provisional estimate, and the features A_BS reads ---------
@@ -218,6 +209,39 @@ def prepare_event(
             f"the tap saw {tap_calls} denoiser call(s) for the provisional "
             "estimate, expected exactly 1"
         )
+
+    return design_from_estimate(
+        bb0=bb0, a_token=a_token, sigma=sigma, structure=structure,
+        designer=designer, adapters=adapters, mask_mode=mask_mode,
+        context=context, seed=seed, design_id=design_id, target=target,
+        residual_source=residual_source, want_h_base=want_h_base,
+        tap_calls=tap_calls,
+    )
+
+
+def design_from_estimate(
+    *, bb0, a_token, sigma, structure, designer, adapters=None,
+    mask_mode="generated", context="complex_sc", seed=0,
+    design_id="event", target="target", residual_source="matched",
+    want_h_base=True, tap_calls=0,
+) -> EventProducts:
+    """Decode an already evaluated clean estimate; never call PXDesign here.
+
+    Shared by the original event and optional post-correction re-decoding.
+    Binder identities are reset to X by build_design_inputs, binder SC are
+    hidden, and target sequence/context are supplied from the topology. The
+    caller supplies features tapped from THIS estimate's PXDesign evaluation.
+    """
+    import numpy as np
+
+    from pxf.bench.backbone_inputs import build_design_inputs, check_design_mask
+    from pxf.bench.coupled_design import build_residual, conditioned
+    from pxf.couple.fampnn_iface import encode
+    from pxf.couple.visibility import PackedStructure, predicted_availability
+
+    device = bb0.device
+    topology = structure.topology
+    n_tokens = int(structure.num_tokens)
 
     # ---- 2. the complex, through the matrix's own mapping ------------------
     a2t = np.asarray(topology.atom_to_token_idx.cpu()).astype(int)

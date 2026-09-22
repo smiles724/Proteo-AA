@@ -39,6 +39,32 @@ python3 scripts/utilities/interface_minima.py \
     runs/binder_bench/designs_v1/PDL1/designs/*.pdb
 ```
 
+## Provenance of the table above: PDB files, not `_geometry`
+
+The 96-design numbers were measured from the written PDBs with
+`scripts/utilities/interface_minima.py`. They are **not** `_geometry`-derived
+-- `designs_v1` came from `design_binder_matrix.py`, the cached-backbone
+path, which has no `_geometry` at all.
+
+This matters because the two are on different scales for the all-atom
+quantity. `_geometry` runs on `x0`, the diffusion output, BEFORE `_finalise`
+repacks; the binder there is still the `xpb` placeholder and its non-backbone
+coordinates never reach the PDB. Measured on identical structures, the
+divergence is systematic:
+
+| | `_geometry` (in-run, pre-repack) | `interface_minima.py` (from PDB) |
+|---|---|---|
+| backbone-only min | 4.1433-4.1499 Å | 4.143-4.150 Å |
+| backbone pairs < 2.6 Å | 0 | 0 |
+| all-atom min | 1.031-1.035 Å | 1.616-2.777 Å |
+| all-atom pairs < 2.6 Å | 5 | 0-1 |
+
+The backbone agrees to four decimals because repacking does not move the
+backbone. That agreement is what identifies the cause.
+
+**Compare all-atom numbers only within one tool.** The PDB-derived one is
+what AF2-IG effectively sees, since it reads the files.
+
 ## What follows
 
 1. **A `clash_free` count near zero is the expected reading for good

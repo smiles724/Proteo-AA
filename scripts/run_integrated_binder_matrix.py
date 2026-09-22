@@ -600,6 +600,24 @@ def _geometry(x0, structure, binder_mask):
     mis-specified, and retuning a declared threshold after seeing results is
     how you select the answer you already wanted. Both numbers are emitted;
     the choice of guardrail is a separate, deliberate decision.
+
+    ONE MORE THING ABOUT THE ALL-ATOM NUMBER. This runs on ``x0``, the
+    diffusion output, which is the state BEFORE ``_finalise`` repacks. The
+    binder there is still the ``xpb`` placeholder, so its non-backbone
+    coordinates are diffusion artifacts that never reach the PDB -- FaMPNN
+    builds the real side chains during repacking. The written file therefore
+    carries a different all-atom interface from the one measured here, by
+    0.6-1.7 A in practice, and it is the file that AF2-IG reads.
+
+    The backbone is untouched by repacking, which is why the backbone-only
+    number agrees with a PDB-derived measurement to four decimals while the
+    all-atom one does not. That agreement is the evidence for this reading.
+
+    So: treat ``min_bb_bb``/``clashes`` as a PRE-REPACK diagnostic, not as a
+    property of the design. For the as-written all-atom interface run
+    ``scripts/utilities/interface_minima.py`` over the design PDBs, which is
+    also the scale ``docs/results/interface_metric_calibration.md`` is
+    calibrated on -- that table was measured from PDB files, not from here.
     """
     import numpy as np
     import torch

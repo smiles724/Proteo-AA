@@ -159,6 +159,10 @@ def main() -> None:
         # Deliberately absent: anything derived from the native binder
         # identity or side chains.
         "excludes_native_binder_labels": True,
+        # Part of the KEY: a cache without h_base cannot serve the bb_only
+        # arm, and nothing else in this dict would have distinguished the two.
+        # A stale cache would otherwise be silently reused.
+        "stores_h_base": True,
     }
     key = cache_key(identity)
     out = Path(args.out)
@@ -296,7 +300,14 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
                 mask_mode="native",   # deposited complex: no 'xpb' marker
                 context=args.context,
                 seed=seed, design_id=str(row.example_id),
-                target=str(row.example_id), tap=tap, want_h_base=False,
+                target=str(row.example_id), tap=tap,
+                # REQUIRED, not optional. The bb_only control reads h_base --
+                # the side-chain-masked encoding -- and that is exactly what
+                # makes it a control. Caching without it to save an encoder
+                # pass made the control refuse to run, which is the readout
+                # declining to substitute another encoding and silently stop
+                # being a control. It costs one extra encode per event.
+                want_h_base=True,
             )
 
     path = out / "events" / f"{row.example_id}_e{event_index}.pt"

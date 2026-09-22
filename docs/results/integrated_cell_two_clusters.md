@@ -44,40 +44,55 @@ So the bs0/bs1 split was **backbone-specific**, not a property of the A_BS
 seeds. The bs1 sequences moved from ipTM 0.34 to 0.76 on a backbone change
 alone.
 
-## The size of the backbone effect
+## What varied, stated carefully
 
-The same three sequence procedures, on two backbones of the same target,
-length and generation seed: **1/3 designable versus 3/3**. Nothing about the
-sequence stage changed between those two columns.
+The same three sequence-generation procedures, on two complete runs of the
+same target, length and generation seed: **1/3 designable versus 3/3**.
 
-This is the same ordering seen across the AlphaProteo Table 4 rows, where
-results agree more closely by backbone generator (mean abs 11.8 pp) than by
-sequence designer (22.9 pp). Here it is visible within a single cell.
+That is descriptive evidence of substantial instability across these two
+cells. It is **not** an isolated backbone effect, and four things stop it
+being one:
 
-## What this does not license
+1. **"Backbone change alone" is not isolated.** The procedure was held
+   fixed, but its input backbone changed and so did its output sequence.
+   Cluster and runtime differences can affect generation and scoring too.
+   Attributing the swing specifically to backbone geometry needs tighter
+   controls -- at minimum, cross-scoring the identical saved structures and
+   sequences on both clusters.
+2. **Two backbones cannot establish a variance hierarchy.** U03 moving from
+   ipTM 0.322 to 0.797 is a large descriptive swing. "Between-backbone
+   variance dominates the arm effect" is a claim about two variance
+   components and needs several independent backbones with paired arm
+   differences inside each.
+3. **Shared-backbone pairing remains essential, not discredited.** It is
+   what measures the intervention while controlling upstream variability.
+   The right design is **multiple independent backbone prefixes with every
+   arm evaluated within each prefix** -- pairing and backbone diversity are
+   complementary, not alternatives.
+4. **Three sequences from seven arms is expected by construction.** The
+   feedback arms inherit their matching J03 sequence (see below). That tells
+   us nothing about feedback strength. They are neither seven independent
+   sequence trials nor automatically redundant *structural* evaluations,
+   since their geometry and packing can still differ.
 
-**Not a U03 < J03 result, and not a U03 > J03 result.** U03 is worst on one
-backbone and best on the other. n = 2 distinct sequences per arm across both
-cells. The existing 480-design comparison on the cached-backbone path is the
-only powered estimate available and it is null: J03 26.9% vs U03 26.5%,
-+0.42 pp, p = 0.86.
-
-**Not a feedback result, and not capable of being one.** The feedback arms
-contributed zero distinct sequences in either cell, and that is **enforced by
-the protocol**: the three arms in an A_BS seed share one event decode, and
-`_finalise` repacks that fixed event sequence onto each arm's backbone. No
-sequence-design step runs after the feedback. Their ipTM differs from the
-matching J03 arm by 0.002-0.006 -- the AF2 run-to-run floor -- because they
-are folding the same sequence on a backbone that moved 0.005 Å. This
-comparison isolates the geometric contribution of feedback by design; it
-cannot measure a sequence effect, and the sequence equality says nothing
-about the intervention's magnitude.
+What the cells do establish is narrower and still useful: **the apparent
+A_BS seed separation in the HAI cell did not reproduce on Marlowe.**
 
 ## Consequence for sizing
 
-Between-backbone variance dominates both the arm effect and the seed effect
-at this sample size. Any design of the 28-design smoke that varies arms
-while holding the backbone fixed will measure the wrong thing. Generation
-seeds have to be the outer loop and there have to be enough of them for the
-backbone distribution to average out -- which the earlier n=48-per-target
-work achieved with 8 seeds x 6 lengths.
+**The generation seed is the independent experimental unit; shared-prefix
+pairing belongs inside it.** One cell is one prefix, so two cells are two
+prefixes -- far too few to separate arm effects from prefix-to-prefix
+spread, whatever its source.
+
+The revised next step:
+
+| step | scope | purpose |
+|---|---|---|
+| scoring reproducibility | cross-score the *exact* saved structures and sequences on both clusters, matched settings and seeds | separate scoring variation from generation differences |
+| expanded paired pilot | **2 targets x 8 generation seeds x 1 fixed length x 7 outputs = 112 designs** | 16 independent prefixes, with within-prefix comparisons preserved |
+| analysis | report each target and adapter seed separately; compare arms within prefixes | estimate consistency and uncertainty without treating seven arms as independent samples |
+
+Keep the current sigma and checkpoints fixed for this comparison, and
+measure the immediate `bb0 -> bb1` correction and its surviving
+final-backbone effect alongside the chemistry and AF2-IG results.

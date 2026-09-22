@@ -141,9 +141,16 @@ A design that fails this is a plumbing bug, not a weak design.
 
 ```bash
 python scripts/report_integrated_binder_matrix.py \
-  --designs $OUTROOT/generation_cell \
-  --out     $OUTROOT/generation_cell/report.json
+  --designs $OUTROOT/generation_cell/designs.csv \
+  --out     $OUTROOT/generation_cell/report
 ```
+
+`--designs` wants the **CSV**, not the run directory, and `--out` is a
+**directory** the script creates, not a filename. Once §3c has written
+`metrics/af2ig.csv`, re-run this with `--metrics-dir
+$OUTROOT/generation_cell/metrics` — the report globs `*.csv` from a
+directory, while `fold_af2ig.py` takes `--metrics-csv` for a single file, so
+the two compose only through that directory.
 
 The report runs plumbing → chemistry → designability in that order, and
 emits designability **only if** the AF2-IG metrics are present.

@@ -98,6 +98,11 @@ def main() -> None:
         subset = _rows_for(arm)
         clashes = [int(r["interface_clashes"] or 0) for r in subset]
         mins = [number(r["min_bb_bb_distance"]) for r in subset]
+        # Backbone-only is the discriminating number; all-atom under a 2.6 A
+        # threshold flags 94 of 96 designs that went on to be AF2-IG scored.
+        bb_mins = [number(r.get("min_bb_only_distance")) for r in subset]
+        bb_clashes = [int(r.get("interface_clashes_bb_only") or 0)
+                      for r in subset]
         transfer = [number(r["event_to_final_aligned_rmsd"]) for r in subset]
         chemistry[arm] = {
             "n": len(subset),
@@ -107,6 +112,10 @@ def main() -> None:
                 if clashes else None
             ),
             "min_bb_bb_median": _median(mins),
+            "min_bb_only_median": _median([m for m in bb_mins if m is not None]),
+            "min_bb_only_worst": min([m for m in bb_mins if m is not None],
+                                     default=None),
+            "clash_free_bb_only": sum(1 for c in bb_clashes if c == 0),
             "min_bb_bb_worst": min([m for m in mins if m is not None],
                                    default=None),
             "event_to_final_aligned_rmsd_median": _median(transfer),
@@ -178,6 +187,9 @@ def main() -> None:
     print("\nchemistry")
     for arm, facts in chemistry.items():
         print(f"  {arm:24s} clash-free {facts['clash_free']}/{facts['n']}  "
+              f"[bb-only] clash-free {facts['clash_free_bb_only']}/{facts['n']} "
+              f"median {facts['min_bb_only_median']} worst "
+              f"{facts['min_bb_only_worst']}  |  [all-atom] "
               f"min BB-BB median {facts['min_bb_bb_median']}  "
               f"event->final {facts['event_to_final_aligned_rmsd_median']} A")
     if comparisons:

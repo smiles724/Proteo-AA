@@ -54,6 +54,7 @@ ROW_COLUMNS = (
     "solver_calls", "conditioning_injections", "decode_hook_calls",
     "delta_h_norm", "feedback_norm",
     "event_to_final_aligned_rmsd", "min_bb_bb_distance", "interface_clashes",
+    "min_bb_only_distance", "interface_clashes_bb_only",
     "seconds",
 )
 
@@ -438,13 +439,17 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
         "event_to_final_aligned_rmsd": _aligned(products.bb0, x0),
         "min_bb_bb_distance": geometry["min_bb_bb"],
         "interface_clashes": geometry["clashes"],
+        "min_bb_only_distance": geometry["min_bb_only"],
+        "interface_clashes_bb_only": geometry["clashes_bb_only"],
         "seconds": round(time.time() - started, 2),
         "_shared": products,
     }
     print(f"  {arm_label}: injections={row['conditioning_injections']} "
           f"calls={row['solver_calls']} "
           f"event->final={row['event_to_final_aligned_rmsd']:.2f} A "
-          f"minBB={geometry['min_bb_bb']:.2f} A clashes={geometry['clashes']}")
+          f"minAllAtom={geometry['min_bb_bb']:.2f} A/{geometry['clashes']} "
+          f"minBBonly={geometry['min_bb_only']:.2f} A/"
+          f"{geometry['clashes_bb_only']}")
     torch.save({"x0": x0.detach().cpu()},
                out / "diagnostics" / f"{sample_id}.backbone.pt")
     return row
@@ -559,27 +564,79 @@ def _cuda(device):
     return device if device.type == "cuda" else None
 
 
+#: The four atoms the section-10 positive control measured. Named rather
+#: than slot-indexed -- see _geometry.
+BACKBONE_ATOM_NAMES = ("N", "CA", "C", "O")
+
+
 def _geometry(x0, structure, binder_mask):
-    """Interface geometry, the cheap chemistry screen the handoff asks for."""
+    """Interface geometry, the cheap chemistry screen the handoff asks for.
+
+    Reports the binder-target minimum TWICE, all-atom and backbone-only,
+    because the two are not interchangeable and comparing one against the
+    other's baseline produces a false alarm.
+
+    Measured over 96 scored PDL1 designs from the cached-backbone path:
+
+        all-atom min       median 1.83 A   range 0.52-2.65   2/96 clash-free
+        backbone-only min  median 4.10 A   range 1.99-5.87  92/96 clash-free
+
+    So `min_bb_bb` -- all-atom, despite the name it has carried -- flags 94 of
+    96 designs that went on to be AF2-IG scored. A `clash_free` count near
+    zero under that threshold is the expected reading for good designs, not
+    evidence of anything. The discriminating quantity is the BACKBONE-ONLY
+    pair, which is also what section 10's positive control measured (1jfl
+    2.44-4.61 A, native 2.79 A) and what section 9's genuine interpenetration
+    failed on (0.207 A with 282 pairs under 2.6 A).
+
+    The 2.6 A threshold is left as it is. It is mis-specified for the
+    all-atom quantity in the same way the side-chain guardrail is
+    mis-specified, and retuning a declared threshold after seeing results is
+    how you select the answer you already wanted. Both numbers are emitted;
+    the choice of guardrail is a separate, deliberate decision.
+    """
+    import numpy as np
     import torch
 
     from pxf.bench.backbone_inputs import CHAIN_LETTERS
 
-    asym = structure.topology.chain_index.reshape(-1)
-    a2t = structure.topology.atom_to_token_idx.reshape(-1).long()
+    topology = structure.topology
+    asym = topology.chain_index.reshape(-1)
+    a2t = topology.atom_to_token_idx.reshape(-1).long()
     binder_tokens = binder_mask.reshape(-1).bool()
     binder_atoms = binder_tokens[a2t]
     coords = x0.reshape(-1, 3)
     b, t = coords[binder_atoms], coords[~binder_atoms]
     if not len(b) or not len(t):
         return {"min_bb_bb": float("nan"), "clashes": -1,
+                "min_bb_only": float("nan"), "clashes_bb_only": -1,
                 "binder_chain": "?", "target_chains": []}
     distance = torch.cdist(b.float(), t.float())
+
+    # Backbone-only, by atom NAME. Not by atom37 slot arithmetic: the atom
+    # axis here is compact (only atoms that exist), which is why
+    # atom_to_token_idx is carried at all, so position-within-token is not
+    # the slot index and deriving one from the other silently mislabels
+    # every residue that is missing an atom.
+    names = np.asarray(topology.atom_names)
+    is_bb = torch.from_numpy(np.isin(names, BACKBONE_ATOM_NAMES)).to(
+        distance.device
+    )
+    bb_b, bb_t = is_bb[binder_atoms], is_bb[~binder_atoms]
+    if int(bb_b.sum()) and int(bb_t.sum()):
+        bb_distance = distance[bb_b][:, bb_t]
+        min_bb_only = float(bb_distance.min())
+        clashes_bb_only = int((bb_distance < 2.6).sum())
+    else:
+        min_bb_only, clashes_bb_only = float("nan"), -1
+
     ids = sorted({int(v) for v in asym.tolist()})
     bid = sorted({int(v) for v in asym[binder_tokens].tolist()})
     return {
         "min_bb_bb": float(distance.min()),
         "clashes": int((distance < 2.6).sum()),
+        "min_bb_only": min_bb_only,
+        "clashes_bb_only": clashes_bb_only,
         "binder_chain": CHAIN_LETTERS[bid[0]] if len(bid) == 1 else "?",
         "target_chains": [CHAIN_LETTERS[i] for i in ids if i not in bid],
     }

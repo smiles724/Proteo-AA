@@ -148,6 +148,49 @@ def select_event(
     return best
 
 
+def select_events(
+    schedule: torch.Tensor,
+    requested_sigmas,
+    *,
+    gamma0: float = GAMMA0,
+    gamma_min: float = GAMMA_MIN,
+) -> list[EventChoice]:
+    """One event per requested sigma, in trajectory order.
+
+    Each sigma is resolved by :func:`select_event`, so the selection rule is
+    the same one -- nearest CHURNED sigma -- and a single-element list is
+    exactly the single-event behaviour.
+
+    Two requested sigmas can land on the same solver invocation, and that is
+    refused rather than deduped. Silently collapsing them would make a run
+    labelled "four events" carry three, and the injection count is the
+    quantity the whole experiment is varying. Widen the spacing instead.
+
+    Returned in ascending step order, which is DESCENDING sigma: the
+    trajectory starts noisy. A caller that resumes from a shared prefix must
+    record at ``events[0]``.
+    """
+    requested = [float(value) for value in requested_sigmas]
+    if not requested:
+        raise ValueError("no event sigmas requested")
+
+    chosen: dict[tuple[int, int], EventChoice] = {}
+    for sigma in requested:
+        choice = select_event(
+            schedule, sigma, gamma0=gamma0, gamma_min=gamma_min
+        )
+        if choice.key in chosen:
+            clash = chosen[choice.key]
+            raise ValueError(
+                f"requested sigmas {clash.requested_sigma} and {sigma} both "
+                f"resolve to step {choice.step} (actual sigma "
+                f"{choice.actual_sigma:.4f}); they are the same injection, "
+                "not two. Space them further apart."
+            )
+        chosen[choice.key] = choice
+    return [chosen[key] for key in sorted(chosen)]
+
+
 @dataclass
 class IntegratedSample:
     """One finished integrated design."""

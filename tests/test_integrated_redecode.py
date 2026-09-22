@@ -235,7 +235,7 @@ def test_matrix_resumes_and_keeps_first_event_shared(tmp_path, monkeypatch):
     args = NS(sequence_policy='post_feedback_redesign', context='complex_sc', step_scale_eta=2.5)
     kwargs = dict(feedback_path=None, conditioner_arm=None, adapters=adapter,
         recorded=records[0], denoiser=denoiser, structure=structure(), designer=designer,
-        schedule=schedule, choice=choice, prefix_id='test', name='test', length=2,
+        schedule=schedule, choices=[choice], prefix_id='test', name='test', length=2,
         gen_seed=41, bs_seed=0, args=args, out=tmp_path,
         api=dict(BackboneTap=BackboneTap, RngStream=RngStream,
                  run_trajectory=run_trajectory, prepare_event=prepare_event))

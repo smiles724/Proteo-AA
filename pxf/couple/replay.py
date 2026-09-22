@@ -287,6 +287,35 @@ class FixedTarget:
         return float((flat.float() - ref.float()).norm(dim=-1).max())
 
 
+def _event_key_set(event):
+    """The set of solver invocations that are events.
+
+    ``event`` is one ``(step, substage)`` key, or several. A single key stays
+    a single key: ``(350, 0)`` is two ints, not two keys, and reading it as a
+    sequence of keys would silently arm steps 350 and 0. So a flat pair of
+    ints is treated as ONE key, and anything whose first element is itself a
+    pair is treated as a collection.
+    """
+    if event is None:
+        return frozenset()
+    items = list(event)
+    if not items:
+        return frozenset()
+    if all(isinstance(part, int) for part in items):
+        if len(items) != 2:
+            raise ValueError(
+                f"a single event key must be (step, substage); got {event!r}"
+            )
+        return frozenset({(int(items[0]), int(items[1]))})
+    keys = set()
+    for item in items:
+        pair = tuple(int(part) for part in item)
+        if len(pair) != 2:
+            raise ValueError(f"event key must be (step, substage); got {item!r}")
+        keys.add(pair)
+    return frozenset(keys)
+
+
 def run_trajectory(
     *,
     denoise,
@@ -322,9 +351,10 @@ def run_trajectory(
 
     ``resume`` starts at a recorded state instead of from pure noise: its RNG is
     installed, its ``x_noisy``/``sigma`` are denoised directly, and the loop then
-    continues from the following step. ``event`` is a ``(step, substage)`` key;
-    when it matches, ``feedback(state)`` supplies the residual for that single
-    invocation and no other. Optional ``after_event(state, x_denoised)``
+    continues from the following step. ``event`` is a ``(step, substage)`` key, or a collection of them; at each
+    matching invocation ``feedback(state)`` supplies the residual for that
+    invocation. With several keys the callback is invoked once per event, in
+    trajectory order, and ``stats["injections"]`` counts them. Optional ``after_event(state, x_denoised)``
     observes that invocation's result before the solver advances. It runs
     under RNG protection, including when the event has no feedback. Its
     return value does not change the solver estimate.
@@ -332,6 +362,8 @@ def run_trajectory(
     schedule = schedule.to(device=device, dtype=torch.float32)
     record_steps = {int(s) for s in record_steps}
     records, stats = [], dict(calls=0, injections=0, augmentations=0)
+    event_keys = _event_key_set(event)
+    stats["events"] = len(event_keys)
 
     def one_call(x_noisy, sigma, step, substage, c_tau_last, c_tau):
         """Record, optionally inject, denoise. The only denoiser entry point."""
@@ -351,16 +383,19 @@ def run_trajectory(
         if step in record_steps:
             records.append(state.detach_cpu())
         residual = None
-        if event is not None and feedback is not None and state.key == tuple(event):
+        on_event = state.key in event_keys
+        if on_event and feedback is not None:
             # Protected: the callback runs FaMPNN, which draws from the global
             # RNG. Letting it advance this stream would shift every later step.
+            # With several events this matters more, not less: an unprotected
+            # decode at event k would shift every event after it as well.
             with stream.protected():
                 residual = feedback(state)
             if residual is not None:
                 stats["injections"] += 1
         stats["calls"] += 1
         x_denoised = denoise(x_noisy, sigma, feedback=residual)
-        if after_event is not None and event is not None and state.key == tuple(event):
+        if on_event and after_event is not None:
             with stream.protected():
                 after_event(state, x_denoised)
         return x_denoised

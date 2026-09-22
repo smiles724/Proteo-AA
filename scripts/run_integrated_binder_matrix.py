@@ -54,6 +54,7 @@ ROW_COLUMNS = (
     "requested_sigma", "actual_sigma", "event_step",
     "solver_calls", "conditioning_injections", "decode_hook_calls",
     "delta_h_norm", "feedback_norm",
+    "n_events", "event_steps", "event_actual_sigmas", "per_event_feedback_norms",
     "event_to_final_aligned_rmsd", "min_bb_bb_distance", "interface_clashes",
     "min_bb_only_distance", "interface_clashes_bb_only",
     "seconds",
@@ -83,7 +84,13 @@ def main() -> None:
     parser.add_argument("--targets", nargs="*", default=None)
     parser.add_argument("--lengths", nargs="*", type=int, default=[100])
     parser.add_argument("--seeds", nargs="*", type=int, default=[101, 102])
-    parser.add_argument("--event-sigma", type=float, default=0.429)
+    parser.add_argument("--event-sigma", type=float, default=0.429,
+                        help="single event; shorthand for --event-sigmas with "
+                             "one value")
+    parser.add_argument("--event-sigmas", type=float, nargs="+", default=None,
+                        help="several events, one corrective PXDesign call "
+                             "each, in descending sigma order. OFF-DISTRIBUTION: "
+                             "the adapters were trained at one event at 0.429")
     parser.add_argument("--sequence-policy", default="event_fixed",
                         choices=("event_fixed", "post_feedback_redesign"),
                         help="post_feedback_redesign re-decodes every arm, including "
@@ -109,10 +116,18 @@ def main() -> None:
 
     require_official_protenix("run_integrated_binder_matrix")
 
+    # One knob downstream. --event-sigma stays the documented single-event
+    # spelling and the default; --event-sigmas is the multi-event form and
+    # wins when given.
+    args.event_sigmas = (
+        list(args.event_sigmas) if args.event_sigmas
+        else [float(args.event_sigma)]
+    )
+
     import torch
     import yaml
 
-    from pxf.bench.integrated import select_event
+    from pxf.bench.integrated import select_event, select_events
     from pxf.bench.integrated_checkpoints import (expected_policy, file_sha256,
                                                   load_feedback)
     from pxf.couple.integrated_event import (assert_target_rows_untouched,
@@ -247,9 +262,18 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     designer.model.requires_grad_(False)
 
     schedule = denoiser.schedule(args.n_step)
-    choice = api["select_event"](schedule, args.event_sigma)
-    print(f"  event step {choice.step}: requested {choice.requested_sigma:.4f} "
-          f"-> actual {choice.actual_sigma:.4f}")
+    choices = api["select_events"](schedule, args.event_sigmas)
+    choice = choices[0]      # the recorded/resume point, and the legacy field
+    for index, item in enumerate(choices):
+        print(f"  event {index} step {item.step}: requested "
+              f"{item.requested_sigma:.4f} -> actual {item.actual_sigma:.4f}")
+    if len(choices) > 1:
+        # A_BS and the feedback adapters were trained against ONE event at
+        # sigma 0.429. Every additional injection queries them at a sigma
+        # they never saw, so this is a transfer diagnostic and the run must
+        # not be presented as the same arm as a single-event one.
+        print(f"  OFF-DISTRIBUTION: {len(choices)} events; the adapters were "
+              "trained at one event. Treat as a checkpoint-transfer probe.")
 
     # ---- pass 1: the shared prefix, recorded at the event -----------------
     prefix_id = f"{name}_L{length}_s{gen_seed}"
@@ -264,7 +288,7 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
             schedule=schedule, n_atom=denoiser.n_atom,
             device=denoiser.device, n_sample=1,
             step_scale_eta=args.step_scale_eta, stream=stream,
-            record_steps={choice.step},
+            record_steps={choices[0].step},
         )
     if not records:
         raise SystemExit(
@@ -295,7 +319,7 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
         arm_label="U03", feedback_path=None, conditioner_arm=None,
         shared=None, adapters=None, recorded=recorded, denoiser=denoiser,
         structure=structure, designer=designer, schedule=schedule,
-        choice=choice, prefix_id=prefix_id, name=name, length=length,
+        choices=choices, prefix_id=prefix_id, name=name, length=length,
         gen_seed=gen_seed, bs_seed=None, args=args, out=out, api=api,
     ))
     rows[-1].pop("_shared", None)
@@ -318,7 +342,7 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
                 conditioner_arm=conditioner_arm,
                 shared=shared, adapters=adapters, recorded=recorded,
                 denoiser=denoiser, structure=structure, designer=designer,
-                schedule=schedule, choice=choice, prefix_id=prefix_id,
+                schedule=schedule, choices=choices, prefix_id=prefix_id,
                 name=name, length=length, gen_seed=gen_seed, bs_seed=bs_seed,
                 args=args, out=out, api=api,
             ))
@@ -329,9 +353,23 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     return rows
 
 
+def _event_seed(gen_seed, key, choices):
+    """A distinct, reproducible decode seed per event.
+
+    Derived from the event's POSITION in the schedule, not from a running
+    counter: a counter would give the same event a different seed depending
+    on which arm reached it first, and the arms are supposed to differ only
+    in their residual.
+    """
+    from pxf.bench.integrated_redecode import REDECODE_SEED_OFFSET
+
+    index = [c.key for c in choices].index(tuple(key))
+    return int(gen_seed) + REDECODE_SEED_OFFSET * (index + 1)
+
+
 def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
              recorded, denoiser,
-             structure, designer, schedule, choice, prefix_id, name, length,
+             structure, designer, schedule, choices, prefix_id, name, length,
              gen_seed, bs_seed, args, out, api):
     """Resume from the recorded event and finish this arm's trajectory."""
     import torch
@@ -374,27 +412,48 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             allow_transfer=args.allow_feedback_policy_transfer,
         )
 
-    state = {"products": shared, "output_products": None, "feedback_norm": 0.0}
+    # One entry per event. The FIRST event's products are the shared ones --
+    # that sharing is the matched-pair contract and must not become per-arm.
+    # Later events are decoded inside this arm, because by then the arms have
+    # already diverged and a shared decode would be a decode of someone
+    # else's backbone.
+    state = {
+        "products": shared, "output_products": None, "feedback_norm": 0.0,
+        "products_by_key": ({} if shared is None else {choices[0].key: shared}),
+        "per_event": [],
+    }
+    last_key = choices[-1].key
 
     with api["BackboneTap"](denoiser.model.diffusion_module) as tap:
 
         def feedback(sampler_state):
-            if state["products"] is None:
-                state["products"] = api["prepare_event"](
+            key = sampler_state.key
+            products = state["products_by_key"].get(key)
+            if products is None:
+                # Events after the first cost a decode each, so only pay for
+                # them on an arm that has a conditioner to feed. A control
+                # would decode and discard: same trajectory, wasted minutes.
+                if conditioner is None and key != choices[0].key:
+                    state["tap_before_correction"] = tap.calls
+                    return None
+                products = api["prepare_event"](
                     denoise=lambda x, s, **kw: denoiser.denoise(
                         x, s, feedback=None, tap=tap
                     ),
                     x_noisy=sampler_state.x_noisy,
                     sigma=float(sampler_state.sigma.reshape(-1)[0]),
                     structure=structure, designer=designer,
-                    adapters=adapters, context=args.context, seed=gen_seed,
+                    adapters=adapters, context=args.context,
+                    seed=_event_seed(gen_seed, key, choices),
                     design_id=prefix_id, target=name, tap=tap,
                     # REQUIRED: the bb_only arm shares this event and reads
                     # h_base. Without it the control cannot run, and the
                     # cache-side fix alone did not cover this path.
                     want_h_base=True,
                 )
-            products = state["products"]
+                state["products_by_key"][key] = products
+                if state["products"] is None:
+                    state["products"] = products
             state["tap_before_correction"] = tap.calls
             if conditioner is None:
                 return None
@@ -407,18 +466,34 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             )
             if delta is not None:
                 api["assert_target_rows_untouched"](delta, products.binder_mask)
-                state["feedback_norm"] = float(
+                norm = float(
                     delta.delta_single.norm()
                     if getattr(delta, "delta_single", None) is not None
                     else 0.0
                 )
+                # Per event, not one scalar overwritten N times: with several
+                # injections the interesting quantity is whether the residual
+                # grows, shrinks or stays flat along the trajectory.
+                state["per_event"].append({
+                    "key": list(key), "actual_sigma": products.sigma,
+                    "feedback_norm": norm,
+                })
+                state["feedback_norm"] = norm
             return delta
 
         def after_event(sampler_state, corrected_bb):
+            # Only the last event yields the output sequence. Re-decoding at
+            # an intermediate event would be discarded -- the next event
+            # decodes the backbone afresh anyway, which already carries every
+            # correction made before it.
+            if sampler_state.key != last_key:
+                return
             if tap.calls != state["tap_before_correction"] + 1:
                 raise RuntimeError("re-decoding requires exactly one fresh corrected a_token capture")
             state["output_products"] = redecode_after_feedback(
-                initial=state["products"], corrected_bb=corrected_bb,
+                initial=state["products_by_key"].get(sampler_state.key)
+                or state["products"],
+                corrected_bb=corrected_bb,
                 corrected_a_token=tap.a_token, sigma=sampler_state.sigma,
                 structure=structure, designer=designer, adapters=adapters,
                 seed=redecode_seed, context=args.context,
@@ -435,7 +510,8 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             schedule=schedule, n_atom=denoiser.n_atom,
             device=denoiser.device, n_sample=1,
             step_scale_eta=args.step_scale_eta, stream=stream,
-            resume=recorded, event=choice.key, feedback=feedback,
+            resume=recorded, event=[c.key for c in choices],
+            feedback=feedback,
             after_event=after_event if policy == "post_feedback_redesign" else None,
         )
         conditioning_injections = tap.conditioning_injections
@@ -467,8 +543,14 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
         "arm": arm_label, "feedback_arm": (arm_label if conditioner else ""),
         "bs_seed": bs_seed, "generation_seed": gen_seed,
         "shared_prefix_id": prefix_id,
-        "requested_sigma": choice.requested_sigma,
-        "actual_sigma": choice.actual_sigma, "event_step": choice.step,
+        "requested_sigma": choices[0].requested_sigma,
+        "actual_sigma": choices[0].actual_sigma, "event_step": choices[0].step,
+        "n_events": len(choices),
+        "event_steps": ";".join(str(c.step) for c in choices),
+        "event_actual_sigmas": ";".join(f"{c.actual_sigma:.6f}" for c in choices),
+        "per_event_feedback_norms": ";".join(
+            f"{e['feedback_norm']:.6f}" for e in state["per_event"]
+        ),
         "solver_calls": int(stats["calls"]),
         "conditioning_injections": int(conditioning_injections),
         "decode_hook_calls": initial.provenance.get("decode_hook_calls"),

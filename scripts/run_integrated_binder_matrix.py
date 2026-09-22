@@ -505,7 +505,13 @@ def _finalise(*, x0, products, structure, designer, adapters, args, out,
         "seq_mask": torch.ones(1, length),
         # The packer's OWN occupancy, not an all-zero mask: writing zeros
         # would claim every atom is present including ones it never built.
-        "missing_atom_mask": (1.0 - mask).cpu(),
+        # `.float()` because the occupancy comes straight from the packer and
+        # its dtype is the packer's choice: FaMPNN 0.3 returns it as bool,
+        # which `1.0 - x` refuses outright. Casting here rather than inside
+        # `_packed_mask` keeps that helper returning the packer's own tensor
+        # unaltered, which is what the fallback path and `atom_mask_af2`
+        # expect.
+        "missing_atom_mask": (1.0 - mask.float()).cpu(),
         "residue_index": topology.residue_index.reshape(1, -1).cpu().long(),
         "chain_index": topology.chain_index.reshape(1, -1).cpu().long(),
         "pred_aatype": products.aatype.cpu().long(),

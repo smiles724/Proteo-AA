@@ -166,12 +166,19 @@ def prepare_event(
     target: str = "target",
     residual_source: str = "matched",
     want_h_base: bool = True,
+    tap=None,
 ) -> EventProducts:
     """Run one event up to ``h_packed``. No solver step is taken here.
 
     ``denoise`` must accept ``(x_noisy, sigma, tap=...)`` and run WITHOUT
     feedback -- this is the provisional call, and the corrected call is the
     caller's job, at the same state.
+
+    ``tap`` reuses a BackboneTap the caller already installed. The integrated
+    sampler holds one for the whole trajectory, and installing a second here
+    would hook ``layernorm_a`` twice: the capture would still work but the
+    injection counters would double-count and a later residual would be added
+    twice. Passing it in is how that is avoided rather than hoped for.
     """
     from pxf.bench.backbone_inputs import build_design_inputs, check_design_mask
     from pxf.bench.coupled_design import build_residual, conditioned
@@ -187,17 +194,24 @@ def prepare_event(
     sigma_t = torch.full((1,), float(sigma), device=device, dtype=torch.float32)
 
     # ---- 1. the provisional estimate, and the features A_BS reads ---------
-    with BackboneTap(designer_module(denoise)) as tap:
+    if tap is None:
+        with BackboneTap(designer_module(denoise)) as owned:
+            calls_before = owned.calls
+            bb0 = denoise(x_noisy, sigma_t, tap=owned)
+            a_token, tap_calls = owned.a_token, owned.calls - calls_before
+    else:
+        calls_before = tap.calls
         bb0 = denoise(x_noisy, sigma_t, tap=tap)
-        a_token = tap.a_token
+        a_token, tap_calls = tap.a_token, tap.calls - calls_before
     if a_token is None:
         raise RuntimeError(
             "the tap captured no a_token; layernorm_a was never called, so the "
             "residual would be built from nothing"
         )
-    if tap.calls != 1:
+    if tap_calls != 1:
         raise AssertionError(
-            f"the tap saw {tap.calls} denoiser call(s) at the event, expected 1"
+            f"the tap saw {tap_calls} denoiser call(s) for the provisional "
+            "estimate, expected exactly 1"
         )
 
     # ---- 2. the complex, through the matrix's own mapping ------------------
@@ -324,7 +338,7 @@ def prepare_event(
             "actual_sigma": float(sigma),
             "residual_source": None if adapters is None else residual_source,
             "decode_hook_calls": decode_hook_calls,
-            "tap_calls": int(tap.calls),
+            "tap_calls": int(tap_calls),
             "seed": int(seed),
             "delta_h_norm": (0.0 if residual is None
                              else float(residual.detach().norm(dim=-1).mean())),

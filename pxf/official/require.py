@@ -60,10 +60,17 @@ This step needs PXDesign's OFFICIAL runtime, which requires Protenix
 {REQUIRED_VERSION} ({REQUIRED_REVISION}). This environment has {{found}}.
 
 `protenix.data.parser` does not exist here; v2.0.0 moved it to
-`protenix.data.core.parser`. DO NOT alias them. That pairing is what produced
-the interpenetrating backbones recorded in docs/target_conditioning_audit.md
-(282 atom pairs under 2.6 A, 0.207 A minimum) -- it turns this loud failure
-into quiet wrong physics that still looks like a structure.
+`protenix.data.core.parser`. DO NOT alias them: that pairs PXDesign with a
+parser it was not written against and turns this loud failure into a quiet
+version skew whose output still looks like a structure.
+
+(Aliasing is NOT what caused the interpenetrating backbones in
+docs/target_conditioning_audit.md. Section 9 measured that cause: the
+FixedTarget coordinate overwrite, plus eta 1.5 vs 2.5. This refusal stands on
+version skew alone.)
+
+The fix is to INSTALL the right version, which works here and is not an alias:
+    scripts/utilities/install_pxdesign_official.sh
 
 An environment that satisfies this guard:
     {OFFICIAL_ENV}                    (HAI)

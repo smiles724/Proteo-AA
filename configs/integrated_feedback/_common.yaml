@@ -1,0 +1,38 @@
+# Settings shared by both E1 arms. Neither arm may differ from the other in
+# ANYTHING here: they are a matched control pair, and a difference outside
+# `arm` would make "full minus bb_only" a comparison of two things at once.
+task: integrated_feedback_v1
+
+upstream:
+  # The frozen A_BS whose conditioned decode produced the training states.
+  # Recorded by hash in the checkpoint; a feedback module is a function of
+  # this, so running it against a different one is refused, not warned about.
+  application_mode: shared_prelogit
+  sequence_source: predicted
+  context: complex_sc
+  seq_steps: 100
+  pack_steps: 50
+  temperature: 0.1
+  psce_threshold: 0.3
+  event_sigma: 0.429          # the CHURNED sigma, i.e. J03's training noise
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  warmup_steps: 200
+  max_grad_norm: 1.0
+ema:
+  relative_length: 0.25
+
+max_steps: 2000
+checkpoint_steps: [500, 1000, 2000]
+sigma_data: 16.0              # the donor's; PXDesign's config sets 16.0
+
+feedback_scope: binder_single_binder_binder_pair
+gate: null                    # ungated, exactly as trained
+
+note: >-
+  These are STARTING settings copied from the A_BS run that preceded them, not
+  established optima for this objective. Nothing here has been tuned on this
+  loss, and the first pilot is 4 runs of 2,000 updates rather than a search.

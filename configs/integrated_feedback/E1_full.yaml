@@ -1,0 +1,15 @@
+# The candidate: E1 reading backbone geometry AND the realized side chains.
+extends: _common.yaml
+arm: early_s_full
+role: candidate
+note: >-
+  The hypothesis is that side-chain information about the REALIZED packing
+  carries something the backbone alone does not. `early_s_bb_only` is the
+  matched control that isolates it: identical architecture, identical
+  parameter count, identical everything except which feature groups the
+  readout is allowed to see.
+
+  Because the shapes are identical, a checkpoint of one arm loads cleanly as
+  the other under strict=True. The arm is recorded in the checkpoint identity
+  and checked against the requested arm on load; that metadata is the only
+  thing distinguishing them.

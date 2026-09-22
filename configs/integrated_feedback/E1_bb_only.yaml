@@ -1,0 +1,10 @@
+# The matched control: the same module, denied the side-chain features.
+extends: _common.yaml
+arm: early_s_bb_only
+role: control
+note: >-
+  Not a weaker variant of the candidate -- the comparison. `full` minus
+  `bb_only` is the side-chain-specificity result, and it is the number the
+  experiment exists to produce. It must be reported even when null, and a
+  gain that bb_only reproduces is a BACKBONE-conditioning gain and must not be
+  renamed a side-chain one.

@@ -308,11 +308,11 @@ def _load_adapters(path, designer, denoiser, weights):
 
 
 def _conditioning_widths(model):
+    """``{c_s, c_z, c_token}``. ``conditioning_widths`` returns a TUPLE."""
     from pxf.couple.pxdesign_iface import conditioning_widths, token_feature_dim
 
-    widths = dict(conditioning_widths(model))
-    widths.setdefault("c_token", token_feature_dim(model))
-    return widths
+    c_s, c_z = conditioning_widths(model)
+    return {"c_s": c_s, "c_z": c_z, "c_token": token_feature_dim(model)}
 
 
 def _node_dim(model):

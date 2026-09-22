@@ -97,6 +97,8 @@ def check_design_mask(
     conditional_label: Optional[np.ndarray] = None,
     binder_length: Optional[int] = None,
     what: str = "payload",
+    mode: str = "generated",
+    chain_index: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Cross-check the design mask against every other marker available.
 
@@ -113,6 +115,49 @@ def check_design_mask(
     """
     mask = np.asarray(mask).astype(bool)
     checked = ["design_mask"]
+
+    if mode not in ("generated", "native"):
+        raise ValueError(f"unknown mode {mode!r}; choose generated or native")
+
+    if mode == "native":
+        # A DEPOSITED complex has no generated region, so there is no 'xpb'
+        # marker to agree with -- the binder's residues carry their real
+        # names. The independent facts available instead both come from
+        # outside the mask: the mask must not straddle chains (the binder is
+        # one chain), and its size must equal the length the MANIFEST
+        # recorded. That is the author-to-label chain mapping being
+        # cross-checked against the featurizer, which is the check that
+        # matters on this data.
+        if chain_index is None:
+            raise ValueError(
+                f"{what}: mode='native' needs chain_index to verify the design "
+                "mask does not straddle chains"
+            )
+        chains = np.asarray(chain_index).reshape(-1)
+        selected = np.unique(chains[mask])
+        if selected.size != 1:
+            raise ValueError(
+                f"{what}: the design mask spans {selected.size} chain(s) "
+                f"({selected.tolist()}); the binder must be exactly one chain, "
+                "so the manifest's chain mapping and the featurizer's design "
+                "mask disagree"
+            )
+        in_chain = int((chains == selected[0]).sum())
+        if in_chain != int(mask.sum()):
+            raise ValueError(
+                f"{what}: the design mask selects {int(mask.sum())} token(s) "
+                f"but chain {selected[0]} has {in_chain}; the mask is a strict "
+                "subset of a chain, which is not what a binder role is"
+            )
+        checked.append("chain_index")
+        if binder_length is not None:
+            if int(mask.sum()) != int(binder_length):
+                raise ValueError(
+                    f"{what}: design mask selects {int(mask.sum())} tokens but "
+                    f"the manifest records binder_residues={binder_length}"
+                )
+            checked.append("manifest_binder_length")
+        return mask
 
     by_resname = np.zeros(n_tokens, dtype=bool)
     is_xpb = np.asarray(res_names) == DESIGN_RES_NAME
@@ -237,23 +282,35 @@ def build_design_inputs(
     ann = {"atom_name": atom_names, "res_name": res_names}
 
     # ---- scatter atoms into atom37 ----------------------------------------
-    coords = torch.zeros(n_tokens, atom37.NUM_ATOM37, 3, dtype=torch.float32)
-    mask = torch.zeros(n_tokens, atom37.NUM_ATOM37, dtype=torch.float32)
+    # Allocated on x0's device, not the default one. The cached-payload caller
+    # loads x0 to CPU so either choice worked there; the integrated sampler
+    # hands in a live CUDA tensor, and a CPU destination fails the scatter.
+    home = x0.device
+    coords = torch.zeros(
+        n_tokens, atom37.NUM_ATOM37, 3, dtype=torch.float32, device=home
+    )
+    mask = torch.zeros(
+        n_tokens, atom37.NUM_ATOM37, dtype=torch.float32, device=home
+    )
     names = np.asarray(ann["atom_name"])
-    slots = np.array([_ATOM37_SLOT.get(str(n), -1) for n in names])
-    unknown = names[slots < 0]
+    slot_ids = np.array([_ATOM37_SLOT.get(str(n), -1) for n in names])
+    unknown = names[slot_ids < 0]
     if unknown.size:
         raise ValueError(
             f"atom name(s) outside the atom37 table: {sorted(set(map(str, unknown)))}"
         )
-    coords[a2t, slots] = x0
-    mask[a2t, slots] = 1.0
+    index_tokens = torch.as_tensor(a2t, device=home, dtype=torch.long)
+    index_slots = torch.as_tensor(slot_ids, device=home, dtype=torch.long)
+    coords[index_tokens, index_slots] = x0
+    mask[index_tokens, index_slots] = 1.0
 
     # ---- identities --------------------------------------------------------
     three = _three_to_index()
     resname_per_token = np.empty(n_tokens, dtype=object)
     resname_per_token[a2t] = np.asarray(ann["res_name"])
-    aatype = torch.full((n_tokens,), atom37.UNKNOWN_AA_INDEX, dtype=torch.long)
+    aatype = torch.full(
+        (n_tokens,), atom37.UNKNOWN_AA_INDEX, dtype=torch.long, device=home
+    )
     for i, rn in enumerate(resname_per_token):
         if design[i]:
             continue  # generated: no identity exists to read
@@ -264,13 +321,13 @@ def build_design_inputs(
         # never `fixed` below it is designed rather than teacher-forced as a
         # mask token.
 
-    binder = torch.from_numpy(design)
+    binder = torch.from_numpy(design).to(home)
     # A target row can only be held fixed if it actually has an identity.
     fixed = (~binder) & (aatype != atom37.UNKNOWN_AA_INDEX)
 
-    residue_index = torch.as_tensor(residue_index).reshape(-1).long().clone()
-    chain_index = torch.as_tensor(asym_id).reshape(-1).long().clone()
-    a_token = a_token.reshape(n_tokens, -1).float()
+    residue_index = torch.as_tensor(residue_index).reshape(-1).long().to(home)
+    chain_index = torch.as_tensor(asym_id).reshape(-1).long().to(home)
+    a_token = a_token.reshape(n_tokens, -1).float().to(home)
 
     # ---- context level -----------------------------------------------------
     if context == "binder_only":

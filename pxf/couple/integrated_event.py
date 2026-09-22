@@ -70,6 +70,9 @@ class EventProducts:
                                       #   (Visibility.available, not the input mask)
     h_base: Optional[torch.Tensor]    # encoder features of bb0, sequence masked
     h_packed: torch.Tensor            # encoder features of the REALIZED state
+    packed: Any                       # pxf.couple.visibility.PackedStructure --
+                                      #   what the feedback readout is ALLOWED
+                                      #   to see, and nothing else
     psce: torch.Tensor                # [1, L, 33] predicted side-chain error
     binder_mask: torch.Tensor         # [1, L] 1 = a designed row
     sigma: float                      # the ACTUAL churned sigma
@@ -160,6 +163,7 @@ def prepare_event(
     structure,
     designer,
     adapters=None,
+    mask_mode: str = "generated",
     context: str = "complex_sc",
     seed: int = 0,
     design_id: str = "event",
@@ -184,7 +188,8 @@ def prepare_event(
     from pxf.bench.coupled_design import build_residual, conditioned
     from pxf.couple.fampnn_iface import encode
     from pxf.couple.pxdesign_iface import BackboneTap
-    from pxf.couple.visibility import predicted_availability
+    from pxf.couple.visibility import (PackedStructure,
+                                       predicted_availability)
 
     import numpy as np
 
@@ -223,6 +228,8 @@ def prepare_event(
         atom_to_token=a2t,
         n_tokens=n_tokens,
         what=design_id,
+        mode=mask_mode,
+        chain_index=np.asarray(topology.chain_index.cpu()),
     )
     inputs = build_design_inputs(
         x0=bb0.reshape(-1, 3),
@@ -310,6 +317,21 @@ def prepare_event(
         sidechain_visible=vis.sidechain_visible,
     )
 
+    # The readout's entire input surface. Built here so the boundary is one
+    # object: its own docstring records what is deliberately absent (native
+    # coordinates, native side-chain error, residual backbone error), and a
+    # readout that could reach those would report a gain it cannot reproduce
+    # at inference.
+    packed = PackedStructure(
+        h_packed=packed_features["h_V"],
+        coords37=coords,
+        aatype=aatype,
+        seq_mask=inputs.seq_mask,
+        visibility=vis,
+        psce=result.psce.unsqueeze(0),
+        h_base=None if base_features is None else base_features["h_V"],
+    )
+
     binder = inputs.binder_mask.reshape(-1).bool().cpu()
     binder_sequence = "".join(
         c for c, keep in zip(result.sequence, binder.tolist()) if keep
@@ -326,6 +348,7 @@ def prepare_event(
         availability=vis.available,
         h_base=None if base_features is None else base_features["h_V"],
         h_packed=packed_features["h_V"],
+        packed=packed,
         psce=result.psce.unsqueeze(0),
         binder_mask=inputs.binder_mask,
         sigma=float(sigma),

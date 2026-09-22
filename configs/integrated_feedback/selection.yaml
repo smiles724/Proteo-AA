@@ -1,0 +1,58 @@
+# Checkpoint selection for integrated_feedback_v1. DECLARED BEFORE ANY RESULT.
+#
+# Written while no feedback run had been launched. That is the only condition
+# under which a selection rule means anything: a criterion picked after seeing
+# the curves picks the curve you already liked.
+
+evaluated_checkpoints: [500, 1000, 2000]
+weights: ema
+panel: validation.parquet     # the 31 gen_stress dimers, PDB and TED apart
+
+# ---------------------------------------------------------------- the rule
+primary: resolved_binder_bb_rmsd     # lower is better
+primary_aggregate: median_over_complexes
+primary_note: >-
+  Median, not mean: the side-chain and backbone losses on this data are
+  heavy-tailed, so a mean is a statement about a handful of complexes.
+
+tie_break: earliest_step
+tie_band_relative: 0.01
+
+# Guardrail: a correction must not buy backbone RMSD by breaking chemistry.
+guardrails:
+  - metric: backbone_chemistry_failure_rate
+    max_relative_regression: 0.05
+    zero_baseline_rule: require_zero
+  - metric: sidechain_chemistry_failure_rate
+    max_relative_regression: 0.05
+    zero_baseline_rule: require_zero
+guardrail_note: >-
+  `zero_baseline_rule: require_zero` exists because a 5% relative regression
+  is undefined when the no-feedback baseline fails zero times. Dividing by
+  zero there would either crash or silently pass anything; the rule is that a
+  zero baseline must stay zero.
+
+# ------------------------------------------------------------- comparisons
+comparisons:
+  primary: E1_full - E1_bb_only
+  primary_note: >-
+    The side-chain-specificity comparison. Retained and reported even when
+    null.
+  secondary:
+    - E1_full - no_feedback
+    - E1_bb_only - no_feedback
+  pairing: per_complex_then_aggregate
+
+seeds: [0, 1]
+seed_policy: report_both_and_agreement
+report_separately: [pdb, ted]
+
+# What this criterion CANNOT decide.
+out_of_scope:
+  - binder_success
+  - designability
+  - interface_quality
+scope_note: >-
+  A 31-complex reconstruction panel does not establish binder success. It
+  establishes whether the correction reconstructs held-out backbones better,
+  which is a different claim and the only one this selection supports.

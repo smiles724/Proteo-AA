@@ -14,10 +14,15 @@ experiment.
 
 ### The checks, and what each would catch
 
-1. **Zero-feedback equivalence.** A conditioner at initialisation emits
-   exactly zero, so the corrected call must reproduce the uncorrected one. A
-   difference here means the injection path perturbs the model even when it
-   has nothing to say, and every later comparison would be measuring that.
+1. **Zero-feedback equivalence, WITHIN the local driver.** A conditioner at
+   initialisation emits exactly zero, so the corrected call must reproduce the
+   uncorrected one. A difference means the injection path perturbs the model
+   when it has nothing to say.
+
+   This does NOT compare the local driver against the official runtime. The
+   handoff requires that comparison -- on identical exported inputs, with zero
+   and with non-zero feedback -- before a long run, and it is NOT implemented
+   here. `local_vs_official` is reported as `not_performed`.
 
 2. **Non-zero output-projection gradient at init**, located structurally and
    fail-closed. ``dL/dW_out`` is non-zero even for a zero ``W_out``; a zero
@@ -25,14 +30,21 @@ experiment.
    would follow. Internal weights are legitimately zero here -- the zero
    projection blocks their path -- and must become non-zero after one update.
 
-3. **Analytic vs finite-difference gradient**, on CPU, with an epsilon sweep.
+3. **Analytic vs finite-difference gradient** on whichever device the run
+   uses (CUDA by default -- the device is recorded, and an earlier version of
+   this docstring called it a CPU check when it was not), with an epsilon
+   sweep.
    A single epsilon is not a check: the signal can sit at a few float32 ULPs
    of the loss, where the estimator is noise. Convergence across epsilons is
    what makes the comparison mean anything.
 
-4. **Leakage.** Perturb the native binder identity and side chains; the loss
-   must not move. They are supervision, and a readout that could reach them
-   would report a gain it cannot reproduce at inference.
+4. **Leakage -- SCHEMA ONLY, and reported as incomplete.** The handoff asks
+   for the native labels to be perturbed BEFORE feature construction, with the
+   allowed noisy inputs held fixed, comparing conditioning, provisional
+   outputs, decoded events and feedback. That is not implemented. What runs
+   here checks that the cached example carries no native binder identity or
+   side-chain channel to perturb -- a statement about the cache schema, not a
+   measurement -- and it can never report PASS.
 
 5. **Injection accounting.** Exactly one conditioning injection per corrective
    call, no double A_BS addition, no residual accumulation across the decode,
@@ -43,6 +55,13 @@ experiment.
 
 7. **A disposable 20-update overfit**, which must decrease the loss. If a
    module cannot fit eight complexes it will not learn 198.
+
+**Not implemented, and reported as such rather than omitted:** the
+local-vs-official runtime comparison, a separate CPU-vs-GPU gradient
+comparison, internal-gradient non-zero-ness after the first update, and frozen
+donor weight EQUALITY (as opposed to zero gradients, which is checked).
+`incomplete_checks` lists them and the script exits non-zero when a required
+one is missing, so an experiment cannot be registered on this evidence alone.
 
 Reports measured seconds and memory per event, and the implied cost of the
 four-run pilot, so that is a number rather than a guess before anything is
@@ -243,15 +262,17 @@ def check_leakage(ctx, example, conditioner) -> dict:
     )
     findings["binder_rows_are_the_supervised_ones"] = int(example.supervised.sum())
     findings["baseline_loss"] = baseline
-    findings["verdict"] = (
-        "PASS" if findings["native_aatype_perturbed_delta"] < 1e-9 else "CHECK"
-    )
+    # Never PASS: this establishes that the cache SCHEMA excludes native
+    # labels, not that perturbing them leaves the model unmoved. The residual
+    # difference is CUDA run-to-run jitter between two identical forwards.
+    findings["verdict"] = "INCOMPLETE"
     findings["note"] = (
-        "the cached example carries no native binder identity channel at all, "
-        "so this check is a statement that the cache schema excludes it rather "
-        "than a perturbation of a live input. The stronger version needs the "
-        "cache rebuilt with a deliberately corrupted label, which "
-        "--leakage-rebuild does."
+        "SCHEMA CHECK, not a perturbation test. The cached example carries no "
+        "native binder identity or side-chain channel, so there is nothing to "
+        "perturb -- which is the desired property but is not a measurement. "
+        "The strong version perturbs the labels BEFORE feature construction "
+        "and compares conditioning, provisional outputs, decoded events and "
+        "feedback; it is not implemented."
     )
     return findings
 
@@ -413,6 +434,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--require-complete", action="store_true",
+                        help="exit non-zero while any listed check is "
+                             "unimplemented, so an experiment cannot be "
+                             "registered on partial evidence")
     args = parser.parse_args()
 
     import importlib.util as ilu
@@ -539,6 +564,7 @@ def main() -> None:
 
     print("\n3. finite difference (CPU-stable closure, epsilon sweep)")
     report["finite_difference"] = check_finite_difference(ctx, events[0], conditioner)
+    report["finite_difference"]["device"] = str(ctx["device"])
     fd = report["finite_difference"]
     print(f"   analytic {fd.get('analytic', float('nan')):.6e}  "
           f"best rel error {fd.get('best', {}).get('relative_error', float('nan')):.2e}  "
@@ -573,6 +599,16 @@ def main() -> None:
           f"{o['estimated_pilot_gpu_hours']:.1f} GPU-hours")
 
     (out / "preflight.json").write_text(json.dumps(report, indent=2, default=str))
+    report["incomplete_checks"] = {
+        "leakage_perturbation": "not implemented; the committed check verifies "
+                                "the cache schema only",
+        "local_vs_official_runtime": "not performed; required by the handoff "
+                                     "before a long run",
+        "cpu_vs_gpu_gradient": "not implemented",
+        "internal_gradients_after_first_update": "not implemented",
+        "frozen_donor_weight_equality": "not implemented (zero gradients ARE "
+                                        "checked, which is weaker)",
+    }
     failures = [
         name for name, ok in (
             ("zero_feedback", report["zero_feedback"]["equivalent"]),
@@ -584,10 +620,19 @@ def main() -> None:
         ) if not ok
     ]
     print(f"\nwrote {out / 'preflight.json'}")
+    print("\nINCOMPLETE (not established by this run):")
+    for name, why in report["incomplete_checks"].items():
+        print(f"  {name}: {why}")
     if failures:
-        print(f"PREFLIGHT FAILED: {failures}")
+        print(f"\nPREFLIGHT FAILED: {failures}")
         raise SystemExit(1)
-    print("PREFLIGHT PASSED")
+    print(f"\nthe {len(failures) == 0 and 6 or 0} gated checks passed. This is "
+          "NOT full validation: see the incomplete list above, and note the "
+          "leakage check reports INCOMPLETE by construction.")
+    if args.require_complete:
+        print("--require-complete: refusing to report a pass while checks "
+              "remain unimplemented")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

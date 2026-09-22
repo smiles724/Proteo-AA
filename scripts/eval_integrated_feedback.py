@@ -50,46 +50,77 @@ def wilcoxon(pairs):
     return float(stats.wilcoxon(diffs).pvalue)
 
 
-def select_checkpoint(records, selection) -> dict:
-    """Earliest checkpoint within the tie band of the best eligible primary."""
+def select_checkpoint(records, selection, *, no_feedback) -> dict:
+    """Earliest checkpoint within the tie band of the best ELIGIBLE primary.
+
+    Two corrections over the first version, both of which made the guardrails
+    decorative:
+
+    * A missing or non-finite guardrail metric now REFUSES the checkpoint.
+      Previously the guardrail was skipped when either value was absent, and
+      since the metrics were unimplemented placeholders returning None, every
+      checkpoint was eligible -- including one with a 100% chemistry failure
+      rate.
+    * The reference is the matched NO-FEEDBACK baseline, not this arm's own
+      earliest checkpoint. Comparing a run against itself cannot detect a
+      regression that was present from step 500.
+    """
     guard = {g["metric"]: g for g in selection.get("guardrails", [])}
     band = float(selection.get("tie_band_relative", 0.01))
+    primary = selection["primary"]
 
-    baseline = {
-        name: next((r for r in records if r["step"] == min(
-            x["step"] for x in records)), None)
-        for name in guard
-    }
-    eligible = []
+    eligible, considered = [], []
     for record in records:
         problems = []
         for metric, rule in guard.items():
             value = record["metrics"].get(metric)
-            reference = (baseline[metric] or {}).get("metrics", {}).get(metric)
-            if value is None or reference is None:
+            reference = (no_feedback or {}).get(metric)
+            if value is None or not _finite(value):
+                problems.append(
+                    f"{metric} is {value!r}: a required guardrail metric that "
+                    "was not computed cannot be treated as passing"
+                )
+                continue
+            if reference is None or not _finite(reference):
+                problems.append(
+                    f"{metric} has no finite no-feedback reference "
+                    f"({reference!r}), so a regression cannot be assessed"
+                )
                 continue
             if reference == 0:
-                # `zero_baseline_rule: require_zero` -- a relative regression
-                # is undefined against zero, and dividing would either crash
-                # or silently pass anything.
+                # `zero_baseline_rule: require_zero`: a relative regression is
+                # undefined against zero, and dividing would crash or pass
+                # anything.
                 if value > 0:
-                    problems.append(f"{metric} {value} against a zero baseline")
+                    problems.append(
+                        f"{metric} is {value} against a zero baseline, which "
+                        "require_zero forbids"
+                    )
             elif (value - reference) / reference > float(
                 rule["max_relative_regression"]
             ):
                 problems.append(
-                    f"{metric} regressed "
-                    f"{(value - reference) / reference:.1%} > "
-                    f"{rule['max_relative_regression']:.0%}"
+                    f"{metric} regressed {(value - reference) / reference:.1%} "
+                    f"> {rule['max_relative_regression']:.0%} vs no-feedback"
                 )
-        record = {**record, "ineligible_because": problems}
+        entry = {**record, "ineligible_because": problems}
+        considered.append(entry)
         if not problems:
-            eligible.append(record)
+            eligible.append(entry)
+
     if not eligible:
-        return {"selected": None, "reason": "no checkpoint passed the guardrails",
-                "considered": records}
-    primary = selection["primary"]
-    best = min(r["metrics"][primary] for r in eligible)
+        return {
+            "selected": None,
+            "reason": "no checkpoint passed the guardrails against the "
+                      "no-feedback reference",
+            "considered": considered,
+        }
+    values = [r["metrics"].get(primary) for r in eligible]
+    if any(v is None or not _finite(v) for v in values):
+        return {"selected": None,
+                "reason": f"a {primary} value is missing or non-finite",
+                "considered": considered}
+    best = min(values)
     within = [r for r in eligible if r["metrics"][primary] <= best * (1 + band)]
     chosen = min(within, key=lambda r: r["step"])
     return {
@@ -97,8 +128,54 @@ def select_checkpoint(records, selection) -> dict:
         "best_primary": best,
         "tie_band": [r["step"] for r in within],
         "rule": f"earliest step within {band:.0%} of the best eligible "
-                f"{primary}; guardrails applied first",
-        "considered": records,
+                f"{primary}; guardrails applied first, against the matched "
+                "no-feedback baseline",
+        "considered": considered,
+    }
+
+
+def _finite(value):
+    import math
+
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def backbone_chemistry_failures(coords, binder_atoms, a2t, binder_tokens):
+    """Per-design backbone chemistry: CA-CA spacing and non-adjacent clashes.
+
+    Deliberately simple and declared: consecutive binder CA-CA distance
+    outside [3.4, 4.4] A, or any non-adjacent backbone atom pair under 2.0 A.
+    A design failing either is a failure. This is the predeclared guardrail
+    metric; it is not a full chemistry validation.
+    """
+    import torch
+
+    from pxf import atom37
+
+    ca = atom37.ATOM37.index("CA")
+    rows = binder_tokens.reshape(-1).bool()
+    if int(rows.sum()) < 3:
+        return None
+    dense = coords.reshape(coords.shape[-3], atom37.NUM_ATOM37, 3)
+    ca_xyz = dense[rows, ca]
+    spacing = (ca_xyz[1:] - ca_xyz[:-1]).norm(dim=-1)
+    bad_spacing = int(((spacing < 3.4) | (spacing > 4.4)).sum())
+
+    backbone = dense[rows][:, list(atom37.BACKBONE_SLOTS)].reshape(-1, 3)
+    distance = torch.cdist(backbone.float(), backbone.float())
+    n = backbone.shape[0]
+    # Ignore atoms within the same or adjacent residue (4 slots per residue).
+    index = torch.arange(n, device=distance.device)
+    same_or_adjacent = (index[:, None] // 4 - index[None, :] // 4).abs() <= 1
+    distance = distance.masked_fill(same_or_adjacent, float("inf"))
+    clashes = int((distance < 2.0).sum() // 2)
+    return {
+        "bad_ca_spacing": bad_spacing,
+        "backbone_clashes": clashes,
+        "failed": bool(bad_spacing or clashes),
     }
 
 
@@ -133,7 +210,8 @@ def main() -> None:
     import _bootstrap  # noqa: F401
 
     from pxf.backbone.driver import PXDesignBackboneDriver, load_backbone_model
-    from pxf.bench.integrated_checkpoints import load_feedback, expected_policy
+    from pxf.bench.integrated_checkpoints import (expected_policy,
+                                                  file_sha256, load_feedback)
     from pxf.couple.integrated_event import mask_feedback
     from pxf.couple.losses import backbone_denoising_loss
     from pxf.couple.pxdesign_iface import (BackboneTap, conditioning_widths,
@@ -180,7 +258,7 @@ def main() -> None:
     # ---- one event per validation complex, per A_BS seed -------------------
     print(f"building events for {len(frame)} complex(es) x "
           f"{len(bs_by_seed)} A_BS seed(s)")
-    events = {}
+    events, failures = {}, []
     for seed, bs_path in sorted(bs_by_seed.items()):
         adapters = cache_module._load_adapters(
             bs_path, designer, driver, device, "ema", fampnn_sha
@@ -193,12 +271,21 @@ def main() -> None:
                 context = args.context
 
             try:
+                # NAMESPACED by the A_BS identity. Both seeds previously
+                # wrote events/<example_id>_e0.pt, so the second overwrote
+                # the first and seed-0 checkpoints were scored on seed-1
+                # upstream events.
                 record = cache_module._one_event(
                     row, driver=driver, designer=designer, adapters=adapters,
                     device=device, args=_A(), seed=args.seed + index,
                     event_index=0, out=out,
+                    namespace=f"bs{seed}_{file_sha256(bs_path)[:12]}",
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - kept, not dropped
+                failures.append({
+                    "example_id": row.example_id, "bs_seed": seed,
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                })
                 print(f"  ERROR {row.example_id}: {type(exc).__name__}")
                 continue
             structure = cache_module.featurize_native(
@@ -211,6 +298,21 @@ def main() -> None:
             }
             if (index + 1) % 10 == 0:
                 print(f"  seed {seed}: {index + 1}/{len(frame)}", flush=True)
+
+    paths_by_seed = {}
+    for (seed, example_id), entry in events.items():
+        paths_by_seed.setdefault(seed, set()).add(entry["record"]["path"])
+    seeds = sorted(paths_by_seed)
+    for i, a in enumerate(seeds):
+        for b in seeds[i + 1:]:
+            shared = paths_by_seed[a] & paths_by_seed[b]
+            if shared:
+                raise SystemExit(
+                    f"A_BS seeds {a} and {b} share {len(shared)} event "
+                    "file(s), so one overwrote the other and checkpoints "
+                    "would be scored on the wrong upstream. Namespacing "
+                    "failed."
+                )
 
     # ---- evaluate each run's checkpoints ----------------------------------
     results = {}
@@ -229,6 +331,11 @@ def main() -> None:
                 str(checkpoint),
                 expected=expected_policy(
                     bs_checkpoint=bs_by_seed.get(seed),
+                    fampnn_checkpoint=(
+                        args.fampnn_checkpoint
+                        or provenance.fampnn_checkpoint(args.fampnn_variant)
+                    ),
+                    pxdesign_donor=args.pxdesign_donor,
                     bs_weights="ema", context=args.context,
                     seq_steps=100, pack_steps=50, temperature=0.1,
                 ),
@@ -260,8 +367,13 @@ def main() -> None:
         print(f"  no_feedback_s{seed}: median "
               f"{_aggregate(baseline[seed])['resolved_binder_bb_rmsd']:.4f} A")
 
-    chosen = {name: select_checkpoint(records, selection)
-              for name, records in results.items()}
+    chosen = {}
+    for name, records in results.items():
+        seed = int(name.rsplit("_s", 1)[1])
+        chosen[name] = select_checkpoint(
+            records, selection,
+            no_feedback=_aggregate(baseline.get(seed, {})),
+        )
     report = {
         "selection": selection,
         "runs": results,
@@ -269,17 +381,44 @@ def main() -> None:
         "selected": chosen,
         "comparisons": _compare(results, baseline, chosen, events),
         "n_complexes": len({k[1] for k in events}),
+        "failures": failures,
+        "n_failures": len(failures),
     }
     (out / "evaluation.json").write_text(json.dumps(report, indent=2, default=str))
-    (out / "selected_checkpoints.json").write_text(json.dumps({
-        name: {
+    # Self-contained on purpose: the matrix command must have no implicit
+    # checkpoint defaults, and it needs the ARM and SEED as structured fields
+    # rather than parsed out of a label (splitting "early_s_full_s0" on "_s"
+    # yields "early", which then fails the expected-arm check).
+    selected = {}
+    for name, pick in chosen.items():
+        record = next((r for r in results[name]
+                       if r["step"] == pick["selected"]), None)
+        seed = int(name.rsplit("_s", 1)[1])
+        selected[name] = {
             "step": pick["selected"],
-            "checkpoint": next(
-                (r["checkpoint"] for r in results[name]
-                 if r["step"] == pick["selected"]), None),
+            "checkpoint": None if record is None else record["checkpoint"],
+            "arm": name.rsplit("_s", 1)[0],
+            "bs_seed": seed,
+            "bs_checkpoint": bs_by_seed.get(seed),
+            "bs_checkpoint_sha256": (
+                file_sha256(bs_by_seed[seed]) if seed in bs_by_seed else None
+            ),
+            "pxdesign_donor": args.pxdesign_donor,
+            "pxdesign_sha256": file_sha256(args.pxdesign_donor),
+            "fampnn_checkpoint": args.fampnn_checkpoint,
+            "fampnn_sha256": fampnn_sha,
+            "decoder": {"seq_steps": 100, "pack_steps": 50,
+                        "temperature": 0.1, "context": args.context},
             "rule": pick.get("rule"),
-        } for name, pick in chosen.items()
-    }, indent=2, default=str))
+            "ineligible": [
+                {"step": c["step"], "because": c["ineligible_because"]}
+                for c in pick.get("considered", [])
+                if c.get("ineligible_because")
+            ],
+        }
+    (out / "selected_checkpoints.json").write_text(
+        json.dumps(selected, indent=2, default=str)
+    )
     print(f"\nwrote {out / 'evaluation.json'}")
     for name, pick in chosen.items():
         print(f"  {name}: selected step {pick['selected']} ({pick.get('rule')})")
@@ -312,35 +451,101 @@ def _score(conditioner, events, seed, driver, device, mask_feedback,
                     bb, blob["native_bb"], sigma=sigma,
                     atom_mask=blob["supervised"],
                 )
+        dense = _dense(bb, blob)
+        chemistry = (
+            None if dense is None else backbone_chemistry_failures(
+                dense, blob["supervised"], None, blob["binder_mask"]
+            )
+        )
         out[example_id] = {
             "pool": entry["pool"],
             "resolved_binder_bb_rmsd": float(
                 coupled.stats["backbone_rmsd_angstrom"]
             ),
             "loss": float(coupled.total),
+            "backbone_chemistry": chemistry,
+            "backbone_chemistry_failed": (
+                None if chemistry is None else chemistry["failed"]
+            ),
         }
     return out
 
 
-def _aggregate(per_complex):
-    values = [v["resolved_binder_bb_rmsd"] for v in per_complex.values()]
+def _dense(flat, blob):
+    """Flat atom axis -> [L, 37, 3], for the chemistry check.
+
+    The corrective call returns PXDesign's flat atom axis; the chemistry
+    metric is per residue, so the atoms are scattered back through the
+    topology the cache recorded.
+    """
+    import torch
+
+    from pxf import atom37
+
+    a2t = blob.get("atom_to_token_idx")
+    slots = blob.get("atom37_slot")
+    n_tokens = int(blob["binder_mask"].reshape(-1).shape[0])
+    dense = torch.zeros(
+        n_tokens, atom37.NUM_ATOM37, 3, device=flat.device, dtype=flat.dtype
+    )
+    if a2t is None or slots is None:
+        # The cache predates the per-atom index being stored; the chemistry
+        # metric is then unevaluable, which the selector treats as a refusal
+        # rather than a pass.
+        return None
+    dense[a2t.to(flat.device), slots.to(flat.device)] = flat.reshape(-1, 3)
+    return dense
+
+
+def _aggregate(per_complex, *, primary_pool="pdb"):
+    """Aggregate over complexes. The PRIMARY population is the PDB rows.
+
+    selection.yaml asks for PDB and TED to be reported separately and for the
+    PDB panel to be primary; the first version returned the pooled PDB+TED
+    median as the selection quantity, which mixes deposited structures with
+    AlphaFold-model-derived domain dimers.
+    """
     by_pool = {}
     for pool in {v["pool"] for v in per_complex.values()}:
         subset = [v["resolved_binder_bb_rmsd"] for v in per_complex.values()
                   if v["pool"] == pool]
+        chem = [v["backbone_chemistry_failed"] for v in per_complex.values()
+                if v["pool"] == pool and v["backbone_chemistry_failed"] is not None]
         by_pool[pool] = {
             "n": len(subset),
             "median": statistics.median(subset) if subset else None,
+            "backbone_chemistry_failure_rate": (
+                sum(1 for c in chem if c) / len(chem) if chem else None
+            ),
         }
+    primary = by_pool.get(primary_pool, {})
+    pooled = [v["resolved_binder_bb_rmsd"] for v in per_complex.values()]
+    chem_all = [v["backbone_chemistry_failed"] for v in per_complex.values()
+                if v["backbone_chemistry_failed"] is not None]
     return {
-        "resolved_binder_bb_rmsd": statistics.median(values) if values else None,
-        "n": len(values),
+        # The SELECTION quantity: PDB only.
+        "resolved_binder_bb_rmsd": primary.get("median"),
+        "primary_pool": primary_pool,
+        "n": primary.get("n", 0),
+        "resolved_binder_bb_rmsd_pooled": (
+            statistics.median(pooled) if pooled else None
+        ),
         "by_pool": by_pool,
-        # Failure rates are placeholders until the chemistry guardrails are
-        # computed; selection treats a missing metric as unevaluable rather
-        # than as passing.
-        "backbone_chemistry_failure_rate": None,
+        "backbone_chemistry_failure_rate": primary.get(
+            "backbone_chemistry_failure_rate"
+        ),
+        # NOT IMPLEMENTED, and therefore not passable: evaluating side-chain
+        # chemistry on the corrected backbone requires repacking the event
+        # sequence onto bb1, which this script does not do. The selector
+        # refuses a checkpoint whose required guardrail metric is missing, so
+        # this blocks selection rather than silently waving it through.
         "sidechain_chemistry_failure_rate": None,
+        "sidechain_chemistry_note": (
+            "not implemented: requires repacking the event sequence on the "
+            "corrected backbone. Selection refuses on a missing required "
+            "guardrail rather than treating it as a pass."
+        ),
+        "n_chemistry_evaluated": len(chem_all),
     }
 
 

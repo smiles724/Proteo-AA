@@ -313,3 +313,67 @@ def test_fampnn_draws_do_not_move_the_backbone_rng():
         return x
 
     assert torch.equal(trajectory(False), trajectory(True))
+
+
+# ------------------------------------------- contracts a code review caught
+#
+# Each of these pins a defect found by review at e73f484. They are written as
+# the reviewer's own probes so a regression reproduces the original finding
+# rather than merely failing somewhere nearby.
+
+
+def test_packed_coords_reads_the_packers_dict_interface():
+    """R8: FaMPNNSideChainPacker.forward returns a DICT.
+
+    The first version accepted tensors, tuples and attribute-bearing objects
+    but not that, so the FINAL packing of a complete trajectory raised
+    ``TypeError: cannot read coordinates from dict``.
+    """
+    from pxf.bench.integrated import _packed_coords, _packed_mask
+
+    coords = torch.zeros(1, 4, 37, 3)
+    packed = {"coords_af2": coords, "atom_mask_af2": torch.ones(1, 4, 37)}
+    assert _packed_coords(packed).shape == (1, 4, 37, 3)
+    assert _packed_mask(packed, None).shape == (1, 4, 37)
+
+
+def test_packed_coords_refuses_a_non_dict_rather_than_guessing():
+    from pxf.bench.integrated import _packed_coords
+
+    with pytest.raises(TypeError, match="will not guess"):
+        _packed_coords(torch.zeros(1, 4, 37, 3))
+
+
+def test_packed_psce_refuses_to_substitute_the_events_confidence():
+    """Falling back to the event's psCE would describe bb0's packing."""
+    from pxf.bench.integrated import _packed_psce
+
+    with pytest.raises(KeyError, match="event's"):
+        _packed_psce({}, None)
+
+
+def test_rng_stream_device_is_supplied_on_cuda():
+    """R2: replay only captures CUDA RNG when a device is passed.
+
+    Without it two resumes share coordinates and the CPU stream but not the
+    CUDA generator, so they are not paired on GPU.
+    """
+    from pxf.bench.integrated import _cuda_device
+
+    assert _cuda_device(torch.device("cpu")) is None
+    assert _cuda_device("cuda:0") == torch.device("cuda:0")
+
+
+def test_rng_stream_records_no_cuda_state_without_a_device():
+    """The property that made R2 a real defect, stated directly."""
+    from pxf.couple.replay import RngStream
+
+    assert RngStream("x", 0)._cuda is None
+
+
+def test_aligned_rmsd_correction_matrix_follows_the_input_device():
+    """R7: the correction was built on CPU while inputs stayed on CUDA."""
+    from pxf.bench.integrated import _aligned_rmsd_local
+
+    x = torch.randn(20, 3)
+    assert _aligned_rmsd_local(x, x.clone()) == pytest.approx(0.0, abs=1e-6)

@@ -180,6 +180,12 @@ def main() -> None:
             args.feedback_checkpoint,
             expected=expected_policy(
                 bs_checkpoint=args.bs_checkpoint,
+                fampnn_checkpoint=(
+                    args.fampnn_checkpoint
+                    or __import__("pxf.provenance", fromlist=["x"])
+                    .fampnn_checkpoint(args.fampnn_variant)
+                ),
+                pxdesign_donor=_donor_path(args),
                 bs_weights=args.bs_weights, context=args.context,
                 seq_steps=args.seq_steps, pack_steps=args.pack_steps,
                 temperature=args.temperature,
@@ -275,6 +281,18 @@ def main() -> None:
         ),
     }, indent=2, default=str))
     print(f"wrote {out / 'designs.csv'} ({len(rows)} row(s))")
+
+
+def _donor_path(args):
+    """The PXDesign weight FILE inside the release directory.
+
+    ``--checkpoint-dir`` is a directory; hashing it is not possible, and the
+    policy check needs the weights themselves.
+    """
+    from pathlib import Path
+
+    candidate = Path(args.checkpoint_dir) / "pxdesign_v0.1.0.pt"
+    return str(candidate) if candidate.is_file() else None
 
 
 def _load_adapters(path, designer, denoiser, weights):

@@ -44,6 +44,8 @@ TASK = "integrated_feedback_v1"
 #: cannot be checked, which is the same risk as being wrong.
 REQUIRED_POLICY = (
     "bs_checkpoint_sha256",
+    "fampnn_sha256",
+    "pxdesign_sha256",
     "bs_weights",
     "application_mode",
     "sequence_source",
@@ -55,7 +57,17 @@ REQUIRED_POLICY = (
 )
 
 #: Differences that are a hard refusal: the module reads a different function.
-DONOR_KEYS = ("bs_checkpoint_sha256", "application_mode", "sequence_source")
+DONOR_KEYS = (
+    "bs_checkpoint_sha256",
+    "application_mode",
+    "sequence_source",
+    # The ACTUAL donor weights. Without these the original FaMPNN 0.0-vs-0.3
+    # conflict is not prevented by this loader at all: it would check the
+    # A_BS hash and the application mode and let a module trained against a
+    # different FaMPNN or a different PXDesign through.
+    "fampnn_sha256",
+    "pxdesign_sha256",
+)
 
 #: Differences that ``allow_transfer`` may record and proceed past.
 TRANSFERABLE = ("bs_weights", "context", "feedback_scope", "seq_steps",
@@ -175,6 +187,8 @@ def _same(a, b) -> bool:
 def expected_policy(
     *,
     bs_checkpoint,
+    fampnn_checkpoint=None,
+    pxdesign_donor=None,
     bs_weights: str,
     context: str,
     seq_steps: int,
@@ -188,6 +202,12 @@ def expected_policy(
     return {
         "bs_checkpoint_sha256": (
             None if bs_checkpoint is None else file_sha256(bs_checkpoint)
+        ),
+        "fampnn_sha256": (
+            None if fampnn_checkpoint is None else file_sha256(fampnn_checkpoint)
+        ),
+        "pxdesign_sha256": (
+            None if pxdesign_donor is None else file_sha256(pxdesign_donor)
         ),
         "bs_weights": bs_weights,
         "application_mode": application_mode,

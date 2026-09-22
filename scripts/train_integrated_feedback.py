@@ -115,6 +115,20 @@ def main() -> None:
             "from at the last one"
         )
 
+    # R3: seed BEFORE the conditioner is constructed. Seeding afterwards (as
+    # this did) means two independently launched arms of a matched pair get
+    # UNMATCHED initial readout/head weights, so `full - bb_only` would
+    # include an initialisation difference. The pair's whole claim is that
+    # they differ in one declared respect.
+    import numpy as _np
+    import random as _random
+
+    _random.seed(args.seed)
+    _np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     device = select_device(args.device)
     out = Path(args.out)
     (out / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -138,6 +152,19 @@ def main() -> None:
                 "different upstream trains a correction for a distribution "
                 "that no longer exists."
             )
+    if int(identity.get("cache_schema", 1)) != 2:
+        raise SystemExit(
+            f"cache reports schema {identity.get('cache_schema', 1)}; this "
+            "trainer requires 2. A v1 cache encoded h_base from a different "
+            "sequence AND different coordinates, so its bb_only arm was not "
+            "a matched ablation, and it overwrote the target's observed "
+            "side-chain occupancy. Rebuild it."
+        )
+    if not identity.get("stores_h_base"):
+        raise SystemExit(
+            "cache does not store h_base; the bb_only control cannot run "
+            "from it and the pair would not be matched"
+        )
     events = cache["events"]
     if not events:
         raise SystemExit(f"{args.train_cache} holds no events")
@@ -163,9 +190,12 @@ def main() -> None:
         c_s=c_s, c_z=c_z, gate=config.get("gate"),
     ).to(device)
     frozen = freeze_everything_but(conditioner, px_model, designer.model)
+    init_digest = initial_weight_digest(conditioner)
     print(f"trainable: {frozen['trainable_parameters']} parameter(s) in "
           f"{frozen['trainable_tensors']} tensor(s); {frozen['frozen_tensors']} "
           "donor tensor(s) frozen")
+    print(f"initial weight digest {init_digest[:16]} -- both arms of a pair "
+          "must report the same value")
 
     optim_cfg = config["optimizer"]
     optimizer = torch.optim.AdamW(
@@ -187,6 +217,11 @@ def main() -> None:
 
     policy = {
         "bs_checkpoint_sha256": identity["bs_checkpoint_sha256"],
+        # Taken from the CACHE identity, not from this script's arguments:
+        # the policy must describe the upstream that actually produced the
+        # training states.
+        "fampnn_sha256": identity["fampnn_sha256"],
+        "pxdesign_sha256": identity["pxdesign_sha256"],
         "bs_weights": identity["bs_weights"],
         "application_mode": identity["application_mode"],
         "sequence_source": identity["sequence_source"],
@@ -236,7 +271,6 @@ def main() -> None:
         conditioning_cache[key] = cond
         return cond
 
-    torch.manual_seed(args.seed)
     order = list(range(len(events)))
     history, started = [], time.time()
     print(f"training {arm} for {max_steps} step(s) from step {start_step}")
@@ -305,11 +339,57 @@ def main() -> None:
         if (step + 1) in checkpoint_steps:
             _save(out / "checkpoints" / f"step{step + 1:08d}.pt", conditioner,
                   optimizer, ema, step + 1, arm, policy, identity, frozen,
-                  config, cache, args)
+                  config, cache, args, init_digest)
     _save(out / "checkpoints" / "final.pt", conditioner, optimizer, ema,
           max_steps, arm, policy, identity, frozen, config, cache, args)
     (out / "history.json").write_text(json.dumps(history, indent=2, default=str))
     print(f"done: {max_steps} step(s) in {(time.time() - started) / 60:.1f} min")
+
+
+def _rng_state():
+    """Every stream, not just CPU torch. A resume that restores one of four
+    does not reproduce the run it claims to continue."""
+    import random
+
+    import numpy as np
+    import torch
+
+    return {
+        "cpu": torch.get_rng_state(),
+        "cuda": (torch.cuda.get_rng_state_all()
+                 if torch.cuda.is_available() else None),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+    }
+
+
+def _restore_rng(state):
+    import random
+
+    import numpy as np
+    import torch
+
+    if state.get("cpu") is not None:
+        torch.set_rng_state(state["cpu"])
+    if state.get("cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    if state.get("numpy") is not None:
+        np.random.set_state(state["numpy"])
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+
+
+def initial_weight_digest(module):
+    """A hash of the freshly built parameters, for asserting a matched pair."""
+    import hashlib
+
+    import torch
+
+    digest = hashlib.sha256()
+    for name, parameter in sorted(module.named_parameters()):
+        digest.update(name.encode())
+        digest.update(parameter.detach().cpu().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _coords(out):
@@ -358,7 +438,7 @@ def _binder_for(record):
 
 
 def _save(path, conditioner, optimizer, ema, step, arm, policy, cache_identity,
-          frozen, config, cache, args):
+          frozen, config, cache, args, init_digest=None):
     import torch
 
     from pxf.bench.integrated_checkpoints import TASK
@@ -369,7 +449,7 @@ def _save(path, conditioner, optimizer, ema, step, arm, policy, cache_identity,
         "optimizer": optimizer.state_dict(),
         "ema": ema.state_dict(),
         "step": int(step),
-        "rng": {"cpu": torch.get_rng_state()},
+        "rng": _rng_state(),
         # The policy this run ACTUALLY implemented. Not to be added to an older
         # checkpoint to make the inference loader accept it.
         "integrated_policy": policy,
@@ -385,6 +465,8 @@ def _save(path, conditioner, optimizer, ema, step, arm, policy, cache_identity,
             "cache_key": cache["cache_key"],
             "cache_identity": cache_identity,
             "n_cached_events": len(cache["events"]),
+            "cache_schema": identity.get("cache_schema"),
+            "initial_weight_digest": init_digest,
         },
     }, str(path))
     print(f"  wrote {path}")

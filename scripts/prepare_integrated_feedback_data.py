@@ -422,8 +422,11 @@ def main() -> None:
             "identity_threshold": args.identity_threshold,
             "coverage_threshold": args.coverage_threshold,
             "identity_definition":
-                "global pairwise (BLOSUM62, gap -11/-1), matches over the "
-                "shorter sequence; a SCREEN, not structural clustering",
+                "LOCAL pairwise (Smith-Waterman, BLOSUM62, gap -11/-1); "
+                "identity = matches / aligned columns, where aligned columns "
+                "are the non-gap-paired positions; coverage = aligned columns "
+                "/ len(shorter sequence). 'X' never counts as a match. A "
+                "SCREEN, not structural clustering.",
             "benchmark_targets": bench_note,
             "cluster_id_note":
                 "cluster_id is the PDB ID on these rows, not a homology "

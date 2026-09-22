@@ -66,12 +66,18 @@ def main() -> None:
     rows = load_rows(args.designs)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    arms = sorted({r["arm"] for r in rows})
+    arms = sorted({(r["arm"], r.get("bs_seed") or "") for r in rows})
+    arms = [f"{a}@bs{s}" if s != "" else a for a, s in arms]
 
     # ---- plumbing ---------------------------------------------------------
+    def _rows_for(label):
+        arm, _, seed = label.partition("@bs")
+        return [r for r in rows if r["arm"] == arm
+                and (str(r.get("bs_seed") or "") == seed or seed == "")]
+
     plumbing = {}
     for arm in arms:
-        subset = [r for r in rows if r["arm"] == arm]
+        subset = _rows_for(arm)
         injections = [int(r["conditioning_injections"] or 0) for r in subset]
         hooks = [int(r["decode_hook_calls"] or 0) for r in subset]
         plumbing[arm] = {
@@ -89,7 +95,7 @@ def main() -> None:
     # ---- chemistry --------------------------------------------------------
     chemistry = {}
     for arm in arms:
-        subset = [r for r in rows if r["arm"] == arm]
+        subset = _rows_for(arm)
         clashes = [int(r["interface_clashes"] or 0) for r in subset]
         mins = [number(r["min_bb_bb_distance"]) for r in subset]
         transfer = [number(r["event_to_final_aligned_rmsd"]) for r in subset]
@@ -111,14 +117,18 @@ def main() -> None:
         }
 
     # ---- paired comparisons on the shared prefix --------------------------
+    # Keyed on (shared prefix, arm, A_BS seed). Keying on (prefix, arm) alone
+    # collapsed both A_BS seeds' "J03" rows onto one entry, overwriting one
+    # baseline during pairing.
     by_prefix = defaultdict(dict)
     for row in rows:
-        by_prefix[row["shared_prefix_id"]][row["arm"]] = row
+        by_prefix[row["shared_prefix_id"]][
+            (row["arm"], row.get("bs_seed") or "")
+        ] = row
     comparisons = []
-    for a in arms:
-        for b in arms:
-            if a >= b:
-                continue
+    keys = sorted({k for d in by_prefix.values() for k in d})
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
             shared = [p for p, d in by_prefix.items() if a in d and b in d]
             if not shared:
                 continue
@@ -129,7 +139,7 @@ def main() -> None:
                 if x is not None and y is not None:
                     diffs.append(x - y)
             comparisons.append({
-                "comparison": f"{a} - {b}",
+                "comparison": f"{a[0]}@bs{a[1]} - {b[0]}@bs{b[1]}",
                 "shared_prefixes": len(shared),
                 "median_min_bb_bb_difference": _median(diffs),
                 "identical_sequences": sum(

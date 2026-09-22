@@ -137,6 +137,14 @@ def main() -> None:
 
     identity = {
         "task": "integrated_feedback_v1",
+        # SCHEMA VERSION. Bumped whenever the CONTENT of an event file
+        # changes, not just its metadata. v2 fixes two things a metadata flag
+        # could not express: h_base is now the matched side-chain ablation
+        # (same sequence and coordinates as h_packed, side chains hidden --
+        # v1 also varied the sequence and the coordinates), and the target's
+        # observed side-chain occupancy is preserved instead of being
+        # overwritten by generated availability. A v1 cache is not usable.
+        "cache_schema": 2,
         "pxdesign_sha256": sha256_file(args.pxdesign_donor),
         "fampnn_sha256": fampnn_sha,
         "fampnn_variant": args.fampnn_variant,
@@ -153,8 +161,20 @@ def main() -> None:
         "crop_size": args.crop_size,
         "manifest": str(args.manifest),
         "manifest_sha256": sha256_file(args.manifest),
-        "sources": provenance.official_sources()
-        if hasattr(provenance, "official_sources") else None,
+        # provenance.official_sources() does NOT exist on this branch, and a
+        # hasattr() guard around it silently recorded `sources: None` -- a
+        # provenance field that looked populated and was not. Record the
+        # hashes that actually matter instead, explicitly.
+        "sources": {
+            "pxdesign_donor_path": str(args.pxdesign_donor),
+            "fampnn_checkpoint_path": str(
+                args.fampnn_checkpoint
+                or provenance.fampnn_checkpoint(args.fampnn_variant)
+            ),
+            "bs_checkpoint_path": str(args.bs_checkpoint),
+        },
+        "base_seed": int(args.seed),
+        "events_per_complex": int(args.events_per_complex),
         "verified_against_official": bool(args.verified_against_official),
         # Deliberately absent: anything derived from the native binder
         # identity or side chains.
@@ -180,6 +200,7 @@ def main() -> None:
                     row, driver=driver, designer=designer, adapters=adapters,
                     device=device, args=args, seed=seed,
                     event_index=event_index, out=out,
+                    namespace=key[:12],
                 )
                 records.append(record)
             except Exception as exc:  # noqa: BLE001 - a failure is a finding
@@ -262,7 +283,7 @@ def coords_only(bound):
 
 
 def _one_event(row, *, driver, designer, adapters, device, args, seed,
-               event_index, out, **_unused):
+               event_index, out, namespace="", **_unused):
     import numpy as np
     import torch
 
@@ -280,6 +301,27 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
     a2t = structure.topology.atom_to_token_idx.reshape(-1).long().to(device)
     binder_tokens = structure.design_mask.reshape(-1).bool().to(device)
     binder_atoms = binder_tokens[a2t].float()
+
+    # R4: the supervised mask is the INTERSECTION of three things, not just
+    # "is a binder atom". An atom is scored only if it is (a) on a binder row,
+    # (b) in a backbone slot, and (c) actually deposited -- finite and
+    # occupied. The audit checks N/CA/C frames but not O, so an unresolved O
+    # retained by the featurizer would otherwise enter a loss described as
+    # resolved-only.
+    from pxf import atom37 as _atom37
+
+    names = np.asarray(structure.topology.atom_names)
+    slot_of = {n: i for i, n in enumerate(_atom37.ATOM37)}
+    slots = torch.as_tensor(
+        [slot_of.get(str(n), -1) for n in names], device=device, dtype=torch.long
+    )
+    backbone_slot = torch.zeros_like(slots, dtype=torch.bool)
+    for s_i in _atom37.BACKBONE_SLOTS:
+        backbone_slot |= slots == s_i
+    finite = torch.isfinite(
+        structure.backbone_target.float().reshape(-1, 3).to(device)
+    ).all(-1)
+    supervised = (binder_atoms.bool() & backbone_slot & finite).float()
 
     # The noisy state: deposited backbone corrupted to the event sigma on
     # BINDER atoms only. The target stays clean -- that is what "target
@@ -310,7 +352,14 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
                 want_h_base=True,
             )
 
-    path = out / "events" / f"{row.example_id}_e{event_index}.pt"
+    # The namespace carries the upstream identity (A_BS hash + weight
+    # selection). Without it two A_BS seeds write
+    # events/<example_id>_e0.pt and the second silently overwrites the
+    # first, after which seed-0 checkpoints are scored on seed-1 events.
+    stem = f"{row.example_id}_e{event_index}"
+    if namespace:
+        stem = f"{namespace}__{stem}"
+    path = out / "events" / f"{stem}.pt"
     # The whole PackedStructure, detached. Storing only h_packed would not be
     # enough: the readout also reads coords37, aatype, seq_mask, psce and the
     # Visibility, and it is that object -- not a tensor -- that defines what
@@ -322,7 +371,11 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
         "packed": _detach_cpu(products.packed),
         "binder_mask": products.binder_mask.detach().cpu(),
         "native_bb": native_bb.detach().cpu(),
-        "supervised": binder_atoms.reshape(1, -1).detach().cpu(),
+        "supervised": supervised.reshape(1, -1).detach().cpu(),
+        # For the chemistry metric, which is per residue and needs the atoms
+        # scattered back out of PXDesign's flat axis.
+        "atom_to_token_idx": a2t.detach().cpu(),
+        "atom37_slot": slots.detach().cpu(),
         "binder_sequence": products.binder_sequence,
         "provenance": {**products.provenance, "seed": seed,
                        "event_index": event_index},
@@ -334,12 +387,15 @@ def _one_event(row, *, driver, designer, adapters, device, args, seed,
         # manifest that may since have changed.
         "cif_path": str(row.cif_path),
         "binder_chain": str(row.converted_binder_chain),
+        "namespace": namespace,
         "sha256": sha256_file(path),
-        "supervised_atoms": int(binder_atoms.sum()),
+        "supervised_atoms": int(supervised.sum()),
+        "binder_atoms_total": int(binder_atoms.sum()),
+        "unsupervised_binder_atoms": int(binder_atoms.sum() - supervised.sum()),
         "binder_length": products.provenance.get("binder_length"),
         "delta_h_norm": products.provenance.get("delta_h_norm"),
         "seconds": round(time.time() - started, 2),
-        "leakage": leakage_report_stub(products, binder_atoms),
+        "leakage": leakage_report_stub(products, supervised),
     }
 
 

@@ -231,7 +231,9 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     # ---- pass 1: the shared prefix, recorded at the event -----------------
     prefix_id = f"{name}_L{length}_s{gen_seed}"
     with api["BackboneTap"](denoiser.model.diffusion_module) as tap:
-        stream = api["RngStream"]("integrated", gen_seed)
+        stream = api["RngStream"](
+            "integrated", gen_seed, device=_cuda(denoiser.device)
+        )
         _x0, records, _stats = api["run_trajectory"](
             denoise=lambda x, s, *, feedback=None: denoiser.denoise(
                 x, s, feedback=feedback, tap=tap
@@ -246,6 +248,14 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
             f"{prefix_id}: the trajectory recorded no state at step "
             f"{choice.step}; every arm would start somewhere different"
         )
+    realized = int(structure.design_mask.reshape(-1).sum())
+    if realized != int(length):
+        raise SystemExit(
+            f"{prefix_id}: the prepared YAML produced a design mask of "
+            f"{realized} token(s) but --lengths asked for {length}. The "
+            "length is used in every label and must describe the structure, "
+            "not the request; regenerate the YAML for this length."
+        )
     recorded = records[0]
     torch.save(recorded, out / "diagnostics" / f"{prefix_id}.event.pt")
     print(f"  recorded the event state; {len(records)} record(s)")
@@ -257,15 +267,21 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
             adapters = _load_adapters(bs_path, designer, denoiser, api)
         # The J03 arms share ONE event decode; only the feedback differs.
         shared = None
-        arms = [("J03", None)]
+        # R7.4: U03 is ALWAYS included, not only when the J03 mapping is
+        # empty. It is the unadapted baseline and omitting it whenever both
+        # A_BS seeds are supplied removed the very row the comparison needs.
+        arms = [("J03", None, None)]
         for label, pick in sorted(feedback_selection.items()):
-            if f"_s{bs_seed}" in label:
-                arms.append((label, pick["checkpoint"]))
-        if adapters is None:
-            arms = [("U03", None)]
-        for arm_label, feedback_path in arms:
+            # R7.2: read the arm and seed as STRUCTURED fields. Parsing
+            # "early_s_full_s0" with split("_s")[0] yields "early", which then
+            # fails the expected-arm check for a legitimate checkpoint.
+            if int(pick.get("bs_seed", -1)) != int(bs_seed):
+                continue
+            arms.append((label, pick["checkpoint"], pick.get("arm")))
+        for arm_label, feedback_path, conditioner_arm in arms:
             rows.append(_one_arm(
                 arm_label=arm_label, feedback_path=feedback_path,
+                conditioner_arm=conditioner_arm,
                 shared=shared, adapters=adapters, recorded=recorded,
                 denoiser=denoiser, structure=structure, designer=designer,
                 schedule=schedule, choice=choice, prefix_id=prefix_id,
@@ -279,7 +295,8 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     return rows
 
 
-def _one_arm(*, arm_label, feedback_path, shared, adapters, recorded, denoiser,
+def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
+             recorded, denoiser,
              structure, designer, schedule, choice, prefix_id, name, length,
              gen_seed, bs_seed, args, out, api):
     """Resume from the recorded event and finish this arm's trajectory."""
@@ -289,14 +306,27 @@ def _one_arm(*, arm_label, feedback_path, shared, adapters, recorded, denoiser,
     conditioner = None
     if feedback_path:
         c_s, c_z = api["conditioning_widths"](denoiser.model)
+        if not conditioner_arm:
+            raise SystemExit(
+                f"{arm_label}: the selection artifact records no `arm`, so the "
+                "expected-arm check cannot run. E1's full and bb_only "
+                "variants have identical parameter shapes, so the wrong one "
+                "would load cleanly and be reported as the right one."
+            )
         conditioner, _report, _ident = api["load_feedback"](
             feedback_path,
             expected=api["expected_policy"](
-                bs_checkpoint=None, bs_weights="ema", context=args.context,
+                # R7.1: the REAL A_BS path. Passing None made expected_policy
+                # record bs_checkpoint_sha256=None, which then mismatched the
+                # checkpoint's recorded hash and rejected a valid pair.
+                bs_checkpoint=bs_path_for(bs_seed, args),
+                fampnn_checkpoint=args.fampnn_checkpoint,
+                pxdesign_donor=_donor_file(args.checkpoint_dir),
+                bs_weights="ema", context=args.context,
                 seq_steps=args.seq_steps, pack_steps=args.pack_steps,
                 temperature=args.temperature,
             ),
-            expected_arm=arm_label.split("_s")[0].replace("E1_", "early_s_"),
+            expected_arm=conditioner_arm,
             c_h_V=api["node_feature_dim"](designer.model),
             c_s=c_s, c_z=c_z,
             c_token=api["token_feature_dim"](denoiser.model),
@@ -319,7 +349,10 @@ def _one_arm(*, arm_label, feedback_path, shared, adapters, recorded, denoiser,
                     structure=structure, designer=designer,
                     adapters=adapters, context=args.context, seed=gen_seed,
                     design_id=prefix_id, target=name, tap=tap,
-                    want_h_base=False,
+                    # REQUIRED: the bb_only arm shares this event and reads
+                    # h_base. Without it the control cannot run, and the
+                    # cache-side fix alone did not cover this path.
+                    want_h_base=True,
                 )
             products = state["products"]
             if conditioner is None:
@@ -340,7 +373,9 @@ def _one_arm(*, arm_label, feedback_path, shared, adapters, recorded, denoiser,
                 )
             return delta
 
-        stream = api["RngStream"]("integrated", gen_seed)
+        stream = api["RngStream"](
+            "integrated", gen_seed, device=_cuda(denoiser.device)
+        )
         x0, _records, stats = api["run_trajectory"](
             denoise=lambda x, s, *, feedback=None: denoiser.denoise(
                 x, s, feedback=feedback, tap=tap
@@ -356,11 +391,19 @@ def _one_arm(*, arm_label, feedback_path, shared, adapters, recorded, denoiser,
     sample_id = f"{prefix_id}__{arm_label}" + (
         f"_bs{bs_seed}" if bs_seed is not None else ""
     )
+    # R7.5: repack the event's sequence on THIS arm's final backbone and write
+    # the PDB. Returning design_pdb="" meant the matrix could not feed AF2-IG
+    # at all, which is the whole point of generating.
+    pdb, packed_coords = _finalise(
+        x0=x0, products=products, structure=structure, designer=designer,
+        adapters=adapters, args=args, out=out, sample_id=sample_id,
+        pack_seed=gen_seed, api=api,
+    )
     geometry = _geometry(x0, structure, products.binder_mask)
     row = {
         "sample_id": sample_id, "target": name, "binder_length": length,
         "sequence": products.binder_sequence,
-        "design_pdb": "", "binder_chain": geometry["binder_chain"],
+        "design_pdb": str(pdb), "binder_chain": geometry["binder_chain"],
         "target_chains": ",".join(geometry["target_chains"]),
         "arm": arm_label, "feedback_arm": (arm_label if conditioner else ""),
         "bs_seed": bs_seed, "generation_seed": gen_seed,
@@ -387,10 +430,98 @@ def _one_arm(*, arm_label, feedback_path, shared, adapters, recorded, denoiser,
     return row
 
 
+def _finalise(*, x0, products, structure, designer, adapters, args, out,
+              sample_id, pack_seed, api):
+    """Repack the event sequence on the final backbone and write a PDB."""
+    import numpy as np
+    import torch
+
+    from pxf import atom37
+    from pxf.bench.backbone_inputs import build_design_inputs, check_design_mask
+    from pxf.bench.coupled_design import conditioned
+    from pxf.bench.integrated import _packed_coords, _packed_mask
+    from fampnn.model.sd_model import SeqDenoiser
+
+    topology = structure.topology
+    a2t = np.asarray(topology.atom_to_token_idx.cpu()).astype(int)
+    res_names = np.asarray(topology.res_names)
+    design = check_design_mask(
+        np.asarray(structure.design_mask.cpu()), res_names=res_names,
+        atom_to_token=a2t, n_tokens=int(structure.num_tokens),
+        what=sample_id,
+    )
+    final_inputs = build_design_inputs(
+        x0=x0.reshape(-1, 3),
+        a_token=products.a_token.reshape(int(structure.num_tokens), -1),
+        sigma=products.sigma, atom_names=np.asarray(topology.atom_names),
+        res_names=res_names, atom_to_token=a2t,
+        n_tokens=int(structure.num_tokens), design=design,
+        residue_index=topology.residue_index, asym_id=topology.chain_index,
+        design_id=sample_id, target=sample_id,
+        binder_length=int(design.sum()), context=args.context,
+        device=x0.device,
+    )
+    with conditioned(designer.model, products.residual):
+        packed = designer(
+            coords_af2=final_inputs.coords_af2, aatype=products.aatype,
+            atom_mask=final_inputs.atom_mask, seq_mask=final_inputs.seq_mask,
+            residue_index=final_inputs.residue_index,
+            chain_index=final_inputs.chain_index,
+            scn_context_mask=final_inputs.sidechain_context_mask,
+            seed=pack_seed,
+        )
+    coords = _packed_coords(packed)
+    mask = _packed_mask(packed, final_inputs.atom_mask)
+    path = out / "designs" / f"{sample_id}.pdb"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    length = int(products.aatype.shape[-1])
+    SeqDenoiser.save_samples_to_pdb({
+        "x_denoised": coords.cpu(),
+        "seq_mask": torch.ones(1, length),
+        # The packer's OWN occupancy, not an all-zero mask: writing zeros
+        # would claim every atom is present including ones it never built.
+        "missing_atom_mask": (1.0 - mask).cpu(),
+        "residue_index": topology.residue_index.reshape(1, -1).cpu().long(),
+        "chain_index": topology.chain_index.reshape(1, -1).cpu().long(),
+        "pred_aatype": products.aatype.cpu().long(),
+        "psce": products.psce.cpu(),
+    }, [str(path)])
+    return path, coords
+
+
+def _donor_file(checkpoint_dir):
+    """The weight file inside the release directory; a directory has no hash."""
+    from pathlib import Path
+
+    candidate = Path(checkpoint_dir) / "pxdesign_v0.1.0.pt"
+    return str(candidate) if candidate.is_file() else None
+
+
+def bs_path_for(bs_seed, args):
+    for entry in args.bs_checkpoint:
+        seed, _, path = entry.partition("=")
+        if int(seed) == int(bs_seed):
+            return path
+    raise SystemExit(f"no --bs-checkpoint supplied for seed {bs_seed}")
+
+
 def _aligned(a, b):
     from pxf.bench.integrated import _aligned_rmsd_local
 
     return _aligned_rmsd_local(a.reshape(-1, 3), b.reshape(-1, 3))
+
+
+def _cuda(device):
+    """The CUDA device an RngStream must bind to, or None on CPU.
+
+    Without it replay records cuda=None and never captures or restores the
+    CUDA generator, so two resumes are not paired on GPU even though they
+    share coordinates and the CPU stream.
+    """
+    import torch
+
+    device = torch.device(device)
+    return device if device.type == "cuda" else None
 
 
 def _geometry(x0, structure, binder_mask):

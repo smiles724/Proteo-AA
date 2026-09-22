@@ -173,7 +173,12 @@ def _aligned_rmsd_local(a: torch.Tensor, b: torch.Tensor) -> float:
     # The determinant correction: without it the optimal orthogonal transform
     # may be a REFLECTION, which fits a mirror image and reports a smaller
     # RMSD than any rotation can achieve.
-    correction = torch.diag(torch.tensor([1.0, 1.0, d], dtype=x.dtype))
+    # On x's device: an earlier version built this on the CPU while the
+    # inputs stayed on CUDA, which is a device error on the GPU path.
+    correction = torch.diag(
+        torch.tensor([1.0, 1.0, 1.0], dtype=x.dtype, device=x.device)
+    )
+    correction[2, 2] = d
     rotation = u @ correction @ vt
     return float(torch.sqrt(((x @ rotation - y) ** 2).sum(-1).mean()))
 
@@ -247,12 +252,17 @@ def run_integrated(
             stats["provisional_calls"] += 1
             if conditioner is None:
                 return None  # the A_BS-only control: no correction at all
-            delta = conditioner(
-                packed=products.h_packed,
-                sigma=torch.full(
+            # POSITIONAL PackedStructure, and it returns a PAIR. Passing
+            # h_packed as a keyword fails inside the readout, which also reads
+            # coords37/aatype/visibility -- the training path already does
+            # this correctly and the two must not disagree.
+            raw, _readout_stats = conditioner(
+                products.packed,
+                torch.full(
                     (1,), products.sigma, device=device, dtype=torch.float32
                 ),
             )
+            delta = raw
             delta = mask_feedback(
                 delta, products.binder_mask, zero_bypass=True, name="E1"
             )
@@ -261,7 +271,12 @@ def run_integrated(
                 stats["feedback_norm"] = _payload_norm(delta)
             return delta
 
-        stream = RngStream("integrated", seed)
+        # `device=` is REQUIRED on CUDA: without it RngStream records
+        # cuda=None and never captures or restores the CUDA generator, so
+        # sharing coordinates and the CPU stream does not give paired GPU
+        # continuations -- and the event decoder's own CUDA draws would move
+        # the backbone stream.
+        stream = RngStream("integrated", seed, device=_cuda_device(device))
         x0, _records, solver_stats = run_trajectory(
             denoise=denoise,
             schedule=schedule,
@@ -357,12 +372,20 @@ def run_integrated(
         sequence=products.sequence,
         binder_sequence=products.binder_sequence,
         coords_af2=_packed_coords(packed),
-        atom_mask_af2=final_inputs.atom_mask,
+        atom_mask_af2=_packed_mask(packed, final_inputs.atom_mask),
         psce=_packed_psce(packed, products),
         binder_mask=products.binder_mask,
         event=choice,
         diagnostics=diagnostics,
     )
+
+
+def _cuda_device(device):
+    """The CUDA device to bind an RngStream to, or None on CPU."""
+    import torch
+
+    device = torch.device(device)
+    return device if device.type == "cuda" else None
 
 
 def _payload_norm(delta) -> float:
@@ -374,21 +397,48 @@ def _payload_norm(delta) -> float:
     return float(delta.detach().norm())
 
 
+#: What ``FaMPNNSideChainPacker.forward`` actually returns. It is a DICT, and
+#: an earlier version of this module accepted tensors, tuples and
+#: attribute-bearing objects but not that -- so the final packing raised
+#: ``TypeError: cannot read coordinates from dict`` at the very end of a full
+#: trajectory. Read the real interface rather than a guessed union of types.
+PACK_COORD_KEYS = ("coords_af2", "x_denoised", "coords")
+PACK_MASK_KEYS = ("atom_mask_af2", "atom_mask")
+
+
 def _packed_coords(packed):
-    """The packer returns either a tensor or a result object; accept both."""
-    for attr in ("coords_af2", "x_denoised"):
-        value = getattr(packed, attr, None)
-        if value is not None:
-            return value if value.dim() == 4 else value.unsqueeze(0)
-    if isinstance(packed, (tuple, list)):
-        return packed[0]
-    if torch.is_tensor(packed):
-        return packed if packed.dim() == 4 else packed.unsqueeze(0)
-    raise TypeError(f"cannot read coordinates from {type(packed).__name__}")
+    if isinstance(packed, dict):
+        for key in PACK_COORD_KEYS:
+            if key in packed:
+                value = packed[key]
+                return value if value.dim() == 4 else value.unsqueeze(0)
+        raise TypeError(
+            f"the packer returned a dict with keys {sorted(packed)}; none of "
+            f"{PACK_COORD_KEYS} holds coordinates"
+        )
+    raise TypeError(
+        f"the packer returned {type(packed).__name__}; this reads its dict "
+        "interface and will not guess at another"
+    )
+
+
+def _packed_mask(packed, fallback):
+    """The packer's OWN output occupancy, not the input backbone's."""
+    if isinstance(packed, dict):
+        for key in PACK_MASK_KEYS:
+            if key in packed:
+                value = packed[key]
+                return value if value.dim() == 3 else value.unsqueeze(0)
+    return fallback
 
 
 def _packed_psce(packed, products):
-    value = getattr(packed, "psce", None)
-    if value is None:
-        return products.psce
-    return value if value.dim() == 3 else value.unsqueeze(0)
+    if isinstance(packed, dict) and packed.get("psce") is not None:
+        value = packed["psce"]
+        return value if value.dim() == 3 else value.unsqueeze(0)
+    # Falling back to the EVENT's psce would report the confidence of a
+    # packing built for bb0 as if it described the final one.
+    raise KeyError(
+        "the final packing returned no psce; reporting the event's instead "
+        "would attribute bb0's side-chain confidence to the final backbone"
+    )

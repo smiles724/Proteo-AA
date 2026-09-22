@@ -46,7 +46,7 @@ thing it is meant to correct. The legacy packing hook must not run at all.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
 import torch
@@ -292,21 +292,55 @@ def prepare_event(
         inputs.coords_af2,
         sidechains=coords,
     )
+    # `predicted_availability` deliberately ignores the supplied side-chain
+    # mask, because for a GENERATED binder every finite coordinate is a real
+    # generated atom. The target is different: its side chains are fixed
+    # context and an unresolved one must stay absent, not become visible
+    # because the packer happened to leave a finite number there. So the
+    # target's observed occupancy is re-imposed, and the binder's generated
+    # availability is left alone.
+    target_rows = ~inputs.binder_mask.reshape(1, -1).bool()
+    observed = inputs.atom_mask.to(vis.available.dtype)
+    keep = torch.where(target_rows[..., None], observed, vis.available)
+    vis = replace(
+        vis,
+        available=keep,
+        missing_atom_mask=vis.exists * (1.0 - keep),
+        sidechain_visible=(
+            keep[..., list(atom37.SIDECHAIN_SLOTS)].sum(-1) > 0
+        ).to(vis.sidechain_visible.dtype),
+    )
 
     # ---- 6. re-encode, WITHOUT the A_BS hook ------------------------------
     # The feedback module must read the donor's own view of the realized
     # state. Encoding it through the conditioned path would hand the feedback a
     # representation already shifted by the residual it exists to correct.
+    # h_base is the MATCHED side-chain ablation: the same decoded sequence, the
+    # same realized coordinates, the same residue and chain indices, differing
+    # from h_packed in exactly one declared respect -- no side chain is
+    # visible.
+    #
+    # An earlier version encoded it from `inputs.coords_af2` and
+    # `inputs.aatype` (X on the binder) with the target's side chains still
+    # shown. That differs from h_packed in the SEQUENCE, the COORDINATES and
+    # the side-chain visibility all at once, so `full - bb_only` would not
+    # have isolated the side-chain contribution -- it would have measured
+    # three things and been reported as one. This is the ablation the
+    # bb_only arm's name claims.
     base_features = None
     if want_h_base:
+        sidechain_slots = list(atom37.SIDECHAIN_SLOTS)
+        base_missing = vis.missing_atom_mask.clone()
+        # Every side-chain slot unusable, backbone untouched.
+        base_missing[..., sidechain_slots] = 1.0
         with torch.no_grad():
             _l, _h, base_features = encode(
-                designer.model, inputs.coords_af2, inputs.aatype,
+                designer.model, coords, aatype,
                 seq_mask=inputs.seq_mask,
-                missing_atom_mask=1.0 - inputs.atom_mask,
+                missing_atom_mask=base_missing,
                 residue_index=inputs.residue_index,
                 chain_index=inputs.chain_index,
-                sidechain_visible=inputs.sidechain_context_mask.float(),
+                sidechain_visible=torch.zeros_like(vis.sidechain_visible),
             )
     _logits, _hv, packed_features = encode(
         designer.model, coords, aatype,

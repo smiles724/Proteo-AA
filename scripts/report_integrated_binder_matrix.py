@@ -33,11 +33,16 @@ import argparse
 import csv
 import glob
 import json
+import os
 import statistics
 from collections import defaultdict
 from pathlib import Path
 
-PROTEO_AA = Path("/users/yfsun/Proteo-AA")
+# PROTEOAA_ROOT is what the rest of the repo already uses to locate this
+# checkout off-cluster (pxf.backbone.proteoaa, pxf.eval.canonical). Honouring
+# it here too means one variable moves the whole run, instead of this script
+# being the one place that still hardcodes a Marlowe path.
+PROTEO_AA = Path(os.environ.get("PROTEOAA_ROOT", "/users/yfsun/Proteo-AA"))
 
 
 def load_rows(path):
@@ -200,10 +205,21 @@ def main() -> None:
                   f"median min-BB-BB diff {c['median_min_bb_bb_difference']}")
     if report["designability"]:
         print("\ndesignability (PILOT)")
-        for arm, cell in report["designability"]["per_arm"].items():
-            print(f"  {arm:24s} {cell['successes']}/{cell['attempts']} "
-                  f"{cell['rate']:.1%}  (failures kept in the denominator: "
-                  f"{cell['errors']})")
+        scored = report["designability"]
+        # An unavailable filter is reported, not raised through. This block
+        # used to index ["per_arm"] unconditionally, so the one case that
+        # needs its message read -- the filter could not be imported --
+        # surfaced as a KeyError naming the wrong thing.
+        if scored.get("error"):
+            print(f"  unavailable: {scored['error']}")
+        else:
+            for skipped in scored.get("skipped_csvs", []):
+                print(f"  skipped {skipped['file']}: no "
+                      f"{', '.join(skipped['missing'])} column(s)")
+            for arm, cell in scored["per_arm"].items():
+                print(f"  {arm:24s} {cell['successes']}/{cell['attempts']} "
+                      f"{cell['rate']:.1%}  (failures kept in the denominator: "
+                      f"{cell['errors']})")
     print(f"\nwrote {out / 'report.json'}")
 
 
@@ -217,9 +233,26 @@ def _designability(metrics_dir, proteo_aa, design_rows):
     from conditional_binder import AF2IGFilter
 
     af2ig = AF2IGFilter()
-    rows = []
+    # Selected by COLUMNS, not by filename. `score_af2ig_designability.py`
+    # writes designability_per_target.csv beside the metrics, so the
+    # documented fold -> score -> report order used to make this glob ingest
+    # a summary table and die on a missing sample_id. A filename convention
+    # would fail silently the first time someone renamed an output; a column
+    # check states the contract and says what it skipped.
+    required = ("sample_id",) + AF2IGFilter.REQUIRED_METRICS
+    rows, skipped = [], []
     for path in sorted(glob.glob(str(Path(metrics_dir) / "*.csv"))):
-        rows.extend(load_rows(path))
+        table = load_rows(path)
+        present = set(table[0]) if table else set()
+        missing = [column for column in required if column not in present]
+        if missing:
+            skipped.append({"file": Path(path).name, "missing": missing,
+                            "rows": len(table)})
+            continue
+        rows.extend(table)
+    if not rows:
+        return {"error": f"no CSV under {metrics_dir} has {list(required)}",
+                "skipped_csvs": skipped}
     arm_of = {r["sample_id"]: r["arm"] for r in design_rows}
 
     per_arm = defaultdict(lambda: {"successes": 0, "attempts": 0, "errors": 0})
@@ -243,6 +276,7 @@ def _designability(metrics_dir, proteo_aa, design_rows):
             per_arm[arm]["attempts"] += 1
             per_arm[arm]["errors"] += 1
     return {
+        "skipped_csvs": skipped,
         "filter": {"ipae_max": af2ig.ipae_max, "iptm_min": af2ig.iptm_min,
                    "plddt_min": af2ig.plddt_min,
                    "binder_bound_unbound_rmsd_max":

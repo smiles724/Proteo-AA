@@ -25,7 +25,13 @@ ARGS="${ARGS:?set ARGS}"
 cd "$ROOT"
 mkdir -p "$DATA_ROOT/runs/logs/pxf_ifb"
 export PATH="/users/yfsun/.venvs/pxdesign_official/bin:$PATH"
-export PYTHONPATH="$ROOT:$PRISTINE"
+# ROOT, the PRISTINE PXDesign, and FaMPNN -- and deliberately NOT
+# $ROOT/PXDesign or $ROOT/Protenix. FaMPNN is a separate upstream with no
+# bearing on the Protenix version wall, and the bridge needs
+# fampnn.data.residue_constants. Adding the other two would shadow the
+# official install with the vendored c3bfc36, which is the pairing
+# pxf/official/require.py refuses.
+export PYTHONPATH="$ROOT:$PRISTINE:$ROOT/fampnn"
 export PROTENIX_ROOT_DIR="${PROTENIX_ROOT_DIR:-$DATA_ROOT/official_release_data}"
 export PROTENIX_DATA_ROOT_DIR="${PROTENIX_DATA_ROOT_DIR:-$DATA_ROOT/official_release_data/ccd_cache}"
 export PROTEOAA_ROOT="${PROTEOAA_ROOT:-/users/yfsun/proteo-aa-pxdesign-train}"

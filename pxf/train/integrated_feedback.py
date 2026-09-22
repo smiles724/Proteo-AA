@@ -100,6 +100,7 @@ def feedback_loss(
     denoise,
     *,
     sigma_data: float = DEFAULT_SIGMA_DATA,
+    require_grad: bool = True,
 ) -> FeedbackLoss:
     """One training step's forward. ``denoise`` must be DIFFERENTIABLE.
 
@@ -125,7 +126,11 @@ def feedback_loss(
         )
 
     bb1 = denoise(example.x_noisy, sigma, feedback=delta)
-    if not bb1.requires_grad:
+    # `require_grad=False` exists for ONE caller: the finite-difference
+    # estimator's numerical probes, which evaluate the loss under no_grad on
+    # purpose. Everywhere else a graph-less corrected backbone is the bug this
+    # guard catches, so the default stands.
+    if require_grad and not bb1.requires_grad:
         raise AssertionError(
             "the corrected backbone carries no gradient. Either the denoiser "
             "is wrapped in no_grad (use the differentiable driver, not the "

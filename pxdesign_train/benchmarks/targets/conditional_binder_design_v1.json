@@ -1,0 +1,179 @@
+{
+  "name": "ConditionalBinderDesignBenchmark",
+  "version": "v1",
+  "paper": {
+    "title": "A-CODE: Fully Atomic Protein Co-Design with Unified Multimodal Diffusion",
+    "arxiv": "2605.03360",
+    "section": "4.2 Conditional Binder Design Benchmark; Appendix C.2 Binder Design",
+    "quote_task": "We benchmark the conditional generation ability of A-CODE on a test set comprising 10 protein targets with diverse structural properties, as proposed in Zambaldi et al. In binder design, a target protein with known sequence and structure is fed in as the conditions for the generative model. Hotspot information of the binding site is often available as additional input. For a unified evaluation, we follow PXDesign to use the filter from AF2-IG. For each different target, we sample 328-728 binders with lengths ranging from 80 to 130, following the same protocol in PXDesign, and report the percentage of designable samples as Designability. We evaluate both the model-generated co-designed sequence and the PMPNN-redesigned single sequence as separate variants.",
+    "quote_filter": "Designability is the major metric used here, where we follow PXDesign to rely on the in silico filter from AF2-IG, where a designable binder is defined as: a) interface predicted absolute error (ipAE) less than 10.85 A, and b) interface predicted TM score (ipTM) greater than 0.5, and c) predicted local distance difference test (pLDDT) greater than 80%, and d) binder bound/unbound RMSD less than 3.5 A. AF2 is used to evaluate these metrics, in which residues in the binder chain are assigned a large offset to mimic multichain co-folding. Across different binder lengths for the same target, the success counts are summed to obtain the final result."
+  },
+  "target_definition_sources": [
+    {
+      "key": "alphaproteo_table_s1",
+      "citation": "Zambaldi et al., De novo design of high-affinity protein binders with AlphaProteo, arXiv:2409.08022, Table S1 'Binder design problem specifications for in silico benchmarking and experimental testing. Input target structures and hotspot residues for the design targets addressed here.'",
+      "note": "PRIMARY SOURCE for all ten targets. A-CODE says the test set is 'as proposed in Zambaldi et al.'; PXDesign says the same and that it 'adopted the cropping schemes and hotspot selections described in the respective original studies'. Table S1 gives PDB ID, target chain + residue numbers, hotspot residues and a per-target binder length range. Every entry below was re-verified against the local mmCIF mirror; see each target's `note`."
+    },
+    {
+      "key": "pxdesign_table3",
+      "citation": "PXDesign: Fast, Modular, and Accurate De Novo Design of Protein Binders (Protenix Team, ByteDance Seed), technical report v3 (2025-12-12), Table 3 'Targets and experimental results of PXDesign-d binders'.",
+      "note": "CORROBORATING SOURCE for the six targets it lists. It agrees with AlphaProteo Table S1 character-for-character on SC2RBD, IL7RA, PDL1, TrkA and VEGFA (PDB, crop and hotspots), and on TNFa's crop. It DISAGREES on TNFa's hotspots -- see that target's note. Where they disagree, AlphaProteo wins, because that is the source A-CODE cites."
+    }
+  ],
+  "filter": {
+    "name": "AF2-IG",
+    "equivalent_to": "the 'AF2-IG-easy' row of PXDesign technical report Table 2, whose thresholds are BindCraft's: ipAE < 10.85, ipTM > 0.5, pLDDT > 0.8, binder bound/unbound RMSD < 3.5 A",
+    "predictor": "AlphaFold2 initial-guess (AF2-IG)",
+    "criteria": {
+      "ipae_max": 10.85,
+      "iptm_min": 0.5,
+      "plddt_min": 0.8,
+      "binder_bound_unbound_rmsd_max": 3.5
+    },
+    "chain_break_offset": 200,
+    "chain_break_offset_note": "CHOSEN VALUE. The paper says only that binder-chain residues are 'assigned a large offset to mimic multichain co-folding' and gives no number; 200 is the AF2-multimer/AF2-IG convention. Override with --chain-break-offset if your AF2-IG wrapper uses a different one."
+  },
+  "sampling": {
+    "lengths": [80, 90, 100, 110, 120, 130],
+    "samples_per_length": 64,
+    "total_per_target": 384,
+    "note": "A-CODE states its own range explicitly -- 'lengths ranging from 80 to 130' -- and a per-target total of 328-728, with per-length success counts summed. It does not publish the per-length sample counts, so this ships a uniform 6-length x 64-sample = 384 grid, inside the paper's envelope. AlphaProteo's own per-target ranges are recorded per target as `alphaproteo_binder_length_range` for traceability; they are wider than A-CODE's window (40-140) and are deliberately NOT used to reshape the grid, since A-CODE overrides them with 80-130. Per-target `lengths` / `samples_per_length` overrides are honoured if you want to intersect them.",
+    "diffusion_steps": 1000,
+    "diffusion_steps_note": "A-CODE Section 4.1: 'we follow PXDesign to use 1000 Euler steps for diffusion sampling'. PXDesign's own report used 400 steps for binder generation and 1000 for monomers; A-CODE states 1000 uniformly, so 1000 is the default here."
+  },
+  "targets": [
+    {
+      "name": "BHRF1",
+      "full_name": "Epstein-Barr virus Bcl-2 homolog BHRF1",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "2WH6",
+      "numbering": "author",
+      "chains": {"A": [[2, 158]]},
+      "hotspots": [["A", 65], ["A", 74], ["A", 77], ["A", 82], ["A", 85], ["A", 93]],
+      "alphaproteo_binder_length_range": [80, 120],
+      "alphaproteo_natural_partner": "BH3 helix",
+      "note": "157 cropped residues. All six hotspots resolve (PHE65, THR74, GLU77, ASP82, SER85, ARG93) and sit 3.3-7.1 A from the BH3 helix (chain B) in the deposited complex."
+    },
+    {
+      "name": "H1",
+      "full_name": "Influenza A H1 hemagglutinin",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "5VLI",
+      "numbering": "author",
+      "chains": {
+        "A": [[1, 50], [76, 80], [107, 111], [258, 322]],
+        "B": [[501, 568], [580, 670]]
+      },
+      "hotspots": [["B", 521], ["B", 545], ["B", 552]],
+      "alphaproteo_binder_length_range": [40, 120],
+      "alphaproteo_natural_partner": "None",
+      "note": "NUMBERING OFFSET, the one place this manifest does not transcribe Table S1 literally. AlphaProteo writes the HA2 chain as 'B1-68, B80-170' with hotspots 'B21, B45, B52', i.e. canonical HA2 numbering 1-175; 5VLI deposits HA2 as author residues 501-670. Chain B is therefore stored here with +500 applied (ranges and hotspots alike) so it is author numbering like every other entry, while chain A (HA1) needs no shift. Confirmed: B521/B545/B552 resolve to TRP/ILE/VAL, each 3.5-3.8 A from a non-cropped chain -- the HA stem epitope. Without the shift all three hotspots are absent from the crop, which is how the offset was found. 280 cropped residues (chain A is observed from 5, so A1-50 intersects to A5-50)."
+    },
+    {
+      "name": "IL17A",
+      "full_name": "Interleukin-17A",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "4HSA",
+      "numbering": "author",
+      "chains": {"A": [[17, 131]], "B": [[19, 127]]},
+      "hotspots": [["A", 94], ["A", 116], ["B", 67]],
+      "alphaproteo_binder_length_range": [50, 140],
+      "alphaproteo_natural_partner": "IL-17 receptor alpha",
+      "note": "Both halves of the IL-17A dimer are the target (213 cropped residues). Hotspots resolve to GLN94/LEU116 on A and TRP67 on B, 2.8-3.7 A from IL-17RA in the deposited complex."
+    },
+    {
+      "name": "IL7RA",
+      "full_name": "Interleukin-7 receptor alpha",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "3DI3",
+      "numbering": "author",
+      "chains": {"B": [[17, 209]]},
+      "hotspots": [["B", 58], ["B", 80], ["B", 139]],
+      "alphaproteo_binder_length_range": [50, 120],
+      "alphaproteo_natural_partner": "IL-7",
+      "note": "Crop is chain B's full observed range. Hotspots resolve to VAL58/LEU80/TYR139, 3.5-3.8 A from IL-7. PXDesign Table 3 lists this target identically."
+    },
+    {
+      "name": "IR",
+      "full_name": "Insulin receptor L1 domain",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "4ZXB",
+      "numbering": "author",
+      "chains": {"E": [[6, 155]]},
+      "hotspots": [["E", 64], ["E", 88], ["E", 96]],
+      "alphaproteo_binder_length_range": [40, 120],
+      "alphaproteo_natural_partner": "Insulin receptor",
+      "note": "AlphaProteo labels this row 'Insulin' and A-CODE Table 4 calls it 'IR'; the specification is unambiguous either way. 4ZXB chain E is the 800-residue insulin-receptor ectodomain and E6-155 crops its L1 domain (150 residues). All three hotspots resolve to PHE -- PHE64/PHE88/PHE96, the documented L1 insulin-binding patch -- which is what pins the numbering. The interface distance check does not apply here: nothing else in the entry comes within 13 A of them, so no partner is bound at that site in this deposition (same situation as apo 1TNF)."
+    },
+    {
+      "name": "PDL1",
+      "full_name": "Programmed death-ligand 1",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "5O45",
+      "numbering": "author",
+      "chains": {"A": [[17, 132]]},
+      "hotspots": [["A", 56], ["A", 115], ["A", 123]],
+      "alphaproteo_binder_length_range": [50, 120],
+      "alphaproteo_natural_partner": "PD-1",
+      "note": "Hotspots are TYR56/MET115/TYR123, 2.2-2.9 A from the partner chain. Corroborated twice over: PXDesign Table 3 lists it identically, and PXDesign's shipped examples/PDL1_quick_start.yaml crops chain A to '1-116' with hotspots [40, 99, 107] in 1-based within-chain indexing -- 116 residues, and 17+40-1=56, 17+99-1=115, 17+107-1=123."
+    },
+    {
+      "name": "SC2RBD",
+      "full_name": "SARS-CoV-2 spike receptor-binding domain",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "6M0J",
+      "numbering": "author",
+      "chains": {"E": [[333, 526]]},
+      "hotspots": [["E", 485], ["E", 489], ["E", 494], ["E", 500], ["E", 505]],
+      "alphaproteo_binder_length_range": [80, 120],
+      "alphaproteo_natural_partner": "ACE2 receptor",
+      "note": "Crop is chain E's full observed range. Hotspots are GLY485/TYR489/SER494/THR500/TYR505 on the ACE2-binding ridge, 2.7-6.2 A from ACE2 (chain A). PXDesign Table 3 lists this target identically."
+    },
+    {
+      "name": "TNFa",
+      "full_name": "Tumor necrosis factor alpha",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "1TNF",
+      "numbering": "author",
+      "chains": {"A": [[12, 157]], "B": [[12, 157]], "C": [[12, 157]]},
+      "hotspots": [["A", 113], ["C", 73]],
+      "alphaproteo_binder_length_range": [50, 120],
+      "alphaproteo_natural_partner": "None",
+      "note": "SOURCES DISAGREE HERE. AlphaProteo Table S1 gives two hotspots, A113 and C73; PXDesign Table 3 gives five, A31, A32, A113, C73, C87. The crop (the whole homotrimer, 438 residues) is identical in both. This manifest follows AlphaProteo, because A-CODE defines its test set as the targets 'proposed in Zambaldi et al.' and PXDesign's Table 3 is its own wet-lab campaign rather than the in-silico benchmark spec. Both listed residues resolve (PRO113 on A, HIS73 on C). 1TNF is apo, so the interface distance check does not apply."
+    },
+    {
+      "name": "TrkA",
+      "full_name": "Tropomyosin receptor kinase A",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "1WWW",
+      "numbering": "author",
+      "chains": {"X": [[282, 382]]},
+      "hotspots": [["X", 294], ["X", 296], ["X", 333]],
+      "alphaproteo_binder_length_range": [50, 120],
+      "alphaproteo_natural_partner": "Nerve growth factor",
+      "note": "Crop is chain X's full observed range (the TrkA-d5 domain). Hotspots are VAL294/MET296/LEU333, 3.0-3.9 A from NGF. PXDesign Table 3 lists this target identically."
+    },
+    {
+      "name": "VEGFA",
+      "full_name": "Vascular endothelial growth factor A",
+      "status": "verified",
+      "source": "alphaproteo_table_s1",
+      "pdb_id": "1BJ1",
+      "numbering": "author",
+      "chains": {"V": [[14, 107]], "W": [[14, 107]]},
+      "hotspots": [["W", 81], ["W", 83], ["W", 91]],
+      "alphaproteo_binder_length_range": [50, 140],
+      "alphaproteo_natural_partner": "VEGFR1, VEGFR2",
+      "note": "Both halves of the VEGF-A homodimer are the target (188 cropped residues); hotspots sit on chain W only. MET81/ILE83/ILE91, 3.2-3.8 A from the Fab in the deposited complex. PXDesign Table 3 lists this target identically."
+    }
+  ]
+}

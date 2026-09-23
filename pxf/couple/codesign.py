@@ -153,8 +153,21 @@ def codesign_cycle(controller, topology, x_noisy, sigma, aatype, *, temperature=
     Mirrors :meth:`pxf.couple.controller.CoupledDenoiser.forward` up to the
     packing step, substituting the masked encode and the predicted sequence. The
     adapter residual is obtained through the controller's own ``_delta_h``, so
-    the coupled/uncoupled switch (``adapters.enable_bb_to_sc``) behaves exactly
-    as in the packing-task cycle and the two arms differ only in that residual.
+    the coupled/uncoupled switch is ``adapters.enable_bb_to_sc`` and the two
+    arms differ only in that residual.
+
+    NOT "exactly as in the packing-task cycle", which is what this said
+    before and which misled a caller: the packing path pins
+    ``enable_bb_to_sc`` True and switches arms through ``bs_policy``
+    instead. ``bs_policy`` is never consulted here, so a caller that pins
+    the flag gets the SAME residual in both arms and a delta of float
+    noise. The flag is the only switch on this path.
+
+    The sequence is also NOT affected by the residual: ``s_hat`` comes from
+    the masked encode's ``seq_logits``, computed before ``delta_h`` exists.
+    A_BS conditions the side-chain branch here, so sequence recovery is
+    identical across adapters by construction and cannot be used to compare
+    them.
 
     The SC->BB feedback branch is not run: phase 1 trains only ``A_BS``, and
     re-encoding a *predicted* sequence's side chains would confound the

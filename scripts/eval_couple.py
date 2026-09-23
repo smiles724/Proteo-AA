@@ -821,11 +821,21 @@ def main(argv=None):
 
             for arm in ev.ARMS:
                 enabled = arm == "coupled"
-                # `enable_bb_to_sc` is left on: the policy decides whether a
-                # residual exists, and `delta_h(...)` must stay callable for the
-                # zero-input and matched sources. Only SC->BB is still gated by
-                # the flag, and phase 1 never runs it.
-                adapters.enable_bb_to_sc = True
+                # `enable_bb_to_sc` is left on in the PACKING path: there
+                # bs_policy decides whether a residual exists, and
+                # `delta_h(...)` must stay callable for the zero-input and
+                # matched sources. Only SC->BB is still gated by the flag,
+                # and phase 1 never runs it.
+                #
+                # Co-design is different and pinning it True there was a bug.
+                # `codesign_cycle` takes its residual from
+                # `controller._delta_h`, which bs_policy never touches, and
+                # `_delta_h` returns None ONLY when this flag is False. With
+                # it pinned True both arms got the same residual, so the
+                # "uncoupled" arm was a second coupled arm: deltas came back
+                # at 1e-8, which reads as "the adapter does nothing" when it
+                # actually means "the two arms were identical".
+                adapters.enable_bb_to_sc = enabled if args.codesign else True
                 adapters.enable_sc_to_bb = enabled and args.run_feedback
                 # The packing sampler draws from the global RNG, so both arms are
                 # reseeded identically -- otherwise the delta measures the sampler.

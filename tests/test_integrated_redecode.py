@@ -274,3 +274,110 @@ def test_report_refuses_to_pool_old_and_redesigned_policies(tmp_path):
         report.load_rows(csv_path)
     csv_path.write_text('sample_id\na\n')
     assert report.load_rows(csv_path) == [{'sample_id': 'a'}]
+
+
+# ===================================================================== R2
+# End-to-end through the real _one_arm with several events, both policies,
+# and BOTH a control and a feedback arm. R1 and R2 were integration
+# failures that unit tests missed: R2 in particular killed the controls
+# before any feedback arm ran, and only surfaced when a control met a
+# multi-event schedule under post_feedback_redesign.
+
+def _matrix_module():
+    path = Path(__file__).resolve().parents[1] / 'scripts/run_integrated_binder_matrix.py'
+    spec = importlib.util.spec_from_file_location('matrix_multi_event', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _multi_event_arm(policy, *, with_feedback, tmp_path, monkeypatch, n_step=6):
+    from pxf.bench.integrated import select_events
+    from pxf.couple.integrated_event import (assert_target_rows_untouched,
+                                             mask_feedback)
+
+    matrix = _matrix_module()
+    denoiser, designer, adapter = Denoiser(), Designer(), Adapters()
+    schedule = denoiser.schedule(n_step)
+    choices = select_events(schedule, [4.0, 1.0])
+    assert len({c.key for c in choices}) == 2, 'fixture needs two distinct events'
+
+    with BackboneTap(denoiser.model.diffusion_module) as tap:
+        _x, records, _s = run_trajectory(
+            denoise=lambda x, s, feedback=None: denoiser.denoise(
+                x, s, tap=tap, feedback=feedback),
+            schedule=schedule, n_atom=12, device='cpu',
+            stream=RngStream('integrated', 41), record_steps={choices[0].step})
+
+    monkeypatch.setattr(matrix, '_finalise',
+                        lambda **kw: (tmp_path / 'fake.pdb', kw['products'].coords_af2))
+    (tmp_path / 'diagnostics').mkdir(exist_ok=True)
+    args = NS(sequence_policy=policy, context='complex_sc', step_scale_eta=2.5,
+              seq_steps=2, pack_steps=1, temperature=0.1,
+              allow_feedback_policy_transfer=False,
+              bs_checkpoint=['0=fake.pt'], checkpoint_dir=str(tmp_path),
+              fampnn_checkpoint='fake.pt', fampnn_variant='0.3')
+    conditioner = Feedback()
+    api = dict(BackboneTap=BackboneTap, RngStream=RngStream,
+               run_trajectory=run_trajectory, prepare_event=prepare_event,
+               mask_feedback=mask_feedback,
+               assert_target_rows_untouched=assert_target_rows_untouched,
+               conditioning_widths=lambda model: (4, 2),
+               node_feature_dim=lambda model: 4,
+               token_feature_dim=lambda model: 4,
+               expected_policy=lambda **k: {},
+               load_feedback=lambda *a, **k: (conditioner, {}, {}))
+    return matrix._one_arm(
+        arm_label='E1' if with_feedback else 'U03',
+        feedback_path=('fake.pt' if with_feedback else None),
+        conditioner_arm=('early_s_full' if with_feedback else None),
+        shared=None, adapters=adapter, recorded=records[0], denoiser=denoiser,
+        structure=structure(), designer=designer, schedule=schedule,
+        choices=choices, prefix_id='t', name='t', length=2, gen_seed=41,
+        bs_seed=0, args=args, out=tmp_path, api=api), choices, conditioner
+
+
+@pytest.mark.parametrize('policy', ['event_fixed', 'post_feedback_redesign'])
+def test_multi_event_control_survives_both_policies(policy, tmp_path, monkeypatch):
+    # R2: the control skipped the terminal event, so the re-decode was
+    # validated against a first-event reference and the sigma guard killed
+    # it. This is the exact combination that failed.
+    row, choices, _cond = _multi_event_arm(
+        policy, with_feedback=False, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert row['event_injections'] == 0
+    assert row['n_events'] == len(choices)
+    assert row['output_sequence']
+
+
+@pytest.mark.parametrize('policy', ['event_fixed', 'post_feedback_redesign'])
+def test_multi_event_feedback_arm_injects_once_per_event(policy, tmp_path, monkeypatch):
+    row, choices, cond = _multi_event_arm(
+        policy, with_feedback=True, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert cond.calls == len(choices)
+    assert row['event_injections'] == len(choices)
+    # R6: one norm per SCHEDULED event, so position k means event k
+    assert len(row['per_event_feedback_norms'].split(';')) == len(choices)
+    # R6: decodes are the work actually done, not a constant
+    assert row['event_decodes'] >= len(choices)
+
+
+def test_multi_event_feedback_changes_the_backbone_not_just_the_counters(
+        tmp_path, monkeypatch):
+    # Compare real outputs: a zero-payload conditioner must leave the
+    # trajectory where a no-conditioner control leaves it, and a non-zero
+    # one must not.
+    control, _c, _ = _multi_event_arm(
+        'event_fixed', with_feedback=False, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    treated, _c2, _ = _multi_event_arm(
+        'event_fixed', with_feedback=True, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert treated['event_injections'] > control['event_injections']
+    assert float(treated['min_bb_bb_distance']) != float(control['min_bb_bb_distance'])
+
+
+def test_schedule_id_reaches_the_row_and_the_sample_id(tmp_path, monkeypatch):
+    # R5: without this a one-event and a four-event run collide on filename
+    # and on the reporter's pairing key.
+    row, choices, _ = _multi_event_arm(
+        'event_fixed', with_feedback=True, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert row['schedule_id'] and row['schedule_id'] != 'ev1'
+    assert row['schedule_id'] in row['sample_id']

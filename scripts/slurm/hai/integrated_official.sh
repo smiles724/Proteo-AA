@@ -25,7 +25,13 @@
 # nodes at PriorityTier 10 with PreemptMode=REQUEUE -- a preempted cell is
 # requeued, and the matrix resumes per arm off a shared prefix.
 set -uo pipefail
-REPO="${PXF_REPO:-/hai/scratch/yfsun/proteo_aa_worktrees/bdm}"
+# The checkout to run. Defaults to wherever sbatch was invoked from, NOT to
+# a hardcoded worktree: this script is versioned, so a copy of it on one
+# branch pointing at another branch's checkout runs code from the wrong
+# branch. That is not hypothetical -- the hardcoded default sent twenty grid
+# jobs into a checkout without --resume or --sequence-policy, and argparse
+# rejected flags the branch they were launched from does support.
+REPO="${PXF_REPO:-${SLURM_SUBMIT_DIR:?set PXF_REPO, or submit from the checkout you want to run}}"
 BUNDLE="${BUNDLE:-/hai/scratch/yfsun/pxf_handoff/pxf_hai_bundle}"
 PRISTINE="${PXF_PRISTINE:-/hai/scratch/yfsun/pxdesign_official/PXDesign}"
 # FaMPNN comes from the main checkout's initialised submodule rather than from

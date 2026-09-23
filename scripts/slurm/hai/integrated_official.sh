@@ -69,6 +69,20 @@ done
 python -c "from pxf.official.require import official_protenix_available as a; print('official:', a())" || exit 1
 
 echo "=== 3a. one generation cell: PDL1, length 80, seed 101, seven outputs ==="
+# CMD/ARGS is the Marlowe script's contract, honoured here so a launcher
+# written against one works against the other. Unset, this falls back to the
+# single PDL1 cell it was written for -- which is why the fallback must stay
+# visible: a grid launcher that silently ran one cell twenty times into one
+# output directory would look like it worked.
+if [ -n "${CMD:-}" ] || [ -n "${ARGS:-}" ]; then
+  : "${CMD:?set both CMD and ARGS, or neither}"
+  : "${ARGS:?set both CMD and ARGS, or neither}"
+  echo "=== $CMD ==="
+  eval "python $CMD $ARGS"
+  echo "EXIT=$?"
+  exit 0
+fi
+
 python scripts/run_integrated_binder_matrix.py \
   --targets-config   "$BUNDLE/targets/configs_binder_benchmark/targets.yaml" \
   --prepared-dir     "$PREPARED" \

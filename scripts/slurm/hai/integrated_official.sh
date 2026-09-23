@@ -79,8 +79,25 @@ if [ -n "${CMD:-}" ] || [ -n "${ARGS:-}" ]; then
   : "${ARGS:?set both CMD and ARGS, or neither}"
   echo "=== $CMD ==="
   eval "python $CMD $ARGS"
-  echo "EXIT=$?"
-  exit 0
+  status=$?
+  echo "EXIT=$status"
+  # Propagate. An earlier version exited 0 here, so twenty jobs that had
+  # each run the wrong thing all reported COMPLETED.
+  exit $status
+fi
+
+# Neither set: the single PDL1 L80 cell this script was written for. It is
+# opt-in because it is the wrong thing to run by accident. A grid launcher
+# that fails to export CMD/ARGS -- `VAR=x out=$(sbatch ...)` does not, the
+# command substitution runs before the assignments take effect -- would
+# otherwise submit twenty jobs that each quietly run this cell into one
+# shared output directory and exit 0.
+if [ "${PXF_ALLOW_DEFAULT_CELL:-0}" != "1" ]; then
+  echo "refusing: neither CMD/ARGS nor PXF_ALLOW_DEFAULT_CELL=1 is set." >&2
+  echo "  to run the built-in PDL1 L80 cell: PXF_ALLOW_DEFAULT_CELL=1 sbatch $0" >&2
+  echo "  to run anything else: sbatch --export=ALL,CMD,ARGS (as a prefix to" >&2
+  echo "  sbatch itself, not to an assignment wrapping it)" >&2
+  exit 2
 fi
 
 python scripts/run_integrated_binder_matrix.py \

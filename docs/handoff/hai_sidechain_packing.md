@@ -80,12 +80,32 @@ MODE=native OUT=$OUT/native_reference_f03 \
 
 # the adapter comparison; each run also produces its own adapters-off arm
 for ARM in J03_seed0 J03_seed1 S03_seed0 S03_seed1; do
-  MODE=denoised CHECKPOINT=$CKPT/$ARM/checkpoints/step00000500.pt \
+  MODE=denoised \
+    CHECKPOINT=$BUNDLE/checkpoints/bs_seq_sc/${ARM}_step00000500.pt \
     OUT=$OUT/denoised_${ARM}_f03 \
     EXTRA_ARGS="--ema --fampnn-weights 0.3" \
     sbatch scripts/slurm/eval_couple.sh
 done
 ```
+
+The bundle stores these **flattened** -- `checkpoints/bs_seq_sc/<arm>_step00000500.pt`
+-- not in the training-run layout `<arm>/checkpoints/step00000500.pt`. An
+earlier version of this doc gave the training layout, which does not exist
+on the receiving side.
+
+Expected digests:
+
+| arm | sha256 (first 16) |
+|---|---|
+| J03_seed0 | `c506c7e1c43104dd` |
+| J03_seed1 | `ee673b982c4f5dd7` |
+| S03_seed0 | `4fb909aef1417ec4` |
+| S03_seed1 | `62db4e2d5aa92c0a` |
+
+All four are 5,955,797 bytes. If any is missing, re-pull
+`checkpoints/bs_seq_sc/` -- the bundle staged only J03 until 2026-09-22,
+because the staging script hardcoded two paths instead of looping over the
+arms.
 
 `--ema` because `configs/bs_seq_sc/selection.yaml` declares `weights: ema`.
 

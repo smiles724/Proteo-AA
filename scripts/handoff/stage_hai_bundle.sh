@@ -54,9 +54,18 @@ copy () {  # copy <src> <dst-relative>; fail loudly on a missing input
   cp -a "$src" "$dst"
 }
 
-echo "== A_BS (J03) checkpoints =="
-copy "$DATA/runs/bs_seq_sc/J03_seed0/checkpoints/step00000500.pt" checkpoints/bs_seq_sc/J03_seed0_step00000500.pt
-copy "$DATA/runs/bs_seq_sc/J03_seed1/checkpoints/step00000500.pt" checkpoints/bs_seq_sc/J03_seed1_step00000500.pt
+echo "== A_BS checkpoints: EVERY arm, both seeds =="
+# Staged by loop, not by two hardcoded J03 paths. The hardcoded version
+# shipped only J03 and silently omitted S03, which blocked the side-chain
+# packing benchmark on the receiving cluster -- and S03 is the arm that
+# benchmark exists to test, being the side-chain-only adapter. An arm that
+# is absent from the bundle is an arm nobody can run.
+for arm in "$DATA"/runs/bs_seq_sc/*/checkpoints/step00000500.pt; do
+  [ -f "$arm" ] || continue
+  name=$(basename "$(dirname "$(dirname "$arm")")")
+  copy "$arm" "checkpoints/bs_seq_sc/${name}_step00000500.pt"
+  echo "  $name $(sha256sum "$arm" | cut -c1-16)"
+done
 
 echo "== feedback checkpoints, at the steps the selection artifact names =="
 # Read the steps out of the artifact rather than hardcoding 2000: if selection

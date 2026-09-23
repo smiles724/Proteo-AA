@@ -111,6 +111,10 @@ def main() -> None:
                         help="save head outputs during final fixed-sequence packing; "
                              "these are not the sequence-redesign decisions")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--resume", action="store_true",
+                        help="continue a previous run of --out: skip cells "
+                             "recorded in completed_cells.txt and keep their "
+                             "rows. Rows from unfinished cells are dropped")
     args = parser.parse_args()
 
     sys.path.insert(0, str(REPO_ROOT))
@@ -165,7 +169,10 @@ def main() -> None:
 
     targets_cfg = yaml.safe_load(Path(args.targets_config).read_text())
     wanted = set(args.targets or [])
-    rows = []
+    if args.resume:
+        done_cells, rows = _load_resume(out)
+    else:
+        done_cells, rows = set(), []
 
     for target in targets_cfg["targets"]:
         name = target.get("name")
@@ -182,6 +189,11 @@ def main() -> None:
             # second one that could disagree about the conversion.
             prepared = _single_length_yaml(source, length, out)
             for gen_seed in args.seeds:
+                key = _cell_key(name, length, gen_seed)
+                if key in done_cells:
+                    print(f"  SKIP {key} (already finished)")
+                    continue
+                before = len(rows)
                 rows.extend(_one_cell(
                     name=name, length=length, gen_seed=gen_seed,
                     prepared=prepared, args=args, out=out,
@@ -203,9 +215,16 @@ def main() -> None:
                     token_feature_dim=token_feature_dim,
                     node_feature_dim=node_feature_dim,
                 ))
+                # Flush after EVERY cell. Writing once at the end meant a
+                # job that hit its time limit lost the whole shard, which
+                # at 480 cells is not survivable.
+                if len(rows) > before:
+                    _flush_cell(out, rows, key)
+                    done_cells.add(key)
 
     with (out / "designs.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(ROW_COLUMNS))
+        writer = csv.DictWriter(handle, fieldnames=list(ROW_COLUMNS),
+                                extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
     (out / "provenance.json").write_text(json.dumps({
@@ -235,6 +254,66 @@ def main() -> None:
                              "queried at a different sigma there",
     }, indent=2, default=str))
     print(f"\nwrote {out / 'designs.csv'} ({len(rows)} row(s))")
+
+
+#: Cells finished by an earlier invocation, one key per line. Written AFTER
+#: the cell's rows are flushed, so a crash between the two leaves the rows
+#: unmarked and they are dropped on resume rather than duplicated.
+DONE_FILE = "completed_cells.txt"
+
+
+def _cell_key(name, length, gen_seed):
+    return f"{name}_L{length}_s{gen_seed}"
+
+
+def _load_resume(out):
+    """(finished cell keys, their rows) from a previous run of this directory.
+
+    Rows whose cell is not marked finished are DISCARDED. A job killed
+    mid-cell leaves a partial set -- fewer arms than the cell should have,
+    or arms computed against a prefix the rerun will not reproduce -- and
+    keeping them would put a silently incomplete cell in the table.
+    """
+    import csv as _csv
+
+    done_path = out / DONE_FILE
+    if not done_path.is_file():
+        return set(), []
+    done = {line.strip() for line in done_path.read_text().splitlines()
+            if line.strip()}
+    rows, dropped = [], 0
+    designs = out / "designs.csv"
+    if designs.is_file():
+        with designs.open(newline="") as handle:
+            for row in _csv.DictReader(handle):
+                key = _cell_key(row["target"], row["binder_length"],
+                                row["generation_seed"])
+                if key in done:
+                    rows.append(row)
+                else:
+                    dropped += 1
+    print(f"resume: {len(done)} finished cell(s), {len(rows)} row(s) kept"
+          + (f", {dropped} row(s) from unfinished cells dropped" if dropped else ""))
+    return done, rows
+
+
+def _flush_cell(out, all_rows, key):
+    """Rewrite designs.csv, fsync, then mark the cell done."""
+    import csv as _csv
+    import os as _os
+
+    path = out / "designs.csv"
+    with path.open("w", newline="") as handle:
+        writer = _csv.DictWriter(handle, fieldnames=list(ROW_COLUMNS),
+                                 extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(all_rows)
+        handle.flush()
+        _os.fsync(handle.fileno())
+    with (out / DONE_FILE).open("a") as handle:
+        handle.write(key + "\n")
+        handle.flush()
+        _os.fsync(handle.fileno())
 
 
 def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,

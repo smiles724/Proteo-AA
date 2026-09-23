@@ -623,7 +623,13 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             initial, products, policy=policy,
             seed=_decode_seed(gen_seed, last_key, "redecode", choices[0].key),
             terminal=state["products_by_key"].get(last_key),
-            decode_passes=state["decodes"] + int(
+            # Decodes that CONTRIBUTED to this arm's output, shared or own,
+            # plus the terminal re-decode. Counting only self-executed
+            # decodes read 1 for a feedback arm and 2 for its control --
+            # backwards, since the feedback arm reuses the shared first
+            # decode and then does more work, not less. Execution cost is
+            # reported separately as `event_decodes`.
+            decode_passes=len(state["products_by_key"]) + int(
                 policy == "post_feedback_redesign"),
         ),
         "design_pdb": str(pdb), "binder_chain": geometry["binder_chain"],

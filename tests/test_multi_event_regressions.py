@@ -155,3 +155,22 @@ def _products(bb0):
     return NS(bb0=bb0, aatype=torch.zeros(1, 4, dtype=torch.long),
               binder_mask=torch.ones(1, 4, dtype=torch.bool),
               binder_sequence="AAAA", sigma=0.5, provenance={})
+
+
+# ------------------------------------------------------------------ R6b
+# sequence_decode_passes counted only SELF-EXECUTED decodes, so a feedback
+# arm reusing the shared first decode reported 1 while its control reported
+# 2 -- backwards, since the feedback arm does strictly more work. Observed
+# on job 499381.
+
+def test_decode_passes_count_contributing_decodes_not_self_executed():
+    from pxf.bench.integrated_redecode import sequence_diagnostics
+
+    p = _products(torch.zeros(4, 3))
+    # an arm that reused one shared event decode and then re-decoded
+    reused = sequence_diagnostics(p, p, policy="post_feedback_redesign",
+                                  seed=1, decode_passes=1 + 1)
+    # a control that executed its own event decode and then re-decoded
+    own = sequence_diagnostics(p, p, policy="post_feedback_redesign",
+                               seed=1, decode_passes=1 + 1)
+    assert reused["sequence_decode_passes"] == own["sequence_decode_passes"] == 2

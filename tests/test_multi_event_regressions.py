@@ -174,3 +174,27 @@ def test_decode_passes_count_contributing_decodes_not_self_executed():
     own = sequence_diagnostics(p, p, policy="post_feedback_redesign",
                                seed=1, decode_passes=1 + 1)
     assert reused["sequence_decode_passes"] == own["sequence_decode_passes"] == 2
+
+
+# ------------------------------------------------------------------ R6c
+# A control that DECODED an event returned before recording it, so its
+# norms read "-" at every position -- indistinguishable from an event it
+# never visited. Observed on job 499467: U03 decoded events 0 and 3 and
+# reported "-;-;-;-".
+
+def test_a_control_records_the_events_it_actually_decoded(tmp_path, monkeypatch):
+    import importlib.util as _u
+    _spec = _u.spec_from_file_location(
+        'redecode_harness', Path(__file__).with_name('test_integrated_redecode.py'))
+    harness = _u.module_from_spec(_spec)
+    _spec.loader.exec_module(harness)
+
+    row, choices, _ = harness._multi_event_arm(
+        "post_feedback_redesign", with_feedback=False,
+        tmp_path=tmp_path, monkeypatch=monkeypatch)
+    norms = row["per_event_feedback_norms"].split(";")
+    assert len(norms) == len(choices)
+    # the first and terminal events ARE decoded by a control
+    assert norms[0] != "-", "control decoded the shared first event"
+    assert norms[-1] != "-", "control decoded the terminal event"
+    assert row["event_injections"] == 0

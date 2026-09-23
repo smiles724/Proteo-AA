@@ -520,6 +520,18 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                     state["products"] = products
             state["tap_before_correction"] = tap.calls
             if conditioner is None:
+                # A control that DECODED this event is not the same as one
+                # that skipped it, and "-" for both loses that. Observed on
+                # job 499467: U03 and J03 decoded events 0 and 3 and still
+                # reported "-;-;-;-", which reads as four unvisited events.
+                state["per_event"].append({
+                    "key": list(key), "actual_sigma": products.sigma,
+                    "feedback_norm": 0.0, "injected": False,
+                })
+                state["visited"].append({
+                    "key": list(key), "actual_sigma": products.sigma,
+                    "status": "decoded_no_conditioner", "feedback_norm": 0.0,
+                })
                 return None
             raw, _stats = conditioner(
                 products.packed,

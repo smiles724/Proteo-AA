@@ -32,7 +32,7 @@
 #   mkdir     the second /hai/scratch path is gone.
 #   python    no conda; the env is a relocated conda prefix with no
 #             bin/activate, activated by PATH (see PXF_PYTHON_ENV).
-#   DONOR / PROTENIX_*_DIR defaults repointed off /hai.
+#   DONOR / PROTENIX_*_DIR / PROTEOAA_*_ROOT defaults repointed off /hai.
 #   STRUCTURES defaults to the REMAPPED val manifest; the original
 #             configs/val_structures_afdb.txt lists /hai paths and
 #             resolve_structures aborts on the first missing one.
@@ -143,6 +143,12 @@ export PATH="$PXF_PYTHON_ENV/bin:$PATH"
 
 export PYTHONPATH="$ROOT:$ROOT/PXDesign:$ROOT/Protenix:$ROOT/fampnn${PYTHONPATH:+:$PYTHONPATH}"
 # Protenix finds its CCD cache here rather than downloading it.
+# pxf/eval/canonical.py's default_root() still points at a /hai path that
+# does not exist here, and the failure is a 13-second ValueError AFTER the
+# GPU is allocated -- so every job in a submitted batch dies the same way.
+# Repointed alongside DONOR and PROTENIX_*_DIR for the same reason.
+export PROTEOAA_METRICS_ROOT="${PROTEOAA_METRICS_ROOT:-/users/yfsun/proteo-aa-pxdesign-train}"
+export PROTEOAA_ROOT="${PROTEOAA_ROOT:-/users/yfsun/proteo-aa-pxdesign-train}"
 export PROTENIX_ROOT_DIR="${PROTENIX_ROOT_DIR:-/scratch/m000137-pm06/Proteo-AA/pxf/protenix_data}"
 export PROTENIX_DATA_ROOT_DIR="${PROTENIX_DATA_ROOT_DIR:-/scratch/m000137-pm06/Proteo-AA/pxf/protenix_data/common}"
 export LAYERNORM_TYPE=torch OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 TQDM_DISABLE=1

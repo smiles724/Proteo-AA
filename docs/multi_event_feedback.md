@@ -32,6 +32,15 @@ preserving that policy's meaning at any event count.
 
 ## Matched controls
 
+**A control still decodes the terminal event.** It skips *intermediate*
+events -- nothing to feed, and every decode is RNG-protected so the
+trajectory is unaffected -- but under `post_feedback_redesign` the terminal
+re-decode is validated against that event's own products. Skipping the last
+decode left U03 and J03 re-decoding at the terminal sigma against a
+first-event reference, which the sigma guard in `redecode_after_feedback`
+correctly rejected: the controls died before any feedback arm ran.
+
+
 Events after the first cost a decode each, so a control arm -- one with no
 conditioner -- skips them. It cannot use them: there is nothing to feed, the
 decode would be discarded, and the trajectory is identical either way
@@ -42,10 +51,18 @@ The first event's products stay **shared** across the arms in a J03 seed
 group; later events are decoded inside each arm. By then the arms have
 diverged, and a shared decode would be a decode of another arm's backbone.
 
-Decode seeds come from the event's **position in the schedule**, not a
-running counter: `gen_seed + 1000003 * (index + 1)`. A counter would give
-one event different seeds depending on which arm reached it first, and the
-arms are supposed to differ only in their residual.
+Decode seeds come from the **absolute solver step** and the decode's role,
+never from the event's index in the selected list. An index makes a step's
+seed depend on how many *other* events were requested, so the same step
+would draw differently in a one-event and a four-event schedule, turning a
+schedule ablation into a seed ablation as well. The first event's
+provisional decode keeps `gen_seed` exactly, which is what the single-event
+path used before multi-event existed.
+
+Cross-schedule runs are still **not** paired at a shared step, and cannot
+be: by the time a four-event run reaches the last event it has taken three
+corrections, so it is not decoding the state a one-event run decodes there.
+Equal seeds would imply a pairing that does not exist.
 
 ## Two refusals
 
@@ -72,8 +89,29 @@ to use.
 
 ## What is recorded
 
-`designs.csv` gains `n_events`, `event_steps`, `event_actual_sigmas` and
-`per_event_feedback_norms` -- the residual norm at each event in trajectory
-order. That last one is the first thing to look at: whether the correction
+`designs.csv` gains `schedule_id`, `n_events`, `event_steps`,
+`event_actual_sigmas` and `per_event_feedback_norms` -- one entry per
+**scheduled** event, in schedule order, so position *k* is event *k* in
+`event_steps`. Events an arm never decoded read `-`; a zero residual reads
+`0.000000`. Recording only non-zero payloads made the two lists different
+lengths and left the scalar `feedback_norm` showing the previous event's
+value when the last was zero.
+
+`events_scheduled`, `event_decodes` and `event_injections` are counted
+separately, because they differ: a four-event feedback arm with terminal
+redesign schedules 4, decodes 5 and injects 4.
+
+`schedule_id` is part of the sample id and of the reporter's pairing key.
+Without it a one-event and a four-event run write the same filenames, and
+the reporter's `(prefix, arm, bs_seed)` pairing keeps whichever row it read
+last. The reporter now refuses a CSV mixing schedules, as it already
+refused one mixing sequence policies.
+
+**`immediate_event_coordinate_rmsd` is provisional-vs-corrected at the SAME
+event**, so one noisy state and one augmented frame. First-event-to-final
+displacement is a different quantity and is reported separately as
+`first_to_final_coordinate_displacement`; taking it as the "immediate"
+correction folded in the whole intervening trajectory and its random
+rotations, which cannot show whether a corrective call moved the backbone. That last one is the first thing to look at: whether the correction
 grows, shrinks or stays flat across events says more about whether repeated
 feedback can accumulate than the final designability number does.

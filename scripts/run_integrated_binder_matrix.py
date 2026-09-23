@@ -54,7 +54,9 @@ ROW_COLUMNS = (
     "requested_sigma", "actual_sigma", "event_step",
     "solver_calls", "conditioning_injections", "decode_hook_calls",
     "delta_h_norm", "feedback_norm",
+    "first_to_final_coordinate_displacement", "immediate_event_key",
     "n_events", "event_steps", "event_actual_sigmas", "per_event_feedback_norms",
+    "events_scheduled", "event_decodes", "event_injections", "schedule_id",
     "event_to_final_aligned_rmsd", "min_bb_bb_distance", "interface_clashes",
     "min_bb_only_distance", "interface_clashes_bb_only",
     "seconds",
@@ -189,7 +191,8 @@ def main() -> None:
                     OfficialDenoiser=OfficialDenoiser,
                     OfficialStructure=OfficialStructure,
                     FaMPNNFullAtomDesigner=FaMPNNFullAtomDesigner,
-                    select_event=select_event, prepare_event=prepare_event,
+                    select_event=select_event,
+                    select_events=select_events, prepare_event=prepare_event,
                     mask_feedback=mask_feedback,
                     assert_target_rows_untouched=assert_target_rows_untouched,
                     BackboneTap=BackboneTap, RngStream=RngStream,
@@ -217,7 +220,11 @@ def main() -> None:
         "bs_checkpoints": {str(k): file_sha256(v)
                            for k, v in bs_by_seed.items()},
         "feedback_selection": feedback_selection,
+        # The full schedule, requested and resolved. Recording only
+        # args.event_sigma left provenance reading 0.429 for a run that
+        # --event-sigmas had put somewhere else entirely.
         "event_sigma_requested": args.event_sigma,
+        "event_sigmas_requested": list(args.event_sigmas),
         "sequence_policy": args.sequence_policy,
         "n_step": args.n_step, "step_scale_eta": args.step_scale_eta,
         "decoder": {"seq_steps": args.seq_steps, "pack_steps": args.pack_steps,
@@ -353,18 +360,62 @@ def _one_cell(*, name, length, gen_seed, prepared, args, out, bs_by_seed,
     return rows
 
 
-def _event_seed(gen_seed, key, choices):
-    """A distinct, reproducible decode seed per event.
+#: Role offsets for :func:`_decode_seed`. Distinct so the first provisional
+#: decode and the terminal re-decode of one event cannot collide -- they are
+#: two different decodes of the same geometry and must not share a draw.
+_DECODE_ROLES = {"provisional": 1, "redecode": 2}
 
-    Derived from the event's POSITION in the schedule, not from a running
-    counter: a counter would give the same event a different seed depending
-    on which arm reached it first, and the arms are supposed to differ only
-    in their residual.
+
+def _schedule_id(choices):
+    """A short, stable identity for an event schedule.
+
+    Derived from the solver STEPS, not the requested sigmas: two requests
+    that resolve to the same steps are the same experiment, and two that
+    resolve differently are not, whatever they were asked for.
+    """
+    import hashlib
+
+    steps = "-".join(f"{c.step}.{c.substage}" for c in choices)
+    if len(choices) == 1:
+        return f"ev1s{choices[0].step}"
+    digest = hashlib.sha256(steps.encode()).hexdigest()[:6]
+    return f"ev{len(choices)}_{digest}"
+
+
+def _norm_at(state, key):
+    """This arm's residual norm at one scheduled event, or "-" if unvisited."""
+    for record in state["per_event"]:
+        if tuple(record["key"]) == tuple(key):
+            return f"{record['feedback_norm']:.6f}"
+    return "-"
+
+
+def _decode_seed(gen_seed, key, role, first_key):
+    """Decode seed from the generation seed, the ABSOLUTE solver key and the role.
+
+    Keyed on the solver step, never on the event's index in the selected
+    list. An index makes an event's seed depend on how many *other* events
+    were requested, so the same step would draw differently in a one-event
+    and a four-event schedule -- turning a schedule ablation into a seed
+    ablation as well.
+
+    The first event's provisional decode keeps ``gen_seed`` exactly, which is
+    what the single-event path used before multi-event existed. That is the
+    only case where the old and new policies agree, and it is preserved
+    deliberately so existing single-event cells stay reproducible.
+
+    Cross-schedule runs are still NOT paired at a shared step, and cannot be:
+    by the time a four-event run reaches the last event it has taken three
+    corrections, so the state being decoded is not the state a one-event run
+    decodes there. Equal seeds would imply a pairing that does not exist.
     """
     from pxf.bench.integrated_redecode import REDECODE_SEED_OFFSET
 
-    index = [c.key for c in choices].index(tuple(key))
-    return int(gen_seed) + REDECODE_SEED_OFFSET * (index + 1)
+    step, substage = int(key[0]), int(key[1])
+    if role == "provisional" and (step, substage) == tuple(first_key):
+        return int(gen_seed)
+    offset = _DECODE_ROLES[role]
+    return int(gen_seed) + REDECODE_SEED_OFFSET * offset + 7919 * step
 
 
 def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
@@ -379,8 +430,8 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
     )
 
     started = time.time()
+    schedule_id = _schedule_id(choices)
     policy = check_sequence_policy(args.sequence_policy)
-    redecode_seed = int(gen_seed) + REDECODE_SEED_OFFSET
     conditioner = None
     if feedback_path:
         c_s, c_z = api["conditioning_widths"](denoiser.model)
@@ -420,7 +471,7 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
     state = {
         "products": shared, "output_products": None, "feedback_norm": 0.0,
         "products_by_key": ({} if shared is None else {choices[0].key: shared}),
-        "per_event": [],
+        "per_event": [], "visited": [], "decodes": 0,
     }
     last_key = choices[-1].key
 
@@ -430,10 +481,21 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             key = sampler_state.key
             products = state["products_by_key"].get(key)
             if products is None:
-                # Events after the first cost a decode each, so only pay for
-                # them on an arm that has a conditioner to feed. A control
-                # would decode and discard: same trajectory, wasted minutes.
-                if conditioner is None and key != choices[0].key:
+                # Intermediate events cost a decode each and a control has
+                # nothing to feed, so skip those. The FIRST event is the
+                # shared-prefix product and the LAST is the reference the
+                # terminal re-decode is validated against -- skipping the
+                # last left controls re-decoding at the terminal sigma
+                # against a first-event reference, which the sigma guard in
+                # redecode_after_feedback correctly rejected, taking out U03
+                # and J03 before any feedback arm ran.
+                terminal_needed = (
+                    policy == "post_feedback_redesign" and key == last_key
+                )
+                if (conditioner is None and key != choices[0].key
+                        and not terminal_needed):
+                    state["visited"].append(
+                        {"key": list(key), "status": "skipped_no_conditioner"})
                     state["tap_before_correction"] = tap.calls
                     return None
                 products = api["prepare_event"](
@@ -444,7 +506,8 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                     sigma=float(sampler_state.sigma.reshape(-1)[0]),
                     structure=structure, designer=designer,
                     adapters=adapters, context=args.context,
-                    seed=_event_seed(gen_seed, key, choices),
+                    seed=_decode_seed(
+                        gen_seed, key, 'provisional', choices[0].key),
                     design_id=prefix_id, target=name, tap=tap,
                     # REQUIRED: the bb_only arm shares this event and reads
                     # h_base. Without it the control cannot run, and the
@@ -452,6 +515,7 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                     want_h_base=True,
                 )
                 state["products_by_key"][key] = products
+                state["decodes"] += 1
                 if state["products"] is None:
                     state["products"] = products
             state["tap_before_correction"] = tap.calls
@@ -464,6 +528,13 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
             delta = api["mask_feedback"](
                 raw, products.binder_mask, zero_bypass=True
             )
+            # Record EVERY visited event, including a zero or absent
+            # residual. Appending only non-zero payloads made the
+            # semicolon-separated norms shorter than event_steps, so position
+            # k in one list stopped meaning event k in the other, and a
+            # trailing zero left the scalar showing the PREVIOUS event's
+            # value.
+            norm = 0.0
             if delta is not None:
                 api["assert_target_rows_untouched"](delta, products.binder_mask)
                 norm = float(
@@ -471,14 +542,17 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                     if getattr(delta, "delta_single", None) is not None
                     else 0.0
                 )
-                # Per event, not one scalar overwritten N times: with several
-                # injections the interesting quantity is whether the residual
-                # grows, shrinks or stays flat along the trajectory.
-                state["per_event"].append({
-                    "key": list(key), "actual_sigma": products.sigma,
-                    "feedback_norm": norm,
-                })
                 state["feedback_norm"] = norm
+            state["per_event"].append({
+                "key": list(key), "actual_sigma": products.sigma,
+                "feedback_norm": norm,
+                "injected": delta is not None,
+            })
+            state["visited"].append({
+                "key": list(key), "actual_sigma": products.sigma,
+                "status": "injected" if delta is not None else "decoded_no_residual",
+                "feedback_norm": norm,
+            })
             return delta
 
         def after_event(sampler_state, corrected_bb):
@@ -496,7 +570,9 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
                 corrected_bb=corrected_bb,
                 corrected_a_token=tap.a_token, sigma=sampler_state.sigma,
                 structure=structure, designer=designer, adapters=adapters,
-                seed=redecode_seed, context=args.context,
+                seed=_decode_seed(
+                    gen_seed, sampler_state.key, "redecode", choices[0].key),
+                context=args.context,
                 design_id=prefix_id, target=name,
             )
 
@@ -525,6 +601,12 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
     )
     if policy != "event_fixed":
         sample_id += f"__{policy}"
+    # The schedule is part of the design's identity. Without it a one-event
+    # and a four-event run write the same PDB and diagnostics filenames, and
+    # the reporter's (prefix, arm, bs_seed) pairing silently keeps whichever
+    # row it read last.
+    if len(choices) > 1:
+        sample_id += f"__{schedule_id}"
     # R7.5: repack the event's sequence on THIS arm's final backbone and write
     # the PDB. Returning design_pdb="" meant the matrix could not feed AF2-IG
     # at all, which is the whole point of generating.
@@ -537,7 +619,13 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
     row = {
         "sample_id": sample_id, "target": name, "binder_length": length,
         "sequence": products.binder_sequence,
-        **sequence_diagnostics(initial, products, policy=policy, seed=redecode_seed),
+        **sequence_diagnostics(
+            initial, products, policy=policy,
+            seed=_decode_seed(gen_seed, last_key, "redecode", choices[0].key),
+            terminal=state["products_by_key"].get(last_key),
+            decode_passes=state["decodes"] + int(
+                policy == "post_feedback_redesign"),
+        ),
         "design_pdb": str(pdb), "binder_chain": geometry["binder_chain"],
         "target_chains": ",".join(geometry["target_chains"]),
         "arm": arm_label, "feedback_arm": (arm_label if conditioner else ""),
@@ -546,10 +634,19 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
         "requested_sigma": choices[0].requested_sigma,
         "actual_sigma": choices[0].actual_sigma, "event_step": choices[0].step,
         "n_events": len(choices),
+        "schedule_id": schedule_id,
         "event_steps": ";".join(str(c.step) for c in choices),
         "event_actual_sigmas": ";".join(f"{c.actual_sigma:.6f}" for c in choices),
+        # One field per SCHEDULED event, in schedule order, so position k
+        # here is event k in `event_steps`. Events this arm never decoded
+        # read "-" rather than silently shortening the list.
         "per_event_feedback_norms": ";".join(
-            f"{e['feedback_norm']:.6f}" for e in state["per_event"]
+            _norm_at(state, c.key) for c in choices
+        ),
+        "events_scheduled": len(choices),
+        "event_decodes": state["decodes"],
+        "event_injections": sum(
+            1 for e in state["per_event"] if e["injected"]
         ),
         "solver_calls": int(stats["calls"]),
         "conditioning_injections": int(conditioning_injections),
@@ -576,13 +673,29 @@ def _one_arm(*, arm_label, feedback_path, conditioner_arm, shared, adapters,
         {k: v for k, v in row.items() if k != "_shared"}, indent=2,
     ))
     if policy == "post_feedback_redesign":
+        # bb0/bb1 are the provisional and corrected estimates of the SAME
+        # (terminal) event, so they share a noisy state and an augmented
+        # frame. Saving the first event's bb0 beside the last event's bb1
+        # made the pair span the trajectory, and any difference read off it
+        # was mostly augmentation.
+        terminal = state["products_by_key"].get(last_key) or initial
         torch.save({
             "event_aatype": initial.aatype.detach().cpu(),
+            "terminal_event_aatype": terminal.aatype.detach().cpu(),
             "output_aatype": products.aatype.detach().cpu(),
             "binder_mask": products.binder_mask.detach().cpu(),
-            "bb0": initial.bb0.detach().cpu(),
+            "bb0": terminal.bb0.detach().cpu(),
             "bb1": products.bb0.detach().cpu(),
-            "sigma": products.sigma, "redecode_seed": redecode_seed,
+            "first_event_bb0": initial.bb0.detach().cpu(),
+            "bb0_bb1_event_key": list(last_key),
+            "sigma": products.sigma,
+            "terminal_sigma": terminal.sigma,
+            "schedule": [list(c.key) for c in choices],
+            "schedule_id": schedule_id,
+            "redecode_seed": _decode_seed(
+                gen_seed, last_key, "redecode", choices[0].key),
+            "per_event": state["per_event"],
+            "visited": state["visited"],
         }, out / "diagnostics" / f"{sample_id}.redecode.pt")
     return row
 

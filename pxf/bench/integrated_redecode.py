@@ -50,9 +50,18 @@ def redecode_after_feedback(
     return products
 
 
-def sequence_diagnostics(initial, output, *, policy, seed=None):
-    """Scalar diagnostics; unchanged sequences are valid, not a failed decode."""
+def sequence_diagnostics(initial, output, *, policy, seed=None,
+                         terminal=None, decode_passes=None):
+    """Scalar diagnostics; unchanged sequences are valid, not a failed decode.
+
+    ``initial`` is the FIRST event, ``output`` the sequence actually written.
+    ``terminal`` is the last event's provisional products when they differ
+    from ``initial`` -- with several events those are different noisy states
+    at different sigmas, and the immediate-correction geometry has to come
+    from the terminal pair or it is not a correction measurement at all.
+    """
     check_sequence_policy(policy)
+    reference = terminal if terminal is not None else initial
     binder = initial.binder_mask.bool()
     changed = int(((initial.aatype != output.aatype) & binder).sum())
     count = int(binder.sum())
@@ -62,14 +71,35 @@ def sequence_diagnostics(initial, output, *, policy, seed=None):
         "event_sequence": initial.binder_sequence,
         "output_sequence": output.binder_sequence,
         "redecode_calls": int(redesign),
-        "sequence_decode_passes": 1 + int(redesign),
+        # Decodes this arm actually RAN. The old 1-or-2 was the shared
+        # first-decode provenance, which under-reports a four-event feedback
+        # arm by three.
+        "sequence_decode_passes": (
+            int(decode_passes) if decode_passes is not None else 1 + int(redesign)
+        ),
         "redecode_seed": int(seed) if redesign else None,
         "sequence_changed_positions": changed,
         "sequence_changed_fraction": changed / count if count else 0.0,
         "redecode_hook_calls": output.provenance.get("decode_hook_calls") if redesign else 0,
         "redecode_abs_source": "corrected_a_token" if redesign else None,
         "final_pack_residual_source": "corrected_event" if redesign else "provisional_event",
+        # Provisional vs corrected AT THE SAME EVENT, so the same noisy
+        # state and the same augmented frame. Taking this between the first
+        # event and the last instead folds in the whole intervening
+        # trajectory plus its random rotations and translations, which
+        # cannot tell you whether any corrective call moved the backbone --
+        # the question the experiment exists to answer.
         "immediate_event_coordinate_rmsd": float(
+            ((reference.bb0 - output.bb0).square().sum(-1).mean()).sqrt()
+        ) if redesign else None,
+        "immediate_event_key": (
+            list(reference.provenance.get("event_key", ()))
+            if redesign else None
+        ),
+        # First event to final output. A DIFFERENT quantity, named
+        # differently: frames differ, so it is a displacement, not a
+        # correction.
+        "first_to_final_coordinate_displacement": float(
             ((initial.bb0 - output.bb0).square().sum(-1).mean()).sqrt()
         ) if redesign else None,
     }

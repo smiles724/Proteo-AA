@@ -53,6 +53,16 @@ def load_rows(path):
         raise ValueError(
             f"mixed sequence policies {sorted(policies)}; report each policy separately"
         )
+    # Same refusal for the event schedule. A one-event and a four-event run
+    # are different protocols, not two samples of one, and the pairing below
+    # keys on (prefix, arm, bs_seed) -- which would keep whichever schedule's
+    # row happened to be read last.
+    schedules = {r.get("schedule_id") or "ev1" for r in rows}
+    if len(schedules) > 1:
+        raise ValueError(
+            f"mixed event schedules {sorted(schedules)}; these are different "
+            "protocols and pairing would silently drop one. Report separately."
+        )
     return rows
 
 
@@ -142,9 +152,15 @@ def main() -> None:
     # baseline during pairing.
     by_prefix = defaultdict(dict)
     for row in rows:
-        by_prefix[row["shared_prefix_id"]][
-            (row["arm"], row.get("bs_seed") or "")
-        ] = row
+        key = (row["arm"], row.get("bs_seed") or "",
+               row.get("schedule_id") or "ev1")
+        bucket = by_prefix[row["shared_prefix_id"]]
+        if key in bucket:
+            raise ValueError(
+                f"two rows share {key} under prefix {row['shared_prefix_id']}; "
+                "pairing would keep only one"
+            )
+        bucket[key] = row
     comparisons = []
     keys = sorted({k for d in by_prefix.values() for k in d})
     for i, a in enumerate(keys):
@@ -173,6 +189,9 @@ def main() -> None:
     report = {
         "n_designs": len(rows), "arms": arms,
         "sequence_policy": (rows[0].get("sequence_policy") or "event_fixed") if rows else None,
+        "schedule_id": (rows[0].get("schedule_id") or "ev1") if rows else None,
+        "event_steps": rows[0].get("event_steps") if rows else None,
+        "event_actual_sigmas": rows[0].get("event_actual_sigmas") if rows else None,
         "plumbing": plumbing, "chemistry": chemistry,
         "comparisons": comparisons,
         "designability": None,

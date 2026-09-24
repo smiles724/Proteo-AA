@@ -111,6 +111,33 @@ if bad:
 print(f"  {len(list(Path(sys.argv[1]).glob('*.yaml')))} prepared YAML(s) resolved")
 CHECK
 
+# ------------------------------------------- 3c. training manifests
+# Same @BUNDLE@ substitution as the target YAMLs. Rendered into a sibling
+# directory so a re-pull does not have to fight rsync over a file it
+# already rewrote.
+TRAIN="$BUNDLE/training_data"
+if [ -d "$TRAIN" ]; then
+  mkdir -p "$TRAIN/resolved"
+  python3 - "$TRAIN" "$BUNDLE" <<'RESOLVE'
+import sys
+from pathlib import Path
+import pandas as pd
+train, bundle = Path(sys.argv[1]), sys.argv[2]
+bad = 0
+for src in sorted(train.glob("*.parquet")):
+    frame = pd.read_parquet(src)
+    frame["cif_path"] = [str(p).replace("@BUNDLE@", bundle) for p in frame["cif_path"]]
+    for path in frame["cif_path"]:
+        if not Path(path).is_file():
+            bad += 1
+    frame.to_parquet(train / "resolved" / src.name, index=False)
+    print(f"  {src.stem}: {len(frame)} row(s)")
+if bad:
+    raise SystemExit(f"{bad} structure path(s) do not resolve")
+RESOLVE
+  echo "== training manifests resolved -> $TRAIN/resolved =="
+fi
+
 # ----------------------------------------------------- 3b. FaMPNN 0.3
 FAMPNN="${FAMPNN_03:-}"
 if [ -z "$FAMPNN" ]; then

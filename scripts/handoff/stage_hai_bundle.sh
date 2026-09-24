@@ -148,6 +148,46 @@ if unresolved:
     raise SystemExit(f"{unresolved} prepared YAML(s) point outside the bundle")
 RETARGET
 
+echo "== training data: manifests + the structures they reference =="
+# The three manifests carry `cif_path` as a Marlowe absolute into
+# train_pool/cif_cache. Templated to @BUNDLE@ like the selection artifact
+# and the prepared target YAMLs, and only the referenced structures are
+# copied -- the cache holds 1056 files and these manifests need ~237.
+/users/yfsun/.venvs/proteoaa-stage4/bin/python - "$DATA" "$OUT" <<'TRAINDATA'
+import shutil, sys
+from pathlib import Path
+import pandas as pd
+
+data_root, out = Path(sys.argv[1]), Path(sys.argv[2])
+src = data_root / "runs/integrated_feedback_v1/data"
+dst = out / "training_data"
+(dst / "structures").mkdir(parents=True, exist_ok=True)
+
+wanted, rows = set(), 0
+for name in ("train_pdb", "validation", "calibration_pdb"):
+    frame = pd.read_parquet(src / f"{name}.parquet")
+    new = []
+    for path in frame["cif_path"]:
+        leaf = Path(str(path)).name
+        wanted.add(str(path))
+        new.append(f"@BUNDLE@/training_data/structures/{leaf}")
+    frame["cif_path"] = new
+    frame.to_parquet(dst / f"{name}.parquet", index=False)
+    rows += len(frame)
+    print(f"  {name}: {len(frame)} row(s) templated")
+
+missing = 0
+for path in sorted(wanted):
+    source = Path(path)
+    if not source.is_file():
+        missing += 1
+        continue
+    shutil.copy2(source, dst / "structures" / source.name)
+print(f"  {len(wanted) - missing} structure(s) copied for {rows} manifest row(s)")
+if missing:
+    raise SystemExit(f"{missing} referenced structure(s) missing on this cluster")
+TRAINDATA
+
 echo "== provenance =="
 copy "$IFB/acceptance/acceptance.json" reports/acceptance.json
 copy "$IFB/data/audit.json" reports/data_audit.json

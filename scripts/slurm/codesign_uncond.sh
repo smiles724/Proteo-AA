@@ -50,7 +50,8 @@ nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 python scripts/codesign_uncond.py \
     --samples-dir "$SAMPLES" \
     --out "$OUT" \
-    --fampnn-weights 0.3 \
+    --fampnn-weights "${FAMPNN:-0.3}" \
+    ${ADAPTERS:+--adapters "$ADAPTERS" --sigma-b "${SIGMA_B:?set SIGMA_B with ADAPTERS}" --pxdesign-donor "${DONOR:?set DONOR with ADAPTERS}"} \
     --seq-steps 100 \
     --temperature 0.1 \
     --psce-threshold 0.3 \

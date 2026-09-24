@@ -36,17 +36,24 @@ MAX_STEPS="${MAX_STEPS:-2000}"
 
 cd "$ROOT"
 mkdir -p "$OUTROOT" "$DATA/runs/logs/pxf_ifb"
-export PATH="/users/yfsun/.venvs/pxdesign_official/bin:$PATH"
-export PYTHONPATH="$ROOT:/users/yfsun/pxdesign_pristine:$ROOT/fampnn"
-export PROTENIX_ROOT_DIR="${PROTENIX_ROOT_DIR:-$DATA/official_release_data}"
-export PROTENIX_DATA_ROOT_DIR="${PROTENIX_DATA_ROOT_DIR:-$DATA/official_release_data/ccd_cache}"
+# The VENDORED environment, not the official one. None of
+# cache/train/eval_integrated_feedback.py calls require_official_protenix --
+# the cache's own docstring says its states are VERIFIED AGAINST the official
+# runtime, not produced by it -- and the original cache runs (497447/497448)
+# went through proteoaa-stage4. Copying the official wrapper's env block here
+# cost nine failed submissions: pxdesign_official has no pyarrow, so
+# pd.read_parquet on the manifest died in seven seconds.
+PXF_PYTHON_ENV="${PXF_PYTHON_ENV:-/users/yfsun/.venvs/proteoaa-stage4}"
+export PATH="$PXF_PYTHON_ENV/bin:$PATH"
+export PYTHONPATH="$ROOT:$ROOT/PXDesign:$ROOT/Protenix:$ROOT/fampnn"
+export PROTENIX_ROOT_DIR="${PROTENIX_ROOT_DIR:-$DATA/protenix_data}"
+export PROTENIX_DATA_ROOT_DIR="${PROTENIX_DATA_ROOT_DIR:-$DATA/protenix_data/common}"
 export PROTEOAA_ROOT="${PROTEOAA_ROOT:-/users/yfsun/proteo-aa-pxdesign-train}"
 export PROTEOAA_METRICS_ROOT="${PROTEOAA_METRICS_ROOT:-/users/yfsun/proteo-aa-pxdesign-train}"
 export LAYERNORM_TYPE=torch PYTHONUNBUFFERED=1 TQDM_DISABLE=1
 export TRITON_CACHE_DIR="${TMPDIR:-/tmp}/triton-${SLURM_JOB_ID:-local}"
 
 echo "node=$(hostname) job=${SLURM_JOB_ID:-?} EVENT_SIGMA=$SIGMA out=$OUTROOT"
-python -c "from pxf.official.require import official_protenix_available as a; print('official:', a())"
 
 # ---- caches, one per A_BS seed ----------------------------------------
 for S in 0 1; do

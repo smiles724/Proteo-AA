@@ -44,6 +44,11 @@ def main() -> None:
                         help="attention chunking; lower if OOM")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--csv-name", default=None,
+                        help="basename of the per-run CSV; defaults to "
+                             "refolds.<shard-index>.csv. Set this when a run "
+                             "shares --out with an earlier one, so its rows "
+                             "land beside the old ones instead of over them.")
     args = parser.parse_args()
 
     import torch
@@ -54,6 +59,15 @@ def main() -> None:
 
     with open(args.sequences, newline="") as handle:
         rows = [r for r in csv.DictReader(handle) if r.get("sequence")]
+    # shard-index selects a partition; it is NOT a free-form run label. With
+    # --shard-count 1 the only index that selects anything is 0, so a run
+    # given a higher index to keep its CSV from colliding folds nothing at
+    # all and still exits 0. Use --csv-name for that; fail loudly here.
+    if not 0 <= args.shard_index < args.shard_count:
+        raise SystemExit(
+            f"--shard-index {args.shard_index} is out of range for "
+            f"--shard-count {args.shard_count} (expected 0..{args.shard_count - 1}); "
+            f"to write a separate CSV into a shared --out, use --csv-name")
     rows = [r for i, r in enumerate(rows) if i % args.shard_count == args.shard_index]
     todo = [r for r in rows
             if not (out / "pdb" / f"{r['fold_id']}.pdb").is_file()]
@@ -96,7 +110,7 @@ def main() -> None:
         if index % 25 == 0 or index == len(todo):
             print(f"  {index}/{len(todo)}  {time.time() - started:.0f}s")
 
-    path = out / f"refolds.{args.shard_index}.csv"
+    path = out / (args.csv_name or f"refolds.{args.shard_index}.csv")
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["fold_id", "plddt", "length"])
         writer.writeheader()

@@ -29,7 +29,18 @@ Two choices here are load-bearing and easy to get wrong:
 
 Normalisation: TM-score is asymmetric, and we want "how much of MY structure
 is explained by a known one", so the query-normalised value is the one to
-read. foldseek's alntmscore is query-normalised.
+read. That is qtmscore. foldseek normalises alntmscore by ALIGNMENT length,
+qtmscore by query length and ttmscore by target length (see
+structureconvertalis.cpp), so alntmscore is NOT query-normalised and must
+not be substituted here. Confirm the comparison benchmark normalises the
+same way before putting these numbers beside its own.
+
+Search protocol: without --exhaustive, foldseek prefilters, so the result is
+the maximum over RETURNED CANDIDATES, not over the database. That maximum is
+a lower bound on the true nearest neighbour, which makes novelty an UPPER
+bound. Measured on the 20 least-similar samples of one run, exhaustive
+search raised max TM for 15 of 20, by up to +0.2028. Treat filtered-search
+novelty as an upper bound and say so, or pass --exhaustive.
 """
 from __future__ import annotations
 
@@ -69,6 +80,10 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--exhaustive", action="store_true",
                         help="disable prefilter; slower, no missed neighbours")
+    parser.add_argument("--reuse-hits", action="store_true",
+                        help="re-aggregate an existing hits.tsv instead of "
+                             "searching again; postprocessing fixes can be "
+                             "applied without spending the search")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -106,72 +121,124 @@ def main() -> None:
            "--threads", str(args.threads)]
     if args.exhaustive:
         cmd += ["--exhaustive-search", "1"]
-    print(" ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise SystemExit(f"foldseek failed:\n{result.stderr[-2000:]}")
+    if args.reuse_hits and hits.is_file():
+        print(f"reusing {hits} ({hits.stat().st_size} bytes); not searching")
+    else:
+        print(" ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(f"foldseek failed:\n{result.stderr[-2000:]}")
 
+    queries = sorted({p.stem for p in query_dir.iterdir()
+                      if p.suffix in (".cif", ".pdb")})
+    known = set(queries)
+
+    # foldseek may report a query as the bare stem or with a chain/model
+    # suffix appended. Map explicitly and reject anything unrecognised: a
+    # silent miss here turns a real hit into "no neighbour found", which the
+    # old code then scored as maximum novelty.
     best: dict[str, tuple[float, str]] = {}
+    unmapped: set[str] = set()
     with hits.open() as handle:
         for line in handle:
             parts = line.rstrip("\n").split("\t")
             if len(parts) < 4:
                 continue
             query, target = parts[0], parts[1]
-            sample_id = Path(query).stem
+            stem = Path(query).stem
+            if stem in known:
+                sample_id = stem
+            else:
+                candidates = [q for q in known if stem.startswith(q)]
+                if len(candidates) != 1:
+                    unmapped.add(query)
+                    continue
+                sample_id = candidates[0]
             try:
                 tm = float(parts[3])          # qtmscore: query-normalised
             except ValueError:
                 continue
             if sample_id not in best or tm > best[sample_id][0]:
                 best[sample_id] = (tm, target)
+    if unmapped:
+        raise SystemExit(
+            f"{len(unmapped)} foldseek query id(s) did not map to a staged "
+            f"sample, e.g. {sorted(unmapped)[:5]}. Refusing to score: an "
+            f"unmapped hit is indistinguishable from no neighbour, and would "
+            f"be counted as maximally novel.")
 
-    queries = sorted({p.stem for p in query_dir.iterdir()
-                      if p.suffix in (".cif", ".pdb")})
+    # An unresolved query is NOT a novel one. No returned hit can mean a
+    # missed candidate, an unparsed structure or an id mismatch; it does not
+    # establish zero similarity. Carry it as missing and exclude it from the
+    # aggregate rather than scoring it 0.0 / novelty 1.0.
     rows = []
     for sample_id in queries:
-        tm, target = best.get(sample_id, (0.0, ""))
+        hit = best.get(sample_id)
+        tm = hit[0] if hit else None
         rows.append({"sample_id": sample_id,
                      "length": int(sample_id.split("_")[0].lstrip("L")),
-                     "max_tm": round(tm, 4),
-                     "novelty": round(1.0 - tm, 4),
-                     "nearest": target,
-                     "had_hit": bool(target)})
+                     "max_tm": None if tm is None else round(tm, 4),
+                     "novelty": None if tm is None else round(1.0 - tm, 4),
+                     "nearest": hit[1] if hit else "",
+                     "resolved": hit is not None,
+                     "_tm": tm})              # full precision, for stats
 
     with (out / "per_sample_novelty.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=["sample_id", "length", "max_tm", "novelty",
-                        "nearest", "had_hit"])
+                        "nearest", "resolved"],
+            extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
     def block(subset):
-        tms = [r["max_tm"] for r in subset]
+        # Full-precision values: classifying on the rounded column would put
+        # a true 0.49996 on the wrong side of a 0.5 threshold.
+        tms = [r["_tm"] for r in subset if r["_tm"] is not None]
+        unresolved = sum(1 for r in subset if r["_tm"] is None)
         if not tms:
-            return None
+            return {"n": 0, "unresolved": unresolved}
         return {
             "n": len(tms),
+            "unresolved": unresolved,
             "mean_max_tm": round(statistics.mean(tms), 4),
             "median_max_tm": round(statistics.median(tms), 4),
+            "min_max_tm": round(min(tms), 4),
             "mean_novelty": round(1.0 - statistics.mean(tms), 4),
             "pct_novel": round(
                 100.0 * sum(t < args.novel_threshold for t in tms) / len(tms), 2),
-            "no_hit": sum(1 for r in subset if not r["had_hit"]),
         }
 
     by_length = {}
     for length in sorted({r["length"] for r in rows}):
         by_length[str(length)] = block([r for r in rows if r["length"] == length])
 
+    unresolved = [r["sample_id"] for r in rows if r["_tm"] is None]
     summary = {
         "n_queries": len(rows),
         "filtered_to_designable": keep is not None,
         "novel_threshold_max_tm": args.novel_threshold,
         "alignment": "tmalign",
+        "tm_column": "qtmscore (query-normalised)",
+        "exhaustive_search": bool(args.exhaustive),
+        "search_is_database_wide_maximum": bool(args.exhaustive),
+        "database": args.db,
+        "foldseek_version": subprocess.run(
+            [args.foldseek, "version"], capture_output=True,
+            text=True).stdout.strip(),
+        "command": " ".join(cmd),
+        "unresolved_queries": unresolved,
         "pooled": block(rows),
         "by_length": by_length,
     }
+    if unresolved:
+        print(f"WARNING: {len(unresolved)} quer(ies) returned no hit and are "
+              f"EXCLUDED from the aggregate, not scored as novel: "
+              f"{unresolved[:5]}. Resolve these before reporting.")
+    if not args.exhaustive:
+        print("NOTE: filtered search -- max TM is over returned candidates, "
+              "so it is a lower bound and novelty is an UPPER bound.")
     (out / "summary_novelty.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
 

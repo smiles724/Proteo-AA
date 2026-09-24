@@ -21,5 +21,6 @@ python scripts/uncond/novelty.py \
   --db /hai/scratch/yfsun/foldseek_db/pdb \
   --out "${NOV_OUT:?set NOV_OUT}" \
   --threads "${SLURM_CPUS_PER_TASK:-16}" \
-  ${PER_SAMPLE:+--per-sample "$PER_SAMPLE"}
+  ${PER_SAMPLE:+--per-sample "$PER_SAMPLE"} \
+  ${EXHAUSTIVE:+--exhaustive} ${REUSE_HITS:+--reuse-hits}
 status=$?; echo "EXIT=$status"; exit $status

@@ -168,14 +168,26 @@ def main() -> None:
                 continue
             generated = load(samples[sample_id])
             rows.sort(key=lambda r: float(r["score"]))   # best first, for @1
-            values = []
-            for row in rows:
+            values, top = [], None
+            for rank, row in enumerate(rows):
                 pdb = refolds / f"{row['fold_id']}.pdb"
                 if not pdb.is_file():
                     continue
-                values.append(scrmsd(generated, load(pdb)))
+                value = scrmsd(generated, load(pdb))
+                values.append(value)
+                if rank == 0:
+                    top = value
             if values:
-                per_sample[sample_id]["pmpnn1_scrmsd"] = values[0]
+                # @1 is the scRMSD of the BEST-SCORING sequence, so it is
+                # defined only when that sequence actually folded. Reading
+                # values[0] instead would take the first SURVIVING rank -- on
+                # a partially complete refold directory (the scorer is
+                # shardable and caches by fold_id, so that state is normal)
+                # it silently substitutes rank 2, or 5, and still returns a
+                # plausible number. Leaving it unset surfaces as a smaller n
+                # in the summary, which is the honest failure mode.
+                if top is not None:
+                    per_sample[sample_id]["pmpnn1_scrmsd"] = top
                 per_sample[sample_id]["pmpnn8_scrmsd"] = float(np.nanmin(values))
                 per_sample[sample_id]["pmpnn_n"] = len(values)
 

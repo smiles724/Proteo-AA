@@ -70,8 +70,21 @@ def main() -> None:
         pdb = to_pdb(path, scratch)
         model.prep_inputs(pdb_filename=str(pdb))
         model.set_seed(args.seed)
-        out = model.sample(num=args.num_seqs, batch=args.num_seqs,
+        # ColabDesign's sample(num, batch) loops `num` times over
+        # sample_parallel(batch) and concatenates, so it returns num * batch
+        # sequences -- num=batch=8 silently produced 64 per backbone, which
+        # both inflates PMPNN@8 (nanmin over 64 candidates, not 8) and costs
+        # 8x the folds downstream. One parallel batch of num_seqs is what the
+        # benchmark asks for.
+        out = model.sample(num=1, batch=args.num_seqs,
                            temperature=args.temperature)
+        got = len(out["seq"])
+        if got != args.num_seqs:
+            raise SystemExit(
+                f"{path.stem}: asked for {args.num_seqs} sequences, got {got}. "
+                "PMPNN@N is defined over exactly N candidates; refusing to "
+                "write a table that would be scored as if it were."
+            )
         # `sample` returns one entry per design; score is the negative
         # log-likelihood ColabDesign reports, kept for ordering PMPNN@1.
         for k, (seq, score) in enumerate(zip(out["seq"], out["score"])):

@@ -45,7 +45,7 @@ for a in "$@"; do case "$a" in
 esac; done
 
 rm -rf "$OUT"
-mkdir -p "$OUT"/{checkpoints/bs_seq_sc,checkpoints/feedback,checkpoints/donors,selection,targets,reports,repo}
+mkdir -p "$OUT"/{checkpoints/bs_seq_sc,checkpoints/feedback,checkpoints/donors,checkpoints/monomer,selection,targets,reports,repo}
 
 copy () {  # copy <src> <dst-relative>; fail loudly on a missing input
   local src="$1" dst="$OUT/$2"
@@ -164,10 +164,28 @@ git -C "$ROOT" remote get-url origin > "$OUT/repo/ORIGIN"
   && copy "$ROOT/patches/pxdesign_vendored_embedders_d_lm.patch" repo/pxdesign_vendored_embedders_d_lm.patch
 
 if [ "$WITH_DONORS" = 1 ]; then
-  echo "== donors (531M + 42M) =="
+  echo "== donors =="
   copy "$DATA/component_donors/pxdesign_v0.1.0.pt" checkpoints/donors/pxdesign_v0.1.0.pt
   copy "$ROOT/fampnn/weights/fampnn_0_3.pt" checkpoints/donors/fampnn_0_3.pt
+  # 0.0 as well. The MONOMER adapter line (couple_phase1, pxf_early_cond) was
+  # fit against 0.0, and shipping only 0.3 would leave the receiving cluster
+  # able to load those adapters against a donor they never saw -- which loads
+  # cleanly and measures nothing.
+  copy "$ROOT/fampnn/weights/fampnn_0_0.pt" checkpoints/donors/fampnn_0_0.pt
 fi
+
+echo "== monomer (AFDB) adapter line, for unconditional work =="
+# A_BS and the E1 arms fit on AFDB monomers rather than PINDER complexes.
+# Unconditional generation produces monomers, so this is the matched line
+# there; J03/S03 have never seen one.
+copy "$DATA/runs/couple_phase1/checkpoints/final.pt" \
+     checkpoints/monomer/A_BS_couple_phase1_final.pt
+for arm in "$DATA"/runs/pxf_early_cond/*/checkpoints/final.pt; do
+  [ -f "$arm" ] || continue
+  name=$(basename "$(dirname "$(dirname "$arm")")")
+  copy "$arm" "checkpoints/monomer/${name}_final.pt"
+  echo "  $name $(sha256sum "$arm" | cut -c1-16)"
+done
 if [ "$WITH_RELEASE" = 1 ]; then
   echo "== official_release_data (549M) =="
   copy "$DATA/official_release_data" official_release_data
